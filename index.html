@@ -17,13 +17,32 @@
   <p id="loginError" style="color:#b23b3b; font-size:0.8rem;"></p>
 </div>
 
+<div id="noAccessScreen" class="login-wrap card" style="display:none;">
+  <h2><span class="dot"></span>No access yet</h2>
+  <p style="color:var(--muted); font-size:0.85rem; line-height:1.5;">
+    Your account is signed in but hasn't been given a role. Ask the admin to add your email
+    to the submitters or managers list in Firestore.
+  </p>
+</div>
+
 <div id="appRoot" style="display:none;">
 
 <div class="topbar">
   <img id="topbarLogo" src="" alt="Naisi Foods">
   <div class="titles">
-    <h1>Invoice Generator</h1>
+    <h1 id="appTitle">Invoice Generator</h1>
     <p>Naisi Foods · Sales Invoices</p>
+  </div>
+</div>
+
+<div id="invoiceListSection" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span><span id="listTitle">Invoices</span></h2>
+    <table class="items-table" id="invoiceListTable" style="width:100%;">
+      <thead id="invoiceListHead"></thead>
+      <tbody id="invoiceListBody"></tbody>
+    </table>
+    <p id="invoiceListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No invoices yet.</p>
   </div>
 </div>
 
@@ -32,6 +51,12 @@
 
     <div class="card">
       <h2><span class="dot"></span>Invoice details</h2>
+
+      <div id="editingBanner" style="display:none; background:#fff4e0; border:1px solid var(--amber); border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:0.8rem; color:#7a5210;">
+        Editing <strong id="editingInvoiceNoLabel"></strong> —
+        <a href="#" id="cancelEditBtn" style="color:#7a5210;">Cancel and start new</a>
+      </div>
+
       <div class="field">
         <label>Invoice No. <span class="auto-tag">auto</span></label>
         <input type="text" id="invoiceNo" readonly>
@@ -44,7 +69,7 @@
           <div class="field"><label>Year</label><input type="text" id="invYear" maxlength="4"></div>
           <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
         </div>
-        <p class="numbering-hint">Set "Next No." once, then it saves to Firestore and increments automatically every time you download a PDF.</p>
+        <p class="numbering-hint">Set "Next No." once, then it saves to Firestore and increments automatically every time you download a new PDF.</p>
       </div>
 
       <div class="row2">
@@ -92,7 +117,7 @@
     </div>
 
     <button class="generate-btn" id="generateBtn" type="button">Download PDF Invoice</button>
-    <p class="actions-note">Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.</p>
+    <p class="actions-note" id="generateNote">Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.</p>
   </div>
 
   <div class="preview-wrap">

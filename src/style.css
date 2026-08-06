@@ -96,3 +96,15 @@ table.pv-items tbody td.num{text-align:right; font-family:'JetBrains Mono',monos
 .gen-footer{text-align:center; margin-top:8px; font-size:0.62rem; color:var(--muted);}
 .actions-note{font-size:0.72rem; color:var(--muted); text-align:center; margin-top:10px; line-height:1.4;}
 .login-wrap{max-width:360px; margin:80px auto; padding:0 20px;}
+
+
+
+.list-section{max-width:1400px; margin:0 auto; padding:20px 30px 0;}
+.list-action-btn{
+  background:none; border:1px solid var(--leaf); color:var(--forest-2);
+  border-radius:6px; padding:4px 10px; font-size:0.74rem; font-weight:600;
+  cursor:pointer; margin-right:6px;
+}
+.list-action-btn:hover{background:#eef6ea;}
+#invoiceListTable th{font-size:0.66rem; text-transform:uppercase; color:var(--muted); text-align:left; padding:6px;}
+#invoiceListTable td{padding:6px; font-size:0.82rem; border-bottom:1px solid var(--line);}
