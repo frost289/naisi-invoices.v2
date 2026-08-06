@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Naisi Foods — Invoice Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap card" style="display:none;">
+  <h2><span class="dot"></span>Sign in</h2>
+  <div class="field"><label>Email</label><input type="email" id="loginEmail"></div>
+  <div class="field"><label>Password</label><input type="password" id="loginPassword"></div>
+  <button class="generate-btn" id="loginBtn" type="button">Sign In</button>
+  <p id="loginError" style="color:#b23b3b; font-size:0.8rem;"></p>
+</div>
+
+<div id="appRoot" style="display:none;">
+
+<div class="topbar">
+  <img id="topbarLogo" src="" alt="Naisi Foods">
+  <div class="titles">
+    <h1>Invoice Generator</h1>
+    <p>Naisi Foods · Sales Invoices</p>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="panel">
+
+    <div class="card">
+      <h2><span class="dot"></span>Invoice details</h2>
+      <div class="field">
+        <label>Invoice No. <span class="auto-tag">auto</span></label>
+        <input type="text" id="invoiceNo" readonly>
+      </div>
+
+      <div class="numbering-box">
+        <div class="numbering-label">Invoice numbering</div>
+        <div class="row3">
+          <div class="field"><label>Prefix</label><input type="text" id="invPrefix" value="NF-INV"></div>
+          <div class="field"><label>Year</label><input type="text" id="invYear" maxlength="4"></div>
+          <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
+        </div>
+        <p class="numbering-hint">Set "Next No." once, then it saves to Firestore and increments automatically every time you download a PDF.</p>
+      </div>
+
+      <div class="row2">
+        <div class="field"><label>Date</label><input type="date" id="invoiceDate"></div>
+        <div class="field">
+          <label>Terms</label>
+          <select id="terms">
+            <option value="CASH ON DELIVERY (COD)" selected>Cash on Delivery (COD)</option>
+            <option value="CASH">Cash</option>
+            <option value="BANK TRANSFER">Bank Transfer</option>
+            <option value="MOBILE MONEY">Mobile Money</option>
+            <option value="NET 7">Net 7 days</option>
+            <option value="NET 30">Net 30 days</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Provider Phone</label><input type="tel" id="providerPhone" placeholder="e.g. 0999 000 000"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>Customer</h2>
+      <div class="field"><label>Customer Name</label><input type="text" id="custName" placeholder="e.g. Msowoya"></div>
+      <div class="row2">
+        <div class="field"><label>Phone</label><input type="tel" id="custPhone" placeholder="e.g. 0999 123 456"></div>
+        <div class="field"><label>Location</label><input type="text" id="custLocation" placeholder="e.g. Section 8"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>Items</h2>
+      <div class="quick-add-label">Quick add — tap a product</div>
+      <div class="quick-add-grid" id="quickAddGrid"></div>
+      <table class="items-table" id="itemsTable">
+        <thead>
+          <tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr>
+        </thead>
+        <tbody id="itemsBody"></tbody>
+      </table>
+      <button class="add-item-btn" id="addItemBtn" type="button">+ Add custom item</button>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>Notes (optional)</h2>
+      <textarea id="notes" placeholder="Any extra notes to print on the invoice..."></textarea>
+    </div>
+
+    <button class="generate-btn" id="generateBtn" type="button">Download PDF Invoice</button>
+    <p class="actions-note">Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.</p>
+  </div>
+
+  <div class="preview-wrap">
+    <div class="paper" id="paper">
+      <div class="paper-logo"><img id="previewLogo" src="" alt="Naisi Foods"></div>
+      <div class="paper-sub">Sales Invoice</div>
+      <div class="paper-provider" id="pv-providerPhone"></div>
+
+      <div class="inv-meta">
+        <div><div class="label">Invoice No.</div><div class="value" id="pv-invoiceNo">—</div></div>
+        <div><div class="label">Date</div><div class="value right" id="pv-date">—</div></div>
+      </div>
+      <hr class="divider">
+
+      <div class="bill-grid">
+        <div><div class="label">Customer</div><div class="value" id="pv-customer">—</div></div>
+        <div><div class="label">Phone</div><div class="value" id="pv-phone">—</div></div>
+        <div><div class="label">Location</div><div class="value" id="pv-location">—</div></div>
+        <div><div class="label">Terms</div><div class="value" id="pv-terms">CASH ON DELIVERY (COD)</div></div>
+      </div>
+
+      <table class="pv-items">
+        <thead><tr><th>Qty</th><th>Description</th><th class="num">Unit Price</th><th class="num">Total</th></tr></thead>
+        <tbody id="pv-itemsBody"></tbody>
+      </table>
+
+      <div class="total-row">
+        <div class="total-box"><div class="label">Grand Total</div><div class="amount" id="pv-grandTotal">MWK 0.00</div></div>
+      </div>
+
+      <div class="sig">Customer Signature:<div class="line"></div></div>
+      <div class="thankyou">Thank you for your business!</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
