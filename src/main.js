@@ -8,14 +8,17 @@ import { updatePreview, formatDate } from './preview.js';
 import { loadCounterState, buildInvoiceNo, incrementCounterAtomically, savePrefixYear } from './numbering.js';
 import { generatePdf } from './pdf.js';
 import {
-  fetchMyInvoices, fetchAllInvoices, fetchInvoicesByDateRange,
-  fetchInvoiceById, updateInvoice
+  fetchMyInvoicesPage, fetchAllInvoicesPage, fetchInvoicesByDateRangePage,
+  fetchInvoicesByDateRange, fetchInvoiceById, updateInvoice
 } from './invoices.js';
 import { buildAndDownloadInvoiceReport } from './export.js';
 import {
-  fetchAllCustomers, addCustomer, updateCustomer, findExactNameMatch
+  fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, findExactNameMatch
 } from './customers.js';
+import { showToast, setButtonLoading, clearButtonLoading, initOfflineBanner } from './ui.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+
+initOfflineBanner();
 
 const loginScreen = document.getElementById('loginScreen');
 const noAccessScreen = document.getElementById('noAccessScreen');
@@ -59,8 +62,7 @@ async function initApp(user, role) {
 
   document.getElementById('topbarLogo').src = LOGO_DATA_URI;
   document.getElementById('previewLogo').src = LOGO_DATA_URI;
-  document.getElementById('appTitle').textContent =
-    role === 'manager' ? 'Invoice Manager' : 'Invoice Generator';
+  document.getElementById('appTitle').textContent = role === 'manager' ? 'Invoice Manager' : 'Invoice Generator';
 
   const itemsBody = document.getElementById('itemsBody');
   const quickAddGrid = document.getElementById('quickAddGrid');
@@ -93,8 +95,6 @@ async function initApp(user, role) {
   const cancelEditBtn = document.getElementById('cancelEditBtn');
 
   let editingInvoiceId = null;
-  let currentInvoices = [];
-  let customersCache = [];
 
   // ============= VIEW SWITCHING =============
   const formView = document.getElementById('formView');
@@ -117,15 +117,14 @@ async function initApp(user, role) {
     navCustomersBtn.classList.toggle('active', view === 'customers');
   }
   navFormBtn.addEventListener('click', () => showView('form'));
-  navInvoicesBtn.addEventListener('click', async () => { showView('invoices'); await renderInvoiceList(); });
-  navCustomersBtn.addEventListener('click', async () => { showView('customers'); await renderCustomerList(); });
+  navInvoicesBtn.addEventListener('click', async () => { showView('invoices'); await resetAndLoadInvoices(); });
+  navCustomersBtn.addEventListener('click', async () => { showView('customers'); await resetAndLoadCustomers(); });
   showView('form');
 
-  // ============= CUSTOMERS: load + autocomplete =============
-  async function loadCustomers() {
-    customersCache = await fetchAllCustomers();
-  }
-  await loadCustomers();
+  // ============= CUSTOMERS: autocomplete cache (full fetch, unrelated to pagination) =============
+  let customersCache = [];
+  async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
+  await loadCustomersCache();
 
   const custSuggestions = document.getElementById('custSuggestions');
   const saveCustomerBtn = document.getElementById('saveCustomerBtn');
@@ -143,19 +142,16 @@ async function initApp(user, role) {
   }
 
   els.custName.addEventListener('input', () => {
-    const query = els.custName.value.trim().toLowerCase();
+    const q = els.custName.value.trim().toLowerCase();
     customerSaveNote.textContent = '';
-    if (!query) { custSuggestions.style.display = 'none'; return; }
-    const matches = customersCache.filter(c => (c.name || '').toLowerCase().includes(query));
-    renderSuggestions(matches);
+    if (!q) { custSuggestions.style.display = 'none'; return; }
+    renderSuggestions(customersCache.filter(c => (c.name || '').toLowerCase().includes(q)));
   });
 
   els.custName.addEventListener('blur', () => {
-    // Small delay so a click on a suggestion registers before the dropdown hides.
     setTimeout(() => { custSuggestions.style.display = 'none'; }, 150);
   });
 
-  // mousedown fires before blur, so selecting a suggestion works reliably.
   custSuggestions.addEventListener('mousedown', (e) => {
     const item = e.target.closest('.suggestion-item');
     if (!item) return;
@@ -170,7 +166,7 @@ async function initApp(user, role) {
 
   saveCustomerBtn.addEventListener('click', async () => {
     const name = els.custName.value.trim();
-    if (!name) { alert('Enter a customer name first.'); return; }
+    if (!name) { showToast('Enter a customer name first.', 'error'); return; }
 
     const existing = findExactNameMatch(customersCache, name);
     if (existing) {
@@ -183,31 +179,35 @@ async function initApp(user, role) {
       }
     }
 
+    setButtonLoading(saveCustomerBtn, 'Saving…');
     try {
-      await addCustomer({
-        name,
-        phone: els.custPhone.value.trim(),
-        location: els.custLocation.value.trim(),
-        uid: user.uid,
-      });
+      await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), uid: user.uid });
       customerSaveNote.textContent = 'Saved to customer list.';
-      await loadCustomers();
+      showToast('Customer saved.', 'success');
+      await loadCustomersCache();
     } catch (err) {
       console.error(err);
-      alert('Could not save the customer: ' + err.message);
+      showToast('Could not save the customer: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(saveCustomerBtn);
     }
   });
 
-  // ============= CUSTOMERS: manage/edit list =============
+  // ============= CUSTOMERS: paginated manage list =============
   const customerListBody = document.getElementById('customerListBody');
   const customerListEmpty = document.getElementById('customerListEmpty');
+  const loadMoreCustomersBtn = document.getElementById('loadMoreCustomersBtn');
+  const customerSearchInput = document.getElementById('customerSearchInput');
+  const customerSearchHint = document.getElementById('customerSearchHint');
 
-  async function renderCustomerList() {
-    await loadCustomers();
+  let loadedCustomers = [];
+  let customersCursor = null;
+  let customersHasMore = true;
+
+  function renderCustomerRows(list) {
     customerListBody.innerHTML = '';
-    customerListEmpty.style.display = customersCache.length === 0 ? 'block' : 'none';
-
-    customersCache.forEach(c => {
+    customerListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    list.forEach(c => {
       const tr = document.createElement('tr');
       tr.dataset.id = c.id;
       tr.innerHTML = `
@@ -220,6 +220,44 @@ async function initApp(user, role) {
     });
   }
 
+  function applyCustomerSearchAndRender() {
+    const term = customerSearchInput.value.trim().toLowerCase();
+    const filtered = term ? loadedCustomers.filter(c => (c.name || '').toLowerCase().includes(term)) : loadedCustomers;
+    renderCustomerRows(filtered);
+    customerSearchHint.textContent = term
+      ? `Searching ${loadedCustomers.length} loaded customer${loadedCustomers.length === 1 ? '' : 's'}. Load more to search further.`
+      : '';
+  }
+
+  async function resetAndLoadCustomers() {
+    loadedCustomers = [];
+    customersCursor = null;
+    customersHasMore = true;
+    customerSearchInput.value = '';
+    await loadNextCustomerPage();
+  }
+
+  async function loadNextCustomerPage() {
+    if (!customersHasMore) return;
+    setButtonLoading(loadMoreCustomersBtn, 'Loading…');
+    try {
+      const result = await fetchCustomersPage(customersCursor);
+      loadedCustomers = loadedCustomers.concat(result.items);
+      customersCursor = result.lastDoc;
+      customersHasMore = result.hasMore;
+      applyCustomerSearchAndRender();
+      loadMoreCustomersBtn.style.display = customersHasMore ? 'block' : 'none';
+    } catch (err) {
+      console.error(err);
+      showToast('Could not load customers: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(loadMoreCustomersBtn);
+    }
+  }
+
+  loadMoreCustomersBtn.addEventListener('click', loadNextCustomerPage);
+  customerSearchInput.addEventListener('input', applyCustomerSearchAndRender);
+
   customerListBody.addEventListener('click', async (e) => {
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
@@ -227,7 +265,7 @@ async function initApp(user, role) {
     const id = tr.dataset.id;
 
     if (btn.dataset.action === 'edit') {
-      const customer = customersCache.find(c => c.id === id);
+      const customer = loadedCustomers.find(c => c.id === id);
       if (!customer) return;
       tr.innerHTML = `
         <td><input class="customer-edit-input" data-field="name" value="${customer.name || ''}"></td>
@@ -239,18 +277,25 @@ async function initApp(user, role) {
         </td>
       `;
     } else if (btn.dataset.action === 'cancel') {
-      await renderCustomerList();
+      applyCustomerSearchAndRender();
     } else if (btn.dataset.action === 'save') {
       const name = tr.querySelector('[data-field="name"]').value.trim();
       const phone = tr.querySelector('[data-field="phone"]').value.trim();
       const location = tr.querySelector('[data-field="location"]').value.trim();
-      if (!name) { alert('Name cannot be empty.'); return; }
+      if (!name) { showToast('Name cannot be empty.', 'error'); return; }
+
+      setButtonLoading(btn, 'Saving…');
       try {
         await updateCustomer(id, { name, phone, location });
-        await renderCustomerList();
+        const idx = loadedCustomers.findIndex(c => c.id === id);
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], name, phone, location };
+        await loadCustomersCache(); // keep autocomplete in sync too
+        applyCustomerSearchAndRender();
+        showToast('Customer updated.', 'success');
       } catch (err) {
         console.error(err);
-        alert('Could not update the customer: ' + err.message);
+        showToast('Could not update the customer: ' + err.message, 'error');
+        clearButtonLoading(btn);
       }
     }
   });
@@ -359,6 +404,8 @@ async function initApp(user, role) {
   cancelEditBtn.addEventListener('click', (e) => { e.preventDefault(); exitEditMode(); });
 
   generateBtn.addEventListener('click', async () => {
+    const wasEditing = !!editingInvoiceId;
+    setButtonLoading(generateBtn, wasEditing ? 'Saving…' : (role === 'manager' ? 'Generating…' : 'Submitting…'));
     try {
       const items = getItems(itemsBody);
       const meta = {
@@ -383,6 +430,7 @@ async function initApp(user, role) {
       if (editingInvoiceId) {
         await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
         exitEditMode();
+        showToast('Invoice updated.', 'success');
       } else {
         await addDoc(collection(db, 'invoices'), {
           ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
@@ -391,23 +439,35 @@ async function initApp(user, role) {
         document.getElementById('invCounter').value = next.counter;
         refreshInvoiceNoField();
         refreshPreview();
+        showToast(role === 'manager' ? 'Invoice saved and downloaded.' : 'Invoice submitted.', 'success');
       }
     } catch (err) {
       console.error(err);
-      alert('Could not save the invoice: ' + err.message);
+      showToast('Could not save the invoice: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(generateBtn);
     }
   });
 
-  // ============= Invoice list =============
+  // ============= INVOICES: paginated list =============
   const listTitle = document.getElementById('listTitle');
   const listHead = document.getElementById('invoiceListHead');
   const listBody = document.getElementById('invoiceListBody');
   const listEmpty = document.getElementById('invoiceListEmpty');
+  const loadMoreInvoicesBtn = document.getElementById('loadMoreInvoicesBtn');
+  const invoiceSearchInput = document.getElementById('invoiceSearchInput');
+  const invoiceSearchHint = document.getElementById('invoiceSearchHint');
 
-  function renderRows(invoices) {
+  let invoiceListMode = 'default'; // 'default' | 'range'
+  let invoiceRangeFrom = null, invoiceRangeTo = null;
+  let loadedInvoices = [];
+  let invoicesCursor = null;
+  let invoicesHasMore = true;
+
+  function renderInvoiceRows(list) {
     listBody.innerHTML = '';
-    listEmpty.style.display = invoices.length === 0 ? 'block' : 'none';
-    invoices.forEach(inv => {
+    listEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    list.forEach(inv => {
       const tr = document.createElement('tr');
       const baseCells = `
         <td>${inv.invoiceNo}</td><td>${formatDate(inv.date)}</td>
@@ -426,46 +486,108 @@ async function initApp(user, role) {
     });
   }
 
-  async function renderInvoiceList() {
-    if (role === 'manager') {
-      listTitle.textContent = 'All Invoices';
-      listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th><th></th></tr>`;
-      currentInvoices = await fetchAllInvoices();
-    } else {
-      listTitle.textContent = 'My Submitted Invoices';
-      listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th></tr>`;
-      currentInvoices = await fetchMyInvoices(user.uid);
-    }
-    renderRows(currentInvoices);
+  function applyInvoiceSearchAndRender() {
+    const term = invoiceSearchInput.value.trim().toLowerCase();
+    const filtered = term
+      ? loadedInvoices.filter(inv =>
+          (inv.invoiceNo || '').toLowerCase().includes(term) ||
+          (inv.customer || '').toLowerCase().includes(term))
+      : loadedInvoices;
+    renderInvoiceRows(filtered);
+    invoiceSearchHint.textContent = term
+      ? `Searching ${loadedInvoices.length} loaded invoice${loadedInvoices.length === 1 ? '' : 's'}. Load more to search further back.`
+      : '';
   }
+
+  async function resetAndLoadInvoices() {
+    invoiceListMode = 'default';
+    loadedInvoices = [];
+    invoicesCursor = null;
+    invoicesHasMore = true;
+    invoiceSearchInput.value = '';
+    listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
+    listHead.innerHTML = role === 'manager'
+      ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th><th></th></tr>`
+      : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th></tr>`;
+    await loadNextInvoicePage();
+  }
+
+  async function loadNextInvoicePage() {
+    if (!invoicesHasMore) return;
+    setButtonLoading(loadMoreInvoicesBtn, 'Loading…');
+    try {
+      let result;
+      if (invoiceListMode === 'range') {
+        result = await fetchInvoicesByDateRangePage(invoiceRangeFrom, invoiceRangeTo, invoicesCursor);
+      } else if (role === 'manager') {
+        result = await fetchAllInvoicesPage(invoicesCursor);
+      } else {
+        result = await fetchMyInvoicesPage(user.uid, invoicesCursor);
+      }
+      loadedInvoices = loadedInvoices.concat(result.items);
+      invoicesCursor = result.lastDoc;
+      invoicesHasMore = result.hasMore;
+      applyInvoiceSearchAndRender();
+      loadMoreInvoicesBtn.style.display = invoicesHasMore ? 'block' : 'none';
+    } catch (err) {
+      console.error(err);
+      showToast('Could not load invoices: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(loadMoreInvoicesBtn);
+    }
+  }
+
+  loadMoreInvoicesBtn.addEventListener('click', loadNextInvoicePage);
+  invoiceSearchInput.addEventListener('input', applyInvoiceSearchAndRender);
 
   document.getElementById('applyFilterBtn').addEventListener('click', async () => {
     if (role !== 'manager') return;
     const from = document.getElementById('filterFrom').value;
     const to = document.getElementById('filterTo').value;
-    if (!from || !to) { alert('Pick both a From and To date.'); return; }
+    if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
+
+    invoiceListMode = 'range';
+    invoiceRangeFrom = from;
+    invoiceRangeTo = to;
+    loadedInvoices = [];
+    invoicesCursor = null;
+    invoicesHasMore = true;
+    invoiceSearchInput.value = '';
     listTitle.textContent = `Invoices: ${from} to ${to}`;
-    currentInvoices = await fetchInvoicesByDateRange(from, to);
-    renderRows(currentInvoices);
+    listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th><th></th></tr>`;
+    await loadNextInvoicePage();
   });
 
   document.getElementById('clearFilterBtn').addEventListener('click', async () => {
     if (role !== 'manager') return;
     document.getElementById('filterFrom').value = '';
     document.getElementById('filterTo').value = '';
-    await renderInvoiceList();
+    await resetAndLoadInvoices();
   });
 
   document.getElementById('exportBtn').addEventListener('click', async () => {
     if (role !== 'manager') return;
-    if (currentInvoices.length === 0) { alert('No invoices to export in the current view.'); return; }
-    const from = document.getElementById('filterFrom').value || 'all';
-    const to = document.getElementById('filterTo').value || 'dates';
+    const from = document.getElementById('filterFrom').value;
+    const to = document.getElementById('filterTo').value;
+    if (!from || !to) { showToast('Pick both a From and To date to export.', 'error'); return; }
+
+    const exportBtn = document.getElementById('exportBtn');
+    setButtonLoading(exportBtn, 'Building report…');
     try {
-      await buildAndDownloadInvoiceReport(currentInvoices, from, to);
+      // Deliberately fetches the FULL range fresh, independent of what's
+      // currently paginated on screen, so the export is always complete.
+      const fullRangeInvoices = await fetchInvoicesByDateRange(from, to);
+      if (fullRangeInvoices.length === 0) {
+        showToast('No invoices found in that range.', 'info');
+        return;
+      }
+      await buildAndDownloadInvoiceReport(fullRangeInvoices, from, to);
+      showToast('Report downloaded.', 'success');
     } catch (err) {
       console.error(err);
-      alert('Could not build the report: ' + err.message);
+      showToast('Could not build the report: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(exportBtn);
     }
   });
 
@@ -473,17 +595,27 @@ async function initApp(user, role) {
     if (role !== 'manager') return;
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
-    const inv = await fetchInvoiceById(btn.dataset.id);
-    if (!inv) return;
 
-    if (btn.dataset.action === 'edit') {
-      populateFormFromInvoice(inv);
-    } else if (btn.dataset.action === 'download') {
-      generatePdf({
-        invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer,
-        phone: inv.phone, location: inv.location, terms: inv.terms,
-        providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [],
-      });
+    setButtonLoading(btn, '…');
+    try {
+      const inv = await fetchInvoiceById(btn.dataset.id);
+      if (!inv) return;
+
+      if (btn.dataset.action === 'edit') {
+        populateFormFromInvoice(inv);
+      } else if (btn.dataset.action === 'download') {
+        generatePdf({
+          invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer,
+          phone: inv.phone, location: inv.location, terms: inv.terms,
+          providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [],
+        });
+        showToast('PDF downloaded.', 'success');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Something went wrong: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(btn);
     }
   });
 }

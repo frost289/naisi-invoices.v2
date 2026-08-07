@@ -9,6 +9,8 @@
 </head>
 <body>
 
+<div id="offlineBanner" class="offline-banner">You're offline — changes will save locally and sync once you're back online.</div>
+
 <div id="loginScreen" class="login-wrap card" style="display:none;">
   <h2><span class="dot"></span>Sign in</h2>
   <div class="field"><label>Email</label><input type="email" id="loginEmail"></div>
@@ -59,11 +61,17 @@
 
   <div class="card">
     <h2><span class="dot"></span><span id="listTitle">Invoices</span></h2>
+    <div class="field list-search">
+      <label>Search loaded invoices</label>
+      <input type="text" id="invoiceSearchInput" placeholder="Invoice no. or customer name...">
+      <p class="search-hint" id="invoiceSearchHint"></p>
+    </div>
     <table class="items-table" id="invoiceListTable" style="width:100%;">
       <thead id="invoiceListHead"></thead>
       <tbody id="invoiceListBody"></tbody>
     </table>
     <p id="invoiceListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No invoices yet.</p>
+    <button type="button" class="load-more-btn" id="loadMoreInvoicesBtn" style="display:none;">Load 25 more</button>
   </div>
 </div>
 
@@ -71,11 +79,17 @@
 <div id="customersView" class="list-section" style="display:none;">
   <div class="card">
     <h2><span class="dot"></span>Manage Customers</h2>
+    <div class="field list-search">
+      <label>Search loaded customers</label>
+      <input type="text" id="customerSearchInput" placeholder="Customer name...">
+      <p class="search-hint" id="customerSearchHint"></p>
+    </div>
     <table class="items-table" id="customerListTable" style="width:100%;">
       <thead><tr><th>Name</th><th>Phone</th><th>Location</th><th></th></tr></thead>
       <tbody id="customerListBody"></tbody>
     </table>
     <p id="customerListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No customers saved yet.</p>
+    <button type="button" class="load-more-btn" id="loadMoreCustomersBtn" style="display:none;">Load 25 more</button>
   </div>
 </div>
 
