@@ -5,7 +5,10 @@ import { watchAuth, login } from './auth.js';
 import { getUserRole } from './roles.js';
 import { addItemRow, buildQuickAddGrid, getItems, mwk } from './items.js';
 import { updatePreview, formatDate } from './preview.js';
-import { loadCounterState, buildInvoiceNo, incrementCounterAtomically, savePrefixYear } from './numbering.js';
+import {
+  loadCounterState, incrementCounterAtomically, watchCounterState,
+  buildInvoiceNo, currentYear, setCounterStart
+} from './numbering.js';
 import { generatePdf } from './pdf.js';
 import {
   fetchMyInvoicesPage, fetchAllInvoicesPage, fetchInvoicesByDateRangePage,
@@ -15,7 +18,10 @@ import { buildAndDownloadInvoiceReport } from './export.js';
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, findExactNameMatch
 } from './customers.js';
-import { showToast, setButtonLoading, clearButtonLoading, initOfflineBanner } from './ui.js';
+import {
+  showToast, setButtonLoading, clearButtonLoading,
+  initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView
+} from './ui.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
@@ -31,33 +37,41 @@ watchAuth(
     if (role === 'manager' || role === 'submitter') {
       noAccessScreen.style.display = 'none';
       appRoot.style.display = 'block';
-      initApp(user, role);
+      await initApp(user, role); // hides the overlay itself once fully ready
     } else {
       appRoot.style.display = 'none';
       noAccessScreen.style.display = 'block';
+      hideAppOverlay();
     }
   },
   () => {
     loginScreen.style.display = 'block';
     appRoot.style.display = 'none';
     noAccessScreen.style.display = 'none';
+    hideAppOverlay();
   }
 );
 
 document.getElementById('loginBtn').addEventListener('click', async () => {
   const email = document.getElementById('loginEmail').value.trim();
   const password = document.getElementById('loginPassword').value;
+  const btn = document.getElementById('loginBtn');
+  setButtonLoading(btn, 'Signing in…');
   try {
     await login(email, password);
+    showAppOverlay('Loading your workspace…');
   } catch (e) {
     document.getElementById('loginError').textContent = e.message;
+    showToast('Sign-in failed: ' + e.message, 'error');
+  } finally {
+    clearButtonLoading(btn);
   }
 });
 
 let appInitialized = false;
 
 async function initApp(user, role) {
-  if (appInitialized) return;
+  if (appInitialized) { hideAppOverlay(); return; }
   appInitialized = true;
 
   document.getElementById('topbarLogo').src = LOGO_DATA_URI;
@@ -96,7 +110,7 @@ async function initApp(user, role) {
 
   let editingInvoiceId = null;
 
-  // ============= VIEW SWITCHING =============
+  // ============= VIEW SWITCHING (with fade animation) =============
   const formView = document.getElementById('formView');
   const invoicesView = document.getElementById('invoicesView');
   const customersView = document.getElementById('customersView');
@@ -115,13 +129,57 @@ async function initApp(user, role) {
     navFormBtn.classList.toggle('active', view === 'form');
     navInvoicesBtn.classList.toggle('active', view === 'invoices');
     navCustomersBtn.classList.toggle('active', view === 'customers');
+    const active = view === 'form' ? formView : view === 'invoices' ? invoicesView : customersView;
+    fadeInView(active);
   }
   navFormBtn.addEventListener('click', () => showView('form'));
   navInvoicesBtn.addEventListener('click', async () => { showView('invoices'); await resetAndLoadInvoices(); });
   navCustomersBtn.addEventListener('click', async () => { showView('customers'); await resetAndLoadCustomers(); });
   showView('form');
 
-  // ============= CUSTOMERS: autocomplete cache (full fetch, unrelated to pagination) =============
+  // ============= NUMBERING: role-gated fields + live sync =============
+  const invPrefixInput = document.getElementById('invPrefix');
+  const invCounterInput = document.getElementById('invCounter');
+  const invYearDisplay = document.getElementById('invYearDisplay');
+  invYearDisplay.value = currentYear();
+
+  let unsubscribeCounter = null;
+
+  try {
+    await loadCounterState(role === 'manager');
+    unsubscribeCounter = watchCounterState((data) => {
+      invPrefixInput.value = data.prefix;
+      invCounterInput.value = data.counter;
+      invYearDisplay.value = currentYear();
+      if (!editingInvoiceId) {
+        els.invoiceNo.value = buildInvoiceNo(data.prefix, data.counter);
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    showToast(err.message, 'error');
+  }
+
+  if (role !== 'manager') {
+    invPrefixInput.disabled = true;
+    invCounterInput.disabled = true;
+  } else {
+    [invPrefixInput, invCounterInput].forEach(input => {
+      input.addEventListener('change', async () => {
+        const prefix = invPrefixInput.value.trim() || 'NF-INV';
+        const counter = parseInt(invCounterInput.value, 10) || 1;
+        try {
+          await setCounterStart(prefix, counter);
+          showToast('Numbering settings updated.', 'success');
+        } catch (err) {
+          console.error(err);
+          showToast('Could not update numbering: ' + err.message, 'error');
+        }
+      });
+    });
+  }
+
+  // ============= CUSTOMERS: autocomplete cache =============
   let customersCache = [];
   async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
   await loadCustomersCache();
@@ -289,7 +347,7 @@ async function initApp(user, role) {
         await updateCustomer(id, { name, phone, location });
         const idx = loadedCustomers.findIndex(c => c.id === id);
         if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], name, phone, location };
-        await loadCustomersCache(); // keep autocomplete in sync too
+        await loadCustomersCache();
         applyCustomerSearchAndRender();
         showToast('Customer updated.', 'success');
       } catch (err) {
@@ -317,32 +375,6 @@ async function initApp(user, role) {
     refreshPreview();
   });
 
-  let counterState = await loadCounterState();
-
-  function refreshInvoiceNoField() {
-    const prefix = document.getElementById('invPrefix').value.trim() || 'NF-INV';
-    const year = document.getElementById('invYear').value.trim() || String(new Date().getFullYear());
-    const counter = parseInt(document.getElementById('invCounter').value, 10) || 1;
-    els.invoiceNo.value = buildInvoiceNo(prefix, year, counter);
-  }
-
-  document.getElementById('invPrefix').value = counterState.prefix;
-  document.getElementById('invYear').value = counterState.year;
-  document.getElementById('invCounter').value = counterState.counter;
-  refreshInvoiceNoField();
-
-  ['invPrefix', 'invYear', 'invCounter'].forEach(id => {
-    document.getElementById(id).addEventListener('input', async () => {
-      refreshInvoiceNoField();
-      if (editingInvoiceId) return;
-      const prefix = document.getElementById('invPrefix').value.trim() || 'NF-INV';
-      const year = document.getElementById('invYear').value.trim() || String(new Date().getFullYear());
-      const counter = parseInt(document.getElementById('invCounter').value, 10) || 1;
-      await savePrefixYear(prefix, year, counter);
-      refreshPreview();
-    });
-  });
-
   const today = new Date();
   els.invoiceDate.value = today.toISOString().slice(0, 10);
   refreshPreview();
@@ -353,9 +385,8 @@ async function initApp(user, role) {
   });
 
   function populateFormFromInvoice(inv) {
-    document.getElementById('invPrefix').disabled = true;
-    document.getElementById('invYear').disabled = true;
-    document.getElementById('invCounter').disabled = true;
+    invPrefixInput.disabled = true;
+    invCounterInput.disabled = true;
     els.invoiceNo.value = inv.invoiceNo;
 
     els.invoiceDate.value = inv.date || '';
@@ -373,7 +404,7 @@ async function initApp(user, role) {
     editingInvoiceNoLabel.textContent = inv.invoiceNo;
     editingBanner.style.display = 'block';
     generateBtn.textContent = 'Save Changes';
-    generateNote.textContent = 'Updates this invoice in place. Does not change the invoice number or counter.';
+    generateNote.textContent = 'Updates this invoice in place. Does not touch the invoice numbering.';
 
     showView('form');
     refreshPreview();
@@ -386,9 +417,8 @@ async function initApp(user, role) {
     generateNote.textContent = role === 'submitter'
       ? 'Saves this invoice. A manager will handle printing/downloading it.'
       : 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
-    document.getElementById('invPrefix').disabled = false;
-    document.getElementById('invYear').disabled = false;
-    document.getElementById('invCounter').disabled = false;
+    invPrefixInput.disabled = role !== 'manager';
+    invCounterInput.disabled = role !== 'manager';
 
     itemsBody.innerHTML = '';
     els.custName.value = '';
@@ -397,7 +427,6 @@ async function initApp(user, role) {
     els.notes.value = '';
     els.providerPhone.value = '';
     els.invoiceDate.value = new Date().toISOString().slice(0, 10);
-    refreshInvoiceNoField();
     refreshPreview();
   }
 
@@ -408,8 +437,18 @@ async function initApp(user, role) {
     setButtonLoading(generateBtn, wasEditing ? 'Saving…' : (role === 'manager' ? 'Generating…' : 'Submitting…'));
     try {
       const items = getItems(itemsBody);
+      let invoiceNo = els.invoiceNo.value;
+
+      // Reserve the REAL number first — this is the single source of
+      // truth, not whatever happened to be displayed on screen.
+      let reservation = null;
+      if (!wasEditing) {
+        reservation = await incrementCounterAtomically();
+        invoiceNo = reservation.usedNo;
+      }
+
       const meta = {
-        invoiceNo: els.invoiceNo.value,
+        invoiceNo,
         date: els.invoiceDate.value,
         customer: els.custName.value || '-',
         phone: els.custPhone.value || '-',
@@ -427,7 +466,7 @@ async function initApp(user, role) {
         grandTotal = items.reduce((sum, it) => sum + it.total, 0);
       }
 
-      if (editingInvoiceId) {
+      if (wasEditing) {
         await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
         exitEditMode();
         showToast('Invoice updated.', 'success');
@@ -435,10 +474,10 @@ async function initApp(user, role) {
         await addDoc(collection(db, 'invoices'), {
           ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
         });
-        const { next } = await incrementCounterAtomically();
-        document.getElementById('invCounter').value = next.counter;
-        refreshInvoiceNoField();
-        refreshPreview();
+        // The live listener will also correct this if someone else has
+        // reserved a further number in the meantime — this is just the
+        // immediate local preview.
+        els.invoiceNo.value = buildInvoiceNo(reservation.next.prefix, reservation.next.counter);
         showToast(role === 'manager' ? 'Invoice saved and downloaded.' : 'Invoice submitted.', 'success');
       }
     } catch (err) {
@@ -458,7 +497,7 @@ async function initApp(user, role) {
   const invoiceSearchInput = document.getElementById('invoiceSearchInput');
   const invoiceSearchHint = document.getElementById('invoiceSearchHint');
 
-  let invoiceListMode = 'default'; // 'default' | 'range'
+  let invoiceListMode = 'default';
   let invoiceRangeFrom = null, invoiceRangeTo = null;
   let loadedInvoices = [];
   let invoicesCursor = null;
@@ -574,8 +613,6 @@ async function initApp(user, role) {
     const exportBtn = document.getElementById('exportBtn');
     setButtonLoading(exportBtn, 'Building report…');
     try {
-      // Deliberately fetches the FULL range fresh, independent of what's
-      // currently paginated on screen, so the export is always complete.
       const fullRangeInvoices = await fetchInvoicesByDateRange(from, to);
       if (fullRangeInvoices.length === 0) {
         showToast('No invoices found in that range.', 'info');
@@ -618,4 +655,6 @@ async function initApp(user, role) {
       clearButtonLoading(btn);
     }
   });
+
+  hideAppOverlay();
 }

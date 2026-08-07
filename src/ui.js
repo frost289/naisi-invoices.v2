@@ -8,14 +8,19 @@ function ensureContainer() {
   return container;
 }
 
+const ICONS = { success: '✓', error: '✕', info: 'ℹ' };
+
 export function showToast(message, type = 'info', duration = 3500) {
   const c = ensureContainer();
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.textContent = message;
+  toast.innerHTML = `<span class="toast-icon">${ICONS[type] || ICONS.info}</span><span class="toast-msg">${message}</span>`;
   c.appendChild(toast);
 
-  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  requestAnimationFrame(() => {
+    toast.classList.add('toast-visible');
+    if (type === 'error') toast.classList.add('toast-shake');
+  });
 
   setTimeout(() => {
     toast.classList.remove('toast-visible');
@@ -23,29 +28,42 @@ export function showToast(message, type = 'info', duration = 3500) {
   }, duration);
 }
 
-// Disables a button and swaps its label while an async action runs,
-// so the user gets immediate feedback instead of a silent gap.
 export function setButtonLoading(btn, loadingLabel) {
-  if (!btn.dataset.originalLabel) btn.dataset.originalLabel = btn.textContent;
-  btn.textContent = loadingLabel || 'Working…';
+  if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+  btn.innerHTML = `<span class="btn-spinner"></span><span>${loadingLabel || 'Working…'}</span>`;
   btn.disabled = true;
   btn.classList.add('btn-loading');
 }
 
 export function clearButtonLoading(btn) {
-  if (btn.dataset.originalLabel) btn.textContent = btn.dataset.originalLabel;
+  if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
   btn.disabled = false;
   btn.classList.remove('btn-loading');
+}
+
+export function showAppOverlay(message) {
+  const overlay = document.getElementById('appLoadingOverlay');
+  if (!overlay) return;
+  const p = overlay.querySelector('p');
+  if (p) p.textContent = message || 'Loading…';
+  overlay.classList.add('visible');
+}
+
+export function hideAppOverlay() {
+  document.getElementById('appLoadingOverlay')?.classList.remove('visible');
+}
+
+export function fadeInView(el) {
+  el.classList.remove('view-fade');
+  void el.offsetWidth; // force reflow so the animation restarts every time
+  el.classList.add('view-fade');
 }
 
 export function initOfflineBanner() {
   const banner = document.getElementById('offlineBanner');
   if (!banner) return;
 
-  function update() {
-    const offline = !navigator.onLine;
-    banner.classList.toggle('visible', offline);
-  }
+  function update() { banner.classList.toggle('visible', !navigator.onLine); }
 
   window.addEventListener('online', () => {
     update();

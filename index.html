@@ -9,6 +9,11 @@
 </head>
 <body>
 
+  <div id="appLoadingOverlay" class="app-loading-overlay visible">
+    <div class="spinner-ring"></div>
+    <p>Loading your workspace…</p>
+  </div>
+
 <div id="offlineBanner" class="offline-banner">You're offline — changes will save locally and sync once you're back online.</div>
 
 <div id="loginScreen" class="login-wrap card" style="display:none;">
@@ -111,14 +116,14 @@
         <input type="text" id="invoiceNo" readonly>
       </div>
 
-      <div class="numbering-box">
+      <div class="numbering-box" id="numberingBox">
         <div class="numbering-label">Invoice numbering</div>
         <div class="row3">
           <div class="field"><label>Prefix</label><input type="text" id="invPrefix" value="NF-INV"></div>
-          <div class="field"><label>Year</label><input type="text" id="invYear" maxlength="4"></div>
+          <div class="field"><label>Year <span class="auto-tag">auto</span></label><input type="text" id="invYearDisplay" readonly></div>
           <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
         </div>
-        <p class="numbering-hint">Set "Next No." once, then it saves to Firestore and increments automatically every time you download a new PDF.</p>
+        <p class="numbering-hint" id="numberingHint">The year updates itself automatically. Only a manager can change the prefix or starting number.</p>
       </div>
 
       <div class="row2">
