@@ -20,6 +20,19 @@ export async function fetchAllInvoices() {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
+// `date` fields are stored as 'YYYY-MM-DD' strings, which sort correctly
+// as plain strings, so a lexicographic range query works fine here.
+export async function fetchInvoicesByDateRange(fromDate, toDate) {
+  const q = query(
+    collection(db, 'invoices'),
+    where('date', '>=', fromDate),
+    where('date', '<=', toDate),
+    orderBy('date', 'desc')
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
 export async function fetchInvoiceById(id) {
   const snap = await getDoc(doc(db, 'invoices', id));
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;

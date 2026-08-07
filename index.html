@@ -35,7 +35,28 @@
   </div>
 </div>
 
-<div id="invoiceListSection" class="list-section" style="display:none;">
+<div class="view-nav" id="viewNav">
+  <button type="button" class="nav-tab active" data-view="form" id="navFormBtn">New Invoice</button>
+  <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">My Invoices</button>
+  <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
+</div>
+
+<!-- ===================== INVOICES VIEW ===================== -->
+<div id="invoicesView" class="list-section" style="display:none;">
+
+  <div class="card" id="filterCard" style="display:none;">
+    <h2><span class="dot"></span>Filter by date range</h2>
+    <div class="row3" style="align-items:end;">
+      <div class="field"><label>From</label><input type="date" id="filterFrom"></div>
+      <div class="field"><label>To</label><input type="date" id="filterTo"></div>
+      <div class="field" style="display:flex; gap:8px;">
+        <button type="button" class="list-action-btn" id="applyFilterBtn">Filter</button>
+        <button type="button" class="list-action-btn" id="clearFilterBtn">Clear</button>
+      </div>
+    </div>
+    <button type="button" class="generate-btn" id="exportBtn" style="margin-top:10px;">Export to Excel (with charts)</button>
+  </div>
+
   <div class="card">
     <h2><span class="dot"></span><span id="listTitle">Invoices</span></h2>
     <table class="items-table" id="invoiceListTable" style="width:100%;">
@@ -46,6 +67,20 @@
   </div>
 </div>
 
+<!-- ===================== CUSTOMERS VIEW ===================== -->
+<div id="customersView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Manage Customers</h2>
+    <table class="items-table" id="customerListTable" style="width:100%;">
+      <thead><tr><th>Name</th><th>Phone</th><th>Location</th><th></th></tr></thead>
+      <tbody id="customerListBody"></tbody>
+    </table>
+    <p id="customerListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No customers saved yet.</p>
+  </div>
+</div>
+
+<!-- ===================== FORM VIEW ===================== -->
+<div id="formView">
 <div class="layout">
   <div class="panel">
 
@@ -91,11 +126,17 @@
 
     <div class="card">
       <h2><span class="dot"></span>Customer</h2>
-      <div class="field"><label>Customer Name</label><input type="text" id="custName" placeholder="e.g. Msowoya"></div>
+      <div class="field" style="position:relative;">
+        <label>Customer Name</label>
+        <input type="text" id="custName" placeholder="Start typing to search or add new..." autocomplete="off">
+        <div id="custSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+      </div>
       <div class="row2">
         <div class="field"><label>Phone</label><input type="tel" id="custPhone" placeholder="e.g. 0999 123 456"></div>
         <div class="field"><label>Location</label><input type="text" id="custLocation" placeholder="e.g. Section 8"></div>
       </div>
+      <button type="button" class="add-item-btn" id="saveCustomerBtn">+ Save as new customer</button>
+      <p id="customerSaveNote" style="font-size:0.72rem; color:var(--muted); margin-top:4px;"></p>
     </div>
 
     <div class="card">
@@ -153,6 +194,8 @@
     </div>
   </div>
 </div>
+</div>
+<!-- ===================== END FORM VIEW ===================== -->
 
 </div>
 

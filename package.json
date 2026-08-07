@@ -12,6 +12,8 @@
     "vite": "^8.2.0"
   },
   "dependencies": {
+    "chart.js": "^4.5.1",
+    "exceljs": "^4.4.0",
     "firebase": "^12.17.1",
     "jspdf": "^4.2.1"
   }
