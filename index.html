@@ -9,10 +9,10 @@
 </head>
 <body>
 
-  <div id="appLoadingOverlay" class="app-loading-overlay visible">
-    <div class="spinner-ring"></div>
-    <p>Loading your workspace…</p>
-  </div>
+<div id="appLoadingOverlay" class="app-loading-overlay visible">
+  <div class="spinner-ring"></div>
+  <p>Loading your workspace…</p>
+</div>
 
 <div id="offlineBanner" class="offline-banner">You're offline — changes will save locally and sync once you're back online.</div>
 
@@ -27,8 +27,7 @@
 <div id="noAccessScreen" class="login-wrap card" style="display:none;">
   <h2><span class="dot"></span>No access yet</h2>
   <p style="color:var(--muted); font-size:0.85rem; line-height:1.5;">
-    Your account is signed in but hasn't been given a role. Ask the admin to add your email
-    to the submitters or managers list in Firestore.
+    Your account is signed in but hasn't been given a role. Ask the admin to add your email to the submitters or managers list in Firestore.
   </p>
 </div>
 
@@ -46,11 +45,11 @@
   <button type="button" class="nav-tab active" data-view="form" id="navFormBtn">New Invoice</button>
   <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">My Invoices</button>
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
+  <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
 </div>
 
 <!-- ===================== INVOICES VIEW ===================== -->
 <div id="invoicesView" class="list-section" style="display:none;">
-
   <div class="card" id="filterCard" style="display:none;">
     <h2><span class="dot"></span>Filter by date range</h2>
     <div class="row3" style="align-items:end;">
@@ -63,7 +62,6 @@
     </div>
     <button type="button" class="generate-btn" id="exportBtn" style="margin-top:10px;">Export to Excel (with charts)</button>
   </div>
-
   <div class="card">
     <h2><span class="dot"></span><span id="listTitle">Invoices</span></h2>
     <div class="field list-search">
@@ -98,6 +96,57 @@
   </div>
 </div>
 
+<!-- ===================== EXPENSES VIEW ===================== -->
+<div id="expensesView" class="list-section" style="display:none;">
+
+  <div class="card">
+    <h2><span class="dot"></span>Log New Expense</h2>
+    <div class="row3">
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="expDate">
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <select id="expCategory">
+          <option value="Transport">Transport</option>
+          <option value="Meals">Meals</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Amount (MWK)</label>
+        <input type="number" id="expAmount" min="0" step="1" placeholder="0">
+      </div>
+    </div>
+    <div class="field">
+      <label>Notes (optional)</label>
+      <textarea id="expNotes" placeholder="e.g. Minibus to Section 8, lunch at depot..."></textarea>
+    </div>
+    <button type="button" class="generate-btn" id="addExpenseBtn">Log Expense</button>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>Summary <span style="font-size:0.7rem; font-weight:400; color:var(--muted);">(loaded records)</span></h2>
+    <div id="expenseSummary"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span><span id="expListTitle">Expenses</span></h2>
+    <div class="field list-search">
+      <label>Search loaded expenses</label>
+      <input type="text" id="expenseSearchInput" placeholder="Category or notes...">
+      <p class="search-hint" id="expenseSearchHint"></p>
+    </div>
+    <table class="items-table" id="expenseListTable" style="width:100%;">
+      <thead id="expenseListHead"></thead>
+      <tbody id="expenseListBody"></tbody>
+    </table>
+    <p id="expenseListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No expenses logged yet.</p>
+    <button type="button" class="load-more-btn" id="loadMoreExpensesBtn" style="display:none;">Load 25 more</button>
+  </div>
+</div>
+
 <!-- ===================== FORM VIEW ===================== -->
 <div id="formView">
 <div class="layout">
@@ -123,7 +172,7 @@
           <div class="field"><label>Year <span class="auto-tag">auto</span></label><input type="text" id="invYearDisplay" readonly></div>
           <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
         </div>
-        <p class="numbering-hint" id="numberingHint">The year updates itself automatically. Only a manager can change the prefix or starting number.</p>
+        <p class="numbering-hint" id="numberingHint">The year is automatic. Only a manager can change the prefix or starting number.</p>
       </div>
 
       <div class="row2">
@@ -185,36 +234,30 @@
       <div class="paper-logo"><img id="previewLogo" src="" alt="Naisi Foods"></div>
       <div class="paper-sub">Sales Invoice</div>
       <div class="paper-provider" id="pv-providerPhone"></div>
-
       <div class="inv-meta">
         <div><div class="label">Invoice No.</div><div class="value" id="pv-invoiceNo">—</div></div>
         <div><div class="label">Date</div><div class="value right" id="pv-date">—</div></div>
       </div>
       <hr class="divider">
-
       <div class="bill-grid">
         <div><div class="label">Customer</div><div class="value" id="pv-customer">—</div></div>
         <div><div class="label">Phone</div><div class="value" id="pv-phone">—</div></div>
         <div><div class="label">Location</div><div class="value" id="pv-location">—</div></div>
         <div><div class="label">Terms</div><div class="value" id="pv-terms">CASH ON DELIVERY (COD)</div></div>
       </div>
-
       <table class="pv-items">
         <thead><tr><th>Qty</th><th>Description</th><th class="num">Unit Price</th><th class="num">Total</th></tr></thead>
         <tbody id="pv-itemsBody"></tbody>
       </table>
-
       <div class="total-row">
         <div class="total-box"><div class="label">Grand Total</div><div class="amount" id="pv-grandTotal">MWK 0.00</div></div>
       </div>
-
       <div class="sig">Customer Signature:<div class="line"></div></div>
       <div class="thankyou">Thank you for your business!</div>
     </div>
   </div>
 </div>
 </div>
-<!-- ===================== END FORM VIEW ===================== -->
 
 </div>
 

@@ -468,3 +468,72 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
   from{ opacity:0; transform:translateY(4px); }
   to{ opacity:1; transform:translateY(0); }
 }
+
+
+/* Expense summary tiles */
+.exp-summary-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.exp-tile {
+  border-radius: 10px;
+  padding: 12px 14px;
+  text-align: center;
+}
+.exp-tile-label {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.exp-tile-amount {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+.exp-tile-transport { background: #e8f0fe; color: #1a56a0; }
+.exp-tile-meals { background: #fff4e0; color: #7a5210; }
+.exp-tile-other { background: #eef6ea; color: var(--forest-2); }
+
+.exp-grand-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--cream);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.exp-grand-amount {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: var(--forest);
+  font-size: 1rem;
+}
+
+/* Category badge in list */
+.exp-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.exp-badge-Transport { background: #e8f0fe; color: #1a56a0; }
+.exp-badge-Meals { background: #fff4e0; color: #7a5210; }
+.exp-badge-Other { background: #eef6ea; color: var(--forest-2); }
+
+/* Delete button variant */
+.exp-delete-btn { border-color: #b23b3b; color: #b23b3b; }
+.exp-delete-btn:hover { background: rgba(178,59,59,0.08); }
+
+@media (max-width: 600px) {
+  .exp-summary-tiles { grid-template-columns: 1fr; }
+}
