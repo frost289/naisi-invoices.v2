@@ -27,6 +27,14 @@ import {
 } from './ui.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
+// Compact one-line product summary for the invoice list table.
+// Mirrors what buildProductSummary does in export.js but lives here
+// so the list view doesn't need to import the whole export module.
+function formatItemsSummary(items) {
+  if (!items || items.length === 0) return '—';
+  return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
+}
+
 initOfflineBanner();
 
 const loginScreen = document.getElementById('loginScreen');
@@ -489,14 +497,14 @@ async function initApp(user, role) {
   }
 
   async function resetAndLoadInvoices() {
-    invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
-    invoiceSearchInput.value = '';
-    listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
-    listHead.innerHTML = role === 'manager'
-      ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th><th></th></tr>`
-      : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th></tr>`;
-    await loadNextInvoicePage();
-  }
+      invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
+      invoiceSearchInput.value = '';
+      listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
+      listHead.innerHTML = role === 'manager'
+        ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`
+        : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th></tr>`;
+      await loadNextInvoicePage();
+    }
 
   async function loadNextInvoicePage() {
     if (!invoicesHasMore) return;
@@ -528,7 +536,7 @@ async function initApp(user, role) {
     invoiceListMode = 'range'; invoiceRangeFrom = from; invoiceRangeTo = to;
     loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true; invoiceSearchInput.value = '';
     listTitle.textContent = `Invoices: ${from} to ${to}`;
-    listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Total</th><th></th></tr>`;
+    listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
     await loadNextInvoicePage();
   });
 
