@@ -30,11 +30,13 @@ function renderChartImage({ labels, data, label, color, type }) {
   return dataUrl;
 }
 
-// Compact one-line summary of all items on an invoice, used in the
-// Invoices sheet "Products" column so the manager can read it at a glance.
 function buildProductSummary(items) {
   if (!items || items.length === 0) return '—';
   return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
+}
+
+function productKey(it) {
+  return it.productName || it.desc || 'Unknown';
 }
 
 export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) {
@@ -46,7 +48,6 @@ export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) 
   workbook.creator = 'Naisi Foods Invoice Generator';
   workbook.created = new Date();
 
-  // ---- Invoices sheet (one row per invoice) ----
   const dataSheet = workbook.addWorksheet('Invoices');
   dataSheet.columns = [
     { header: 'Invoice No.', key: 'invoiceNo', width: 18 },
@@ -60,29 +61,24 @@ export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) 
   dataSheet.getRow(1).font = { bold: true };
   invoices.forEach(inv => {
     dataSheet.addRow({
-      invoiceNo:  inv.invoiceNo,
-      date:       inv.date,
-      customer:   inv.customer,
-      phone:      inv.phone,
-      location:   inv.location,
-      products:   buildProductSummary(inv.items),
+      invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer,
+      phone: inv.phone, location: inv.location,
+      products: buildProductSummary(inv.items),
       grandTotal: inv.grandTotal || 0,
     });
   });
   dataSheet.getColumn('grandTotal').numFmt = '#,##0.00';
-  // Wrap the Products column so long text doesn't spill out of view.
   dataSheet.getColumn('products').alignment = { wrapText: true };
 
-  // ---- Items Detail sheet (one row per line item) ----
-  // This is the key addition: managers can pivot by description to see
-  // which products sell most, or sum quantities across invoices.
   const itemsSheet = workbook.addWorksheet('Items Detail');
   itemsSheet.columns = [
     { header: 'Invoice No.', key: 'invoiceNo',   width: 18 },
     { header: 'Date',        key: 'date',        width: 12 },
     { header: 'Customer',    key: 'customer',    width: 24 },
-    { header: 'Description', key: 'desc',        width: 38 },
-    { header: 'Qty (Boxes)', key: 'qty',         width: 12 },
+    { header: 'Product',     key: 'product',     width: 30 },
+    { header: 'Pack',        key: 'pack',        width: 26 },
+    { header: 'Pack Qty',    key: 'packQty',      width: 12 },
+    { header: 'Boxes Ordered', key: 'qty',       width: 14 },
     { header: 'Unit Price',  key: 'unitPrice',   width: 14 },
     { header: 'Line Total',  key: 'lineTotal',   width: 14 },
   ];
@@ -90,28 +86,46 @@ export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) 
   invoices.forEach(inv => {
     (inv.items || []).forEach(it => {
       itemsSheet.addRow({
-        invoiceNo: inv.invoiceNo,
-        date:      inv.date,
-        customer:  inv.customer,
-        desc:      it.desc || '—',
-        qty:       it.qty  || 0,
+        invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer,
+        product: it.productName || it.desc || '—',
+        pack: it.packLabel || '—',
+        packQty: it.packQuantity ?? '—',
+        qty: it.qty || 0,
         unitPrice: it.price || 0,
         lineTotal: it.total || 0,
       });
     });
   });
-  ['unitPrice', 'lineTotal'].forEach(col => {
-    itemsSheet.getColumn(col).numFmt = '#,##0.00';
-  });
+  ['unitPrice', 'lineTotal'].forEach(col => { itemsSheet.getColumn(col).numFmt = '#,##0.00'; });
 
-  // ---- Charts sheet ----
+  const totalsSheet = workbook.addWorksheet('Product Totals');
+  const totals = {};
+  invoices.forEach(inv => {
+    (inv.items || []).forEach(it => {
+      const key = productKey(it);
+      if (!totals[key]) totals[key] = { qty: 0, revenue: 0 };
+      totals[key].qty += it.qty || 0;
+      totals[key].revenue += it.total || 0;
+    });
+  });
+  const sortedTotals = Object.entries(totals).sort((a, b) => b[1].qty - a[1].qty);
+
+  totalsSheet.columns = [
+    { header: 'Product',        key: 'product', width: 34 },
+    { header: 'Total Qty (Boxes)', key: 'qty',  width: 18 },
+    { header: 'Total Revenue (MWK)', key: 'revenue', width: 20 },
+  ];
+  totalsSheet.getRow(1).font = { bold: true };
+  sortedTotals.forEach(([product, t]) => {
+    totalsSheet.addRow({ product, qty: t.qty, revenue: t.revenue });
+  });
+  totalsSheet.getColumn('revenue').numFmt = '#,##0.00';
+
   const chartSheet = workbook.addWorksheet('Charts');
   chartSheet.getCell('A1').value = `Report range: ${fromDate} to ${toDate}`;
   chartSheet.getCell('A1').font = { bold: true, size: 12 };
-
   const revenueImageId = workbook.addImage({ base64: revenueImg, extension: 'png' });
   chartSheet.addImage(revenueImageId, { tl: { col: 0, row: 2 }, ext: { width: 700, height: 350 } });
-
   const countImageId = workbook.addImage({ base64: countImg, extension: 'png' });
   chartSheet.addImage(countImageId, { tl: { col: 0, row: 22 }, ext: { width: 700, height: 350 } });
 
@@ -119,8 +133,7 @@ export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) 
   const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url;
-  a.download = `naisi-invoices_${fromDate}_to_${toDate}.xlsx`;
+  a.href = url; a.download = `naisi-invoices_${fromDate}_to_${toDate}.xlsx`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }

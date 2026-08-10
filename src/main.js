@@ -22,20 +22,22 @@ import {
   fetchAllExpensesPage, fetchMyExpensesPage, addExpense, updateExpense, deleteExpense
 } from './expenses.js';
 import {
+  fetchAllProducts, fetchProductsPage, addProduct, updateProduct, deleteProduct,
+  seedDefaultProductsIfEmpty
+} from './products.js';
+import {
   showToast, setButtonLoading, clearButtonLoading,
   initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView
 } from './ui.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
+initOfflineBanner();
+
 // Compact one-line product summary for the invoice list table.
-// Mirrors what buildProductSummary does in export.js but lives here
-// so the list view doesn't need to import the whole export module.
 function formatItemsSummary(items) {
   if (!items || items.length === 0) return '—';
   return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
 }
-
-initOfflineBanner();
 
 const loginScreen = document.getElementById('loginScreen');
 const noAccessScreen = document.getElementById('noAccessScreen');
@@ -125,25 +127,30 @@ async function initApp(user, role) {
   const invoicesView = document.getElementById('invoicesView');
   const customersView = document.getElementById('customersView');
   const expensesView = document.getElementById('expensesView');
+  const productsView = document.getElementById('productsView');
   const navFormBtn = document.getElementById('navFormBtn');
   const navInvoicesBtn = document.getElementById('navInvoicesBtn');
   const navCustomersBtn = document.getElementById('navCustomersBtn');
   const navExpensesBtn = document.getElementById('navExpensesBtn');
+  const navProductsBtn = document.getElementById('navProductsBtn');
   const filterCard = document.getElementById('filterCard');
 
   navInvoicesBtn.textContent = role === 'manager' ? 'All Invoices' : 'My Invoices';
   filterCard.style.display = role === 'manager' ? 'block' : 'none';
+  document.getElementById('addProductCard').style.display = role === 'manager' ? 'block' : 'none';
 
   function showView(view) {
     formView.style.display = view === 'form' ? 'block' : 'none';
     invoicesView.style.display = view === 'invoices' ? 'block' : 'none';
     customersView.style.display = view === 'customers' ? 'block' : 'none';
     expensesView.style.display = view === 'expenses' ? 'block' : 'none';
+    productsView.style.display = view === 'products' ? 'block' : 'none';
     navFormBtn.classList.toggle('active', view === 'form');
     navInvoicesBtn.classList.toggle('active', view === 'invoices');
     navCustomersBtn.classList.toggle('active', view === 'customers');
     navExpensesBtn.classList.toggle('active', view === 'expenses');
-    const activeEl = { form: formView, invoices: invoicesView, customers: customersView, expenses: expensesView }[view];
+    navProductsBtn.classList.toggle('active', view === 'products');
+    const activeEl = { form: formView, invoices: invoicesView, customers: customersView, expenses: expensesView, products: productsView }[view];
     if (activeEl) fadeInView(activeEl);
   }
 
@@ -151,6 +158,7 @@ async function initApp(user, role) {
   navInvoicesBtn.addEventListener('click', async () => { showView('invoices'); await resetAndLoadInvoices(); });
   navCustomersBtn.addEventListener('click', async () => { showView('customers'); await resetAndLoadCustomers(); });
   navExpensesBtn.addEventListener('click', async () => { showView('expenses'); await resetAndLoadExpenses(); });
+  navProductsBtn.addEventListener('click', async () => { showView('products'); await resetAndLoadProducts(); });
   showView('form');
 
   // ============= NUMBERING =============
@@ -190,6 +198,34 @@ async function initApp(user, role) {
       });
     });
   }
+
+  function refreshPreview() { updatePreview(els); }
+// ============= PRODUCTS: catalog cache for quick-add grid =============
+  let productsCache = [];
+  async function loadProductsCache() {
+    productsCache = await fetchAllProducts();
+    buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
+  }
+
+  // One-time seed: if the catalog is empty, populate it with the original
+  // price-list products so the app works exactly like it did before,
+  // without a manager having to retype anything. Only managers can write,
+  // so only they trigger the seed — submitters just load whatever exists.
+  if (role === 'manager') {
+    try {
+      const seeded = await seedDefaultProductsIfEmpty(user.uid);
+      if (seeded) showToast('Loaded the default product catalog.', 'info');
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  await loadProductsCache();
+  
+
+  document.getElementById('addItemBtn').addEventListener('click', () => {
+    addItemRow(itemsBody, refreshPreview, 1, '', '');
+    refreshPreview();
+  });
 
   // ============= CUSTOMERS AUTOCOMPLETE =============
   let customersCache = [];
@@ -349,6 +385,144 @@ async function initApp(user, role) {
     }
   });
 
+  // ============= PRODUCTS: manage catalog =============
+  const productListBody = document.getElementById('productListBody');
+  const productListEmpty = document.getElementById('productListEmpty');
+  const loadMoreProductsBtn = document.getElementById('loadMoreProductsBtn');
+  const addProductBtn = document.getElementById('addProductBtn');
+  const prodName = document.getElementById('prodName');
+  const prodPack = document.getElementById('prodPack');
+  const prodQuantity = document.getElementById('prodQuantity');
+  const prodPrice = document.getElementById('prodPrice');
+
+  let loadedProducts = [], productsCursor = null, productsHasMore = true;
+
+  function renderProductRows(list) {
+    productListBody.innerHTML = '';
+    productListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    list.forEach(p => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = p.id;
+      const actions = role === 'manager'
+        ? `<button type="button" class="list-action-btn" data-action="edit">Edit</button>
+           <button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>`
+        : '';
+      tr.innerHTML = `
+        <td>${p.productName}</td>
+        <td>${p.packLabel}</td>
+        <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
+        <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
+        <td>${actions}</td>
+      `;
+      productListBody.appendChild(tr);
+    });
+  }
+
+  async function resetAndLoadProducts() {
+    loadedProducts = []; productsCursor = null; productsHasMore = true;
+    await loadNextProductPage();
+  }
+
+  async function loadNextProductPage() {
+    if (!productsHasMore) return;
+    setButtonLoading(loadMoreProductsBtn, 'Loading…');
+    try {
+      const result = await fetchProductsPage(productsCursor);
+      loadedProducts = loadedProducts.concat(result.items);
+      productsCursor = result.lastDoc;
+      productsHasMore = result.hasMore;
+      renderProductRows(loadedProducts);
+      loadMoreProductsBtn.style.display = productsHasMore ? 'block' : 'none';
+    } catch (err) {
+      showToast('Could not load products: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(loadMoreProductsBtn);
+    }
+  }
+
+  loadMoreProductsBtn.addEventListener('click', loadNextProductPage);
+
+  if (role === 'manager') {
+    addProductBtn.addEventListener('click', async () => {
+      const name = prodName.value.trim();
+      const pack = prodPack.value.trim();
+      const quantity = parseFloat(prodQuantity.value);
+      const price = parseFloat(prodPrice.value);
+      if (!name || !pack) { showToast('Enter both a product name and a pack.', 'error'); return; }
+      if (!quantity || quantity <= 0) { showToast('Enter a quantity greater than 0.', 'error'); return; }
+      if (!price || price <= 0) { showToast('Enter a price greater than 0.', 'error'); return; }
+      setButtonLoading(addProductBtn, 'Saving…');
+      try {
+        await addProduct({ productName: name, packLabel: pack, quantity, price, uid: user.uid });
+        prodName.value = ''; prodPack.value = ''; prodQuantity.value = ''; prodPrice.value = '';
+        showToast('Product added to catalog.', 'success');
+        await resetAndLoadProducts();
+        await loadProductsCache();
+      } catch (err) {
+        showToast('Could not add product: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(addProductBtn);
+      }
+    });
+  }
+
+  productListBody.addEventListener('click', async (e) => {
+    if (role !== 'manager') return;
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    const id = tr.dataset.id;
+    const p = loadedProducts.find(p => p.id === id);
+
+    if (btn.dataset.action === 'edit') {
+      if (!p) return;
+      tr.innerHTML = `
+        <td><input class="customer-edit-input" data-field="productName" value="${p.productName}"></td>
+        <td><input class="customer-edit-input" data-field="packLabel" value="${p.packLabel}"></td>
+        <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${p.quantity ?? 0}"></td>
+        <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${p.price}"></td>
+        <td>
+          <button type="button" class="list-action-btn" data-action="save">Save</button>
+          <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
+        </td>
+      `;
+    } else if (btn.dataset.action === 'cancel') {
+      renderProductRows(loadedProducts);
+    } else if (btn.dataset.action === 'save') {
+      const productName = tr.querySelector('[data-field="productName"]').value.trim();
+      const packLabel = tr.querySelector('[data-field="packLabel"]').value.trim();
+      const quantity = parseFloat(tr.querySelector('[data-field="quantity"]').value) || 0;
+      const price = parseFloat(tr.querySelector('[data-field="price"]').value) || 0;
+      if (!productName || !packLabel) { showToast('Name and pack cannot be empty.', 'error'); return; }
+      setButtonLoading(btn, 'Saving…');
+      try {
+        await updateProduct(id, { productName, packLabel, quantity, price });
+        const idx = loadedProducts.findIndex(p => p.id === id);
+        if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], productName, packLabel, quantity, price };
+        renderProductRows(loadedProducts);
+        await loadProductsCache();
+        showToast('Product updated.', 'success');
+      } catch (err) {
+        showToast('Could not update product: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    } else if (btn.dataset.action === 'delete') {
+      const confirmed = confirm(`Delete "${p?.productName} — ${p?.packLabel}" from the catalog?\n\nThis cannot be undone. Existing invoices already using it are unaffected.`);
+      if (!confirmed) return;
+      setButtonLoading(btn, '…');
+      try {
+        await deleteProduct(id);
+        loadedProducts = loadedProducts.filter(p => p.id !== id);
+        renderProductRows(loadedProducts);
+        await loadProductsCache();
+        showToast('Product deleted.', 'success');
+      } catch (err) {
+        showToast('Could not delete product: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    }
+  });
+
   // ============= FORM / INVOICE SUBMIT =============
   if (role === 'submitter') {
     generateBtn.textContent = 'Submit Invoice';
@@ -357,11 +531,6 @@ async function initApp(user, role) {
     generateBtn.textContent = 'Download PDF Invoice';
     generateNote.textContent = 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
   }
-
-  function refreshPreview() { updatePreview(els); }
-
-  buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview);
-  document.getElementById('addItemBtn').addEventListener('click', () => { addItemRow(itemsBody, refreshPreview, 1, '', ''); refreshPreview(); });
 
   const today = new Date();
   els.invoiceDate.value = today.toISOString().slice(0, 10);
@@ -384,7 +553,7 @@ async function initApp(user, role) {
     els.providerPhone.value = inv.providerPhone || '';
     els.notes.value = inv.notes || '';
     itemsBody.innerHTML = '';
-    (inv.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price));
+    (inv.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
     editingInvoiceId = inv.id;
     editingInvoiceNoLabel.textContent = inv.invoiceNo;
     editingBanner.style.display = 'block';
@@ -479,7 +648,14 @@ async function initApp(user, role) {
     listEmpty.style.display = list.length === 0 ? 'block' : 'none';
     list.forEach(inv => {
       const tr = document.createElement('tr');
-      const base = `<td>${inv.invoiceNo}</td><td>${formatDate(inv.date)}</td><td>${inv.customer}</td><td>${mwk(inv.grandTotal || 0)}</td>`;
+      const productsSummary = formatItemsSummary(inv.items);
+      const base = `
+        <td>${inv.invoiceNo}</td>
+        <td>${formatDate(inv.date)}</td>
+        <td>${inv.customer}</td>
+        <td class="inv-products-cell" title="${productsSummary}">${productsSummary}</td>
+        <td>${mwk(inv.grandTotal || 0)}</td>
+      `;
       tr.innerHTML = role === 'manager'
         ? base + `<td><button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button><button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button></td>`
         : base;
@@ -497,14 +673,14 @@ async function initApp(user, role) {
   }
 
   async function resetAndLoadInvoices() {
-      invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
-      invoiceSearchInput.value = '';
-      listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
-      listHead.innerHTML = role === 'manager'
-        ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`
-        : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th></tr>`;
-      await loadNextInvoicePage();
-    }
+    invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
+    invoiceSearchInput.value = '';
+    listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
+    listHead.innerHTML = role === 'manager'
+      ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`
+      : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th></tr>`;
+    await loadNextInvoicePage();
+  }
 
   async function loadNextInvoicePage() {
     if (!invoicesHasMore) return;
@@ -609,9 +785,7 @@ async function initApp(user, role) {
 
   let loadedExpenses = [], expensesCursor = null, expensesHasMore = true;
 
-  function badgeHtml(cat) {
-    return `<span class="exp-badge exp-badge-${cat}">${cat}</span>`;
-  }
+  function badgeHtml(cat) { return `<span class="exp-badge exp-badge-${cat}">${cat}</span>`; }
 
   function renderExpenseSummary() {
     const el = document.getElementById('expenseSummary');
@@ -621,18 +795,9 @@ async function initApp(user, role) {
     const grand = Object.values(totals).reduce((a, b) => a + b, 0);
     el.innerHTML = `
       <div class="exp-summary-tiles">
-        <div class="exp-tile exp-tile-transport">
-          <span class="exp-tile-label">Transport</span>
-          <span class="exp-tile-amount">${mwk(totals.Transport)}</span>
-        </div>
-        <div class="exp-tile exp-tile-meals">
-          <span class="exp-tile-label">Meals</span>
-          <span class="exp-tile-amount">${mwk(totals.Meals)}</span>
-        </div>
-        <div class="exp-tile exp-tile-other">
-          <span class="exp-tile-label">Other</span>
-          <span class="exp-tile-amount">${mwk(totals.Other)}</span>
-        </div>
+        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
+        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
+        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
       </div>
       <div class="exp-grand-total">
         <span>Grand Total (${loadedExpenses.length} record${loadedExpenses.length !== 1 ? 's' : ''} loaded)</span>
@@ -753,10 +918,8 @@ async function initApp(user, role) {
           <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
         </td>
       `;
-
     } else if (btn.dataset.action === 'cancel') {
       applyExpenseSearchAndRender();
-
     } else if (btn.dataset.action === 'save') {
       const date = tr.querySelector('[data-field="date"]').value;
       const category = tr.querySelector('[data-field="category"]').value;
@@ -775,7 +938,6 @@ async function initApp(user, role) {
         showToast('Could not update expense: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
-
     } else if (btn.dataset.action === 'delete') {
       if (role !== 'manager') return;
       const confirmed = confirm(`Delete this ${exp?.category || ''} expense of ${mwk(exp?.amount || 0)}?\n\nThis cannot be undone.`);

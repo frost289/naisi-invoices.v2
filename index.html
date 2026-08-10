@@ -45,6 +45,7 @@
   <button type="button" class="nav-tab active" data-view="form" id="navFormBtn">New Invoice</button>
   <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">My Invoices</button>
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
+  <button type="button" class="nav-tab" data-view="products" id="navProductsBtn">Products</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
 </div>
 
@@ -96,9 +97,34 @@
   </div>
 </div>
 
+<!-- ===================== PRODUCTS VIEW ===================== -->
+<div id="productsView" class="list-section" style="display:none;">
+  <div class="card" id="addProductCard" style="display:none;">
+    <h2><span class="dot"></span>Add Product</h2>
+    <div class="row2">
+      <div class="field"><label>Product Name</label><input type="text" id="prodName" placeholder="e.g. Angel Instant Dry Yeast"></div>
+      <div class="field"><label>Pack</label><input type="text" id="prodPack" placeholder="e.g. Box (25 × 10g Sachets)"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Quantity <span class="auto-tag">units per pack</span></label><input type="number" id="prodQuantity" min="0" step="1" placeholder="e.g. 25"></div>
+      <div class="field"><label>Price (MWK)</label><input type="number" id="prodPrice" min="0" step="1" placeholder="0"></div>
+    </div>
+    <p class="numbering-hint">Quantity is how many units are in this pack — e.g. 25 sachets in a Box, or 12 boxes in a Case. It's what distinguishes "Angel Yeast Box" from "Angel Yeast Case" beyond just the text.</p>
+    <button type="button" class="generate-btn" id="addProductBtn">Add to Catalog</button>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span>Product Catalog</h2>
+    <table class="items-table" id="productListTable" style="width:100%;">
+      <thead><tr><th>Product</th><th>Pack</th><th>Quantity</th><th>Price</th><th></th></tr></thead>
+      <tbody id="productListBody"></tbody>
+    </table>
+    <p id="productListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No products yet.</p>
+    <button type="button" class="load-more-btn" id="loadMoreProductsBtn" style="display:none;">Load 25 more</button>
+  </div>
+</div>
+
 <!-- ===================== EXPENSES VIEW ===================== -->
 <div id="expensesView" class="list-section" style="display:none;">
-
   <div class="card">
     <h2><span class="dot"></span>Log New Expense</h2>
     <div class="row3">
