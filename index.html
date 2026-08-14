@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Naisi Foods — Invoice Generator</title>
+<title>Naisi Foods — Sales &amp; Invoicing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 </head>
@@ -36,22 +36,136 @@
 <div class="topbar">
   <img id="topbarLogo" src="" alt="Naisi Foods">
   <div class="titles">
-    <h1 id="appTitle">Invoice Generator</h1>
-    <p>Naisi Foods · Sales Invoices</p>
+    <h1 id="appTitle">Naisi Foods</h1>
+    <p id="appSubtitle">Sales &amp; Invoicing</p>
   </div>
 </div>
 
 <div class="view-nav" id="viewNav">
-  <button type="button" class="nav-tab active" data-view="form" id="navFormBtn">New Invoice</button>
-  <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">My Invoices</button>
-  <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
+  <!-- Manager-only -->
+  <button type="button" class="nav-tab" data-view="form" id="navFormBtn">New Invoice</button>
+  <button type="button" class="nav-tab" data-view="orders" id="navOrdersBtn">Orders</button>
+  <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">Invoices</button>
+  <button type="button" class="nav-tab" data-view="performance" id="navPerformanceBtn">Rep Performance</button>
   <button type="button" class="nav-tab" data-view="products" id="navProductsBtn">Products</button>
+  <!-- Shared -->
+  <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
+  <!-- Submitter-only -->
+  <button type="button" class="nav-tab" data-view="logvisit" id="navLogVisitBtn">Log Visit</button>
+  <button type="button" class="nav-tab" data-view="myvisits" id="navMyVisitsBtn">My Visits</button>
 </div>
 
-<!-- ===================== INVOICES VIEW ===================== -->
+<!-- ===================== LOG VISIT VIEW (submitter) ===================== -->
+<div id="logvisitView" style="display:none;">
+<div class="layout">
+  <div class="panel" style="grid-column:1/-1; max-width:700px; margin:0 auto;">
+
+    <div class="card">
+      <h2><span class="dot"></span>Customer</h2>
+      <div class="field" style="position:relative;">
+        <label>Customer Name</label>
+        <input type="text" id="lvCustSearch" placeholder="Start typing to find a customer..." autocomplete="off">
+        <div id="lvCustSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+      </div>
+      <div id="lvSelectedCustomer" style="display:none; background:#eef6ea; border-radius:8px; padding:10px 14px; font-size:0.85rem;">
+        <strong id="lvCustName"></strong><br>
+        <span id="lvCustPhone" style="color:var(--muted);"></span> · <span id="lvCustLocation" style="color:var(--muted);"></span>
+        <a href="#" id="lvClearCustomer" style="float:right; color:#b23b3b;">Change</a>
+      </div>
+    </div>
+
+    <div class="card" id="lvOutcomeCard" style="display:none;">
+      <h2><span class="dot"></span>Visit Outcome</h2>
+      <div class="outcome-toggle">
+        <button type="button" class="outcome-btn" data-outcome="Order Placed" id="lvOutcomeYes">✓ Order Placed</button>
+        <button type="button" class="outcome-btn" data-outcome="No Order" id="lvOutcomeNo">✕ No Order</button>
+      </div>
+
+      <div id="lvNoOrderFields" style="display:none; margin-top:14px;">
+        <div class="field">
+          <label>Reason</label>
+          <select id="lvReason">
+            <option>Not interested</option>
+            <option>Stock issue</option>
+            <option>Price too high</option>
+            <option>Customer unavailable</option>
+            <option>Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Notes (optional)</label>
+          <textarea id="lvReasonNotes" placeholder="Any extra detail..."></textarea>
+        </div>
+        <button class="generate-btn" id="lvSubmitNoOrderBtn" type="button">Log Visit</button>
+      </div>
+    </div>
+
+    <div id="lvOrderFormWrap" style="display:none;">
+      <div class="card">
+        <h2><span class="dot"></span>Items</h2>
+        <div class="quick-add-label">Quick add — tap a product</div>
+        <div class="quick-add-grid" id="lvQuickAddGrid"></div>
+        <table class="items-table" id="lvOrderItemsTable">
+          <thead><tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr></thead>
+          <tbody id="lvOrderItemsBody"></tbody>
+        </table>
+        <button class="add-item-btn" id="lvOrderAddItemBtn" type="button">+ Add custom item</button>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>Notes (optional)</h2>
+        <textarea id="lvOrderNotes" placeholder="Any notes for management about this order..."></textarea>
+      </div>
+
+      <button class="generate-btn" id="lvSubmitOrderBtn" type="button">Submit Order &amp; Log Visit</button>
+      <p class="actions-note">Sends this order to management's queue and records this as a successful visit.</p>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- ===================== MY VISITS VIEW (submitter) ===================== -->
+<div id="myvisitsView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>My Visits</h2>
+    <table class="items-table" id="myVisitsTable" style="width:100%;">
+      <thead><tr><th>Date</th><th>Customer</th><th>Outcome</th><th>Reason</th></tr></thead>
+      <tbody id="myVisitsBody"></tbody>
+    </table>
+    <p id="myVisitsEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits logged yet.</p>
+    <button type="button" class="load-more-btn" id="loadMoreMyVisitsBtn" style="display:none;">Load 25 more</button>
+  </div>
+</div>
+
+<!-- ===================== REP PERFORMANCE VIEW (manager) ===================== -->
+<div id="performanceView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Rep Success Rate</h2>
+    <table class="items-table" id="repSummaryTable" style="width:100%;">
+      <thead><tr><th>Rep</th><th>Visits</th><th>Orders Placed</th><th>Success Rate</th></tr></thead>
+      <tbody id="repSummaryBody"></tbody>
+    </table>
+    <p id="repSummaryEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits logged yet.</p>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span>All Visit Reports</h2>
+    <div class="field">
+      <label>Filter by rep</label>
+      <select id="perfRepFilter"><option value="all">All reps</option></select>
+    </div>
+    <table class="items-table" id="allVisitsTable" style="width:100%;">
+      <thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Outcome</th><th>Reason</th></tr></thead>
+      <tbody id="allVisitsBody"></tbody>
+    </table>
+    <p id="allVisitsEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits logged yet.</p>
+  </div>
+</div>
+
+<!-- ===================== INVOICES VIEW (manager) ===================== -->
 <div id="invoicesView" class="list-section" style="display:none;">
-  <div class="card" id="filterCard" style="display:none;">
+  <div class="card" id="filterCard">
     <h2><span class="dot"></span>Filter by date range</h2>
     <div class="row3" style="align-items:end;">
       <div class="field"><label>From</label><input type="date" id="filterFrom"></div>
@@ -79,8 +193,18 @@
   </div>
 </div>
 
-<!-- ===================== CUSTOMERS VIEW ===================== -->
+<!-- ===================== CUSTOMERS VIEW (shared) ===================== -->
 <div id="customersView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Add Customer</h2>
+    <div class="row2">
+      <div class="field"><label>Name</label><input type="text" id="newCustName" placeholder="Customer name"></div>
+      <div class="field"><label>Phone</label><input type="tel" id="newCustPhone" placeholder="e.g. 0999 123 456"></div>
+    </div>
+    <div class="field"><label>Location</label><input type="text" id="newCustLocation" placeholder="e.g. Section 8"></div>
+    <button type="button" class="generate-btn" id="addCustomerBtn">Add Customer</button>
+    <p id="addCustomerNote" style="font-size:0.72rem; color:var(--muted); margin-top:6px;"></p>
+  </div>
   <div class="card">
     <h2><span class="dot"></span>Manage Customers</h2>
     <div class="field list-search">
@@ -97,9 +221,9 @@
   </div>
 </div>
 
-<!-- ===================== PRODUCTS VIEW ===================== -->
+<!-- ===================== PRODUCTS VIEW (manager) ===================== -->
 <div id="productsView" class="list-section" style="display:none;">
-  <div class="card" id="addProductCard" style="display:none;">
+  <div class="card" id="addProductCard">
     <h2><span class="dot"></span>Add Product</h2>
     <div class="row2">
       <div class="field"><label>Product Name</label><input type="text" id="prodName" placeholder="e.g. Angel Instant Dry Yeast"></div>
@@ -109,7 +233,7 @@
       <div class="field"><label>Quantity <span class="auto-tag">units per pack</span></label><input type="number" id="prodQuantity" min="0" step="1" placeholder="e.g. 25"></div>
       <div class="field"><label>Price (MWK)</label><input type="number" id="prodPrice" min="0" step="1" placeholder="0"></div>
     </div>
-    <p class="numbering-hint">Quantity is how many units are in this pack — e.g. 25 sachets in a Box, or 12 boxes in a Case. It's what distinguishes "Angel Yeast Box" from "Angel Yeast Case" beyond just the text.</p>
+    <p class="numbering-hint">Quantity is how many units are in this pack — e.g. 25 sachets in a Box, or 12 boxes in a Case.</p>
     <button type="button" class="generate-btn" id="addProductBtn">Add to Catalog</button>
   </div>
   <div class="card">
@@ -123,15 +247,12 @@
   </div>
 </div>
 
-<!-- ===================== EXPENSES VIEW ===================== -->
+<!-- ===================== EXPENSES VIEW (shared) ===================== -->
 <div id="expensesView" class="list-section" style="display:none;">
   <div class="card">
     <h2><span class="dot"></span>Log New Expense</h2>
     <div class="row3">
-      <div class="field">
-        <label>Date</label>
-        <input type="date" id="expDate">
-      </div>
+      <div class="field"><label>Date</label><input type="date" id="expDate"></div>
       <div class="field">
         <label>Category</label>
         <select id="expCategory">
@@ -140,10 +261,7 @@
           <option value="Other">Other</option>
         </select>
       </div>
-      <div class="field">
-        <label>Amount (MWK)</label>
-        <input type="number" id="expAmount" min="0" step="1" placeholder="0">
-      </div>
+      <div class="field"><label>Amount (MWK)</label><input type="number" id="expAmount" min="0" step="1" placeholder="0"></div>
     </div>
     <div class="field">
       <label>Notes (optional)</label>
@@ -173,13 +291,42 @@
   </div>
 </div>
 
-<!-- ===================== FORM VIEW ===================== -->
+<!-- ===================== ORDERS VIEW (shared) ===================== -->
+<div id="ordersView" class="list-section" style="display:none;">
+  <div class="card" id="orderFilterCard" style="display:none;">
+    <h2><span class="dot"></span>Filter by status</h2>
+    <select id="orderStatusFilter">
+      <option value="Submitted">Awaiting Processing (Submitted)</option>
+      <option value="Approved">Approved</option>
+      <option value="Invoiced">Invoiced</option>
+      <option value="Rejected">Rejected</option>
+      <option value="Cancelled">Cancelled</option>
+      <option value="all">All Orders</option>
+    </select>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span><span id="orderListTitle">Orders</span></h2>
+    <table class="items-table" id="orderListTable" style="width:100%;">
+      <thead id="orderListHead"></thead>
+      <tbody id="orderListBody"></tbody>
+    </table>
+    <p id="orderListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No orders here.</p>
+    <button type="button" class="load-more-btn" id="loadMoreOrdersBtn" style="display:none;">Load 25 more</button>
+  </div>
+</div>
+
+<!-- ===================== FORM VIEW (manager only — New Invoice) ===================== -->
 <div id="formView">
 <div class="layout">
   <div class="panel">
 
     <div class="card">
       <h2><span class="dot"></span>Invoice details</h2>
+
+      <div id="fromOrderBanner" style="display:none; background:#eef6ea; border:1px solid var(--leaf); border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:0.8rem; color:#3a5a2c;">
+        Generating invoice from <strong id="fromOrderNoLabel"></strong> — review items before printing.
+        <a href="#" id="cancelFromOrderBtn" style="color:#3a5a2c; float:right;">Cancel</a>
+      </div>
 
       <div id="editingBanner" style="display:none; background:#fff4e0; border:1px solid var(--amber); border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:0.8rem; color:#7a5210;">
         Editing <strong id="editingInvoiceNoLabel"></strong> —
@@ -198,7 +345,7 @@
           <div class="field"><label>Year <span class="auto-tag">auto</span></label><input type="text" id="invYearDisplay" readonly></div>
           <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
         </div>
-        <p class="numbering-hint" id="numberingHint">The year is automatic. Only a manager can change the prefix or starting number.</p>
+        <p class="numbering-hint" id="numberingHint">The year is automatic.</p>
       </div>
 
       <div class="row2">
@@ -238,9 +385,7 @@
       <div class="quick-add-label">Quick add — tap a product</div>
       <div class="quick-add-grid" id="quickAddGrid"></div>
       <table class="items-table" id="itemsTable">
-        <thead>
-          <tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr>
-        </thead>
+        <thead><tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr></thead>
         <tbody id="itemsBody"></tbody>
       </table>
       <button class="add-item-btn" id="addItemBtn" type="button">+ Add custom item</button>

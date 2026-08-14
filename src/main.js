@@ -26,6 +26,14 @@ import {
   seedDefaultProductsIfEmpty
 } from './products.js';
 import {
+  submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
+  fetchOrderById, setOrderStatus, markOrderInvoiced
+} from './orders.js';
+import {
+  submitVisit, fetchMyVisitsPage, fetchAllVisitsForAggregation, aggregateVisitsByRep,
+  NO_ORDER_REASONS
+} from './visits.js';
+import {
   showToast, setButtonLoading, clearButtonLoading,
   initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView
 } from './ui.js';
@@ -33,7 +41,6 @@ import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
 
-// Compact one-line product summary for the invoice list table.
 function formatItemsSummary(items) {
   if (!items || items.length === 0) return '—';
   return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
@@ -87,9 +94,12 @@ async function initApp(user, role) {
   if (appInitialized) { hideAppOverlay(); return; }
   appInitialized = true;
 
+  const isManager = role === 'manager';
+
   document.getElementById('topbarLogo').src = LOGO_DATA_URI;
   document.getElementById('previewLogo').src = LOGO_DATA_URI;
-  document.getElementById('appTitle').textContent = role === 'manager' ? 'Invoice Manager' : 'Invoice Generator';
+  document.getElementById('appTitle').textContent = 'Naisi Foods';
+  document.getElementById('appSubtitle').textContent = isManager ? 'Management' : 'Sales Rep';
 
   const itemsBody = document.getElementById('itemsBody');
   const quickAddGrid = document.getElementById('quickAddGrid');
@@ -120,71 +130,86 @@ async function initApp(user, role) {
   const editingBanner = document.getElementById('editingBanner');
   const editingInvoiceNoLabel = document.getElementById('editingInvoiceNoLabel');
   const cancelEditBtn = document.getElementById('cancelEditBtn');
+  const fromOrderBanner = document.getElementById('fromOrderBanner');
+  const fromOrderNoLabel = document.getElementById('fromOrderNoLabel');
+  const cancelFromOrderBtn = document.getElementById('cancelFromOrderBtn');
   let editingInvoiceId = null;
+  let generatingFromOrder = null; // { id, orderNo } or null
 
-  // ============= VIEW SWITCHING =============
-  const formView = document.getElementById('formView');
-  const invoicesView = document.getElementById('invoicesView');
-  const customersView = document.getElementById('customersView');
-  const expensesView = document.getElementById('expensesView');
-  const productsView = document.getElementById('productsView');
-  const navFormBtn = document.getElementById('navFormBtn');
-  const navInvoicesBtn = document.getElementById('navInvoicesBtn');
-  const navCustomersBtn = document.getElementById('navCustomersBtn');
-  const navExpensesBtn = document.getElementById('navExpensesBtn');
-  const navProductsBtn = document.getElementById('navProductsBtn');
-  const filterCard = document.getElementById('filterCard');
+  // ============= VIEW SWITCHING (role-gated nav) =============
+  const views = {
+    form: document.getElementById('formView'),
+    invoices: document.getElementById('invoicesView'),
+    customers: document.getElementById('customersView'),
+    expenses: document.getElementById('expensesView'),
+    products: document.getElementById('productsView'),
+    orders: document.getElementById('ordersView'),
+    performance: document.getElementById('performanceView'),
+    logvisit: document.getElementById('logvisitView'),
+    myvisits: document.getElementById('myvisitsView'),
+  };
+  const navBtns = {
+    form: document.getElementById('navFormBtn'),
+    invoices: document.getElementById('navInvoicesBtn'),
+    customers: document.getElementById('navCustomersBtn'),
+    expenses: document.getElementById('navExpensesBtn'),
+    products: document.getElementById('navProductsBtn'),
+    orders: document.getElementById('navOrdersBtn'),
+    performance: document.getElementById('navPerformanceBtn'),
+    logvisit: document.getElementById('navLogVisitBtn'),
+    myvisits: document.getElementById('navMyVisitsBtn'),
+  };
 
-  navInvoicesBtn.textContent = role === 'manager' ? 'All Invoices' : 'My Invoices';
-  filterCard.style.display = role === 'manager' ? 'block' : 'none';
-  document.getElementById('addProductCard').style.display = role === 'manager' ? 'block' : 'none';
+  const managerOnlyNav = ['form', 'invoices', 'products', 'performance'];
+  const submitterOnlyNav = ['logvisit', 'myvisits'];
 
-  function showView(view) {
-    formView.style.display = view === 'form' ? 'block' : 'none';
-    invoicesView.style.display = view === 'invoices' ? 'block' : 'none';
-    customersView.style.display = view === 'customers' ? 'block' : 'none';
-    expensesView.style.display = view === 'expenses' ? 'block' : 'none';
-    productsView.style.display = view === 'products' ? 'block' : 'none';
-    navFormBtn.classList.toggle('active', view === 'form');
-    navInvoicesBtn.classList.toggle('active', view === 'invoices');
-    navCustomersBtn.classList.toggle('active', view === 'customers');
-    navExpensesBtn.classList.toggle('active', view === 'expenses');
-    navProductsBtn.classList.toggle('active', view === 'products');
-    const activeEl = { form: formView, invoices: invoicesView, customers: customersView, expenses: expensesView, products: productsView }[view];
-    if (activeEl) fadeInView(activeEl);
+  managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
+  submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
+
+  navBtns.orders.textContent = isManager ? 'Orders' : 'My Orders';
+  document.getElementById('orderFilterCard').style.display = isManager ? 'block' : 'none';
+  document.getElementById('addProductCard').style.display = isManager ? 'block' : 'none';
+
+  const viewLoaders = {
+    invoices: resetAndLoadInvoices,
+    customers: resetAndLoadCustomers,
+    expenses: resetAndLoadExpenses,
+    products: resetAndLoadProducts,
+    orders: resetAndLoadOrders,
+    performance: loadPerformanceView,
+    myvisits: resetAndLoadMyVisits,
+  };
+
+  async function showView(view) {
+    Object.entries(views).forEach(([k, el]) => { if (el) el.style.display = k === view ? 'block' : 'none'; });
+    Object.entries(navBtns).forEach(([k, btn]) => btn.classList.toggle('active', k === view));
+    if (views[view]) fadeInView(views[view]);
+    if (viewLoaders[view]) await viewLoaders[view]();
   }
 
-  navFormBtn.addEventListener('click', () => showView('form'));
-  navInvoicesBtn.addEventListener('click', async () => { showView('invoices'); await resetAndLoadInvoices(); });
-  navCustomersBtn.addEventListener('click', async () => { showView('customers'); await resetAndLoadCustomers(); });
-  navExpensesBtn.addEventListener('click', async () => { showView('expenses'); await resetAndLoadExpenses(); });
-  navProductsBtn.addEventListener('click', async () => { showView('products'); await resetAndLoadProducts(); });
-  showView('form');
+  Object.keys(navBtns).forEach(k => {
+    navBtns[k].addEventListener('click', () => showView(k));
+  });
 
-  // ============= NUMBERING =============
+
+  // ============= NUMBERING (manager-only screen, but always init so PDF/no. logic works) =============
   const invPrefixInput = document.getElementById('invPrefix');
   const invCounterInput = document.getElementById('invCounter');
   const invYearDisplay = document.getElementById('invYearDisplay');
   invYearDisplay.value = currentYear();
 
-  try {
-    await loadCounterState(role === 'manager');
-    watchCounterState((data) => {
-      invPrefixInput.value = data.prefix;
-      invCounterInput.value = data.counter;
-      invYearDisplay.value = currentYear();
-      if (!editingInvoiceId) {
-        els.invoiceNo.value = buildInvoiceNo(data.prefix, data.counter);
-      }
-    });
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-
-  if (role !== 'manager') {
-    invPrefixInput.disabled = true;
-    invCounterInput.disabled = true;
-  } else {
+  if (isManager) {
+    try {
+      await loadCounterState(true);
+      watchCounterState((data) => {
+        invPrefixInput.value = data.prefix;
+        invCounterInput.value = data.counter;
+        invYearDisplay.value = currentYear();
+        if (!editingInvoiceId) els.invoiceNo.value = buildInvoiceNo(data.prefix, data.counter);
+      });
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
     [invPrefixInput, invCounterInput].forEach(input => {
       input.addEventListener('change', async () => {
         const prefix = invPrefixInput.value.trim() || 'NF-INV';
@@ -200,99 +225,131 @@ async function initApp(user, role) {
   }
 
   function refreshPreview() { updatePreview(els); }
-// ============= PRODUCTS: catalog cache for quick-add grid =============
+
+  // ============= PRODUCTS: catalog cache (used by quick-add grids) =============
   let productsCache = [];
   async function loadProductsCache() {
     productsCache = await fetchAllProducts();
-    buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
+    if (isManager) buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
+    buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache);
   }
 
-  // One-time seed: if the catalog is empty, populate it with the original
-  // price-list products so the app works exactly like it did before,
-  // without a manager having to retype anything. Only managers can write,
-  // so only they trigger the seed — submitters just load whatever exists.
-  if (role === 'manager') {
+  if (isManager) {
     try {
       const seeded = await seedDefaultProductsIfEmpty(user.uid);
       if (seeded) showToast('Loaded the default product catalog.', 'info');
-    } catch (err) {
-      console.error(err);
-    }
+    } catch (err) { console.error(err); }
   }
-  await loadProductsCache();
-  
 
-  document.getElementById('addItemBtn').addEventListener('click', () => {
-    addItemRow(itemsBody, refreshPreview, 1, '', '');
-    refreshPreview();
-  });
-
-  // ============= CUSTOMERS AUTOCOMPLETE =============
+  // ============= CUSTOMERS: autocomplete cache (shared) =============
   let customersCache = [];
   async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
   await loadCustomersCache();
 
-  const custSuggestions = document.getElementById('custSuggestions');
-  const saveCustomerBtn = document.getElementById('saveCustomerBtn');
-  const customerSaveNote = document.getElementById('customerSaveNote');
+  // === references used by both roles ===
+  const lvQuickAddGrid = document.getElementById('lvQuickAddGrid');
+  const lvOrderItemsBody = document.getElementById('lvOrderItemsBody');
 
-  function renderSuggestions(matches) {
-    if (!matches.length) { custSuggestions.style.display = 'none'; custSuggestions.innerHTML = ''; return; }
-    custSuggestions.innerHTML = matches.slice(0, 8).map(c => `
-      <div class="suggestion-item" data-id="${c.id}">
-        <span class="sug-name">${c.name}</span>
-        <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
-      </div>
-    `).join('');
-    custSuggestions.style.display = 'block';
+  await loadProductsCache();
+
+  if (isManager) {
+    document.getElementById('addItemBtn').addEventListener('click', () => {
+      addItemRow(itemsBody, refreshPreview, 1, '', '');
+      refreshPreview();
+    });
+
+    const custSuggestions = document.getElementById('custSuggestions');
+    const saveCustomerBtn = document.getElementById('saveCustomerBtn');
+    const customerSaveNote = document.getElementById('customerSaveNote');
+
+    function renderSuggestions(matches) {
+      if (!matches.length) { custSuggestions.style.display = 'none'; custSuggestions.innerHTML = ''; return; }
+      custSuggestions.innerHTML = matches.slice(0, 8).map(c => `
+        <div class="suggestion-item" data-id="${c.id}">
+          <span class="sug-name">${c.name}</span>
+          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+        </div>
+      `).join('');
+      custSuggestions.style.display = 'block';
+    }
+
+    els.custName.addEventListener('input', () => {
+      const q = els.custName.value.trim().toLowerCase();
+      customerSaveNote.textContent = '';
+      if (!q) { custSuggestions.style.display = 'none'; return; }
+      renderSuggestions(customersCache.filter(c => (c.name || '').toLowerCase().includes(q)));
+    });
+    els.custName.addEventListener('blur', () => { setTimeout(() => { custSuggestions.style.display = 'none'; }, 150); });
+    custSuggestions.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      const customer = customersCache.find(c => c.id === item.dataset.id);
+      if (!customer) return;
+      els.custName.value = customer.name;
+      els.custPhone.value = customer.phone || '';
+      els.custLocation.value = customer.location || '';
+      custSuggestions.style.display = 'none';
+      updatePreview(els);
+    });
+
+    saveCustomerBtn.addEventListener('click', async () => {
+      const name = els.custName.value.trim();
+      if (!name) { showToast('Enter a customer name first.', 'error'); return; }
+      const existing = findExactNameMatch(customersCache, name);
+      if (existing) {
+        const proceed = confirm(`A customer named "${name}" already exists.\n\nOK = save as a new entry anyway\nCancel = keep using the existing one`);
+        if (!proceed) {
+          els.custPhone.value = existing.phone || '';
+          els.custLocation.value = existing.location || '';
+          updatePreview(els);
+          return;
+        }
+      }
+      setButtonLoading(saveCustomerBtn, 'Saving…');
+      try {
+        await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), uid: user.uid });
+        customerSaveNote.textContent = 'Saved to customer list.';
+        showToast('Customer saved.', 'success');
+        await loadCustomersCache();
+      } catch (err) {
+        showToast('Could not save the customer: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(saveCustomerBtn);
+      }
+    });
   }
 
-  els.custName.addEventListener('input', () => {
-    const q = els.custName.value.trim().toLowerCase();
-    customerSaveNote.textContent = '';
-    if (!q) { custSuggestions.style.display = 'none'; return; }
-    renderSuggestions(customersCache.filter(c => (c.name || '').toLowerCase().includes(q)));
-  });
-  els.custName.addEventListener('blur', () => { setTimeout(() => { custSuggestions.style.display = 'none'; }, 150); });
-  custSuggestions.addEventListener('mousedown', (e) => {
-    const item = e.target.closest('.suggestion-item');
-    if (!item) return;
-    const customer = customersCache.find(c => c.id === item.dataset.id);
-    if (!customer) return;
-    els.custName.value = customer.name;
-    els.custPhone.value = customer.phone || '';
-    els.custLocation.value = customer.location || '';
-    custSuggestions.style.display = 'none';
-    updatePreview(els);
-  });
+  // ============= Add Customer (shared — both roles) =============
+  const newCustName = document.getElementById('newCustName');
+  const newCustPhone = document.getElementById('newCustPhone');
+  const newCustLocation = document.getElementById('newCustLocation');
+  const addCustomerBtn = document.getElementById('addCustomerBtn');
+  const addCustomerNote = document.getElementById('addCustomerNote');
 
-  saveCustomerBtn.addEventListener('click', async () => {
-    const name = els.custName.value.trim();
-    if (!name) { showToast('Enter a customer name first.', 'error'); return; }
+  addCustomerBtn.addEventListener('click', async () => {
+    const name = newCustName.value.trim();
+    if (!name) { showToast('Enter a customer name.', 'error'); return; }
     const existing = findExactNameMatch(customersCache, name);
     if (existing) {
-      const proceed = confirm(`A customer named "${name}" already exists.\n\nOK = save as a new entry anyway\nCancel = keep using the existing one`);
-      if (!proceed) {
-        els.custPhone.value = existing.phone || '';
-        els.custLocation.value = existing.location || '';
-        updatePreview(els);
-        return;
-      }
+      const proceed = confirm(`A customer named "${name}" already exists.\n\nOK = save as a new entry anyway\nCancel = don't save`);
+      if (!proceed) return;
     }
-    setButtonLoading(saveCustomerBtn, 'Saving…');
+    setButtonLoading(addCustomerBtn, 'Saving…');
     try {
-      await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), uid: user.uid });
-      customerSaveNote.textContent = 'Saved to customer list.';
-      showToast('Customer saved.', 'success');
+      await addCustomer({ name, phone: newCustPhone.value.trim(), location: newCustLocation.value.trim(), uid: user.uid });
+      newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
+      addCustomerNote.textContent = 'Customer added.';
+      showToast('Customer added.', 'success');
       await loadCustomersCache();
+      await resetAndLoadCustomers();
     } catch (err) {
-      showToast('Could not save the customer: ' + err.message, 'error');
+      showToast('Could not add customer: ' + err.message, 'error');
     } finally {
-      clearButtonLoading(saveCustomerBtn);
+      clearButtonLoading(addCustomerBtn);
     }
   });
 
-  // ============= CUSTOMERS MANAGE LIST =============
+  // ============= CUSTOMERS: manage list (shared — both roles can add/edit, read below) =============
   const customerListBody = document.getElementById('customerListBody');
   const customerListEmpty = document.getElementById('customerListEmpty');
   const loadMoreCustomersBtn = document.getElementById('loadMoreCustomersBtn');
@@ -385,64 +442,60 @@ async function initApp(user, role) {
     }
   });
 
-  // ============= PRODUCTS: manage catalog =============
-  const productListBody = document.getElementById('productListBody');
-  const productListEmpty = document.getElementById('productListEmpty');
-  const loadMoreProductsBtn = document.getElementById('loadMoreProductsBtn');
-  const addProductBtn = document.getElementById('addProductBtn');
-  const prodName = document.getElementById('prodName');
-  const prodPack = document.getElementById('prodPack');
-  const prodQuantity = document.getElementById('prodQuantity');
-  const prodPrice = document.getElementById('prodPrice');
+  // ============= PRODUCTS: manage catalog (manager only) =============
+  if (isManager) {
+    const productListBody = document.getElementById('productListBody');
+    const productListEmpty = document.getElementById('productListEmpty');
+    const loadMoreProductsBtn = document.getElementById('loadMoreProductsBtn');
+    const addProductBtn = document.getElementById('addProductBtn');
+    const prodName = document.getElementById('prodName');
+    const prodPack = document.getElementById('prodPack');
+    const prodQuantity = document.getElementById('prodQuantity');
+    const prodPrice = document.getElementById('prodPrice');
+    let loadedProducts = [], productsCursor = null, productsHasMore = true;
 
-  let loadedProducts = [], productsCursor = null, productsHasMore = true;
-
-  function renderProductRows(list) {
-    productListBody.innerHTML = '';
-    productListEmpty.style.display = list.length === 0 ? 'block' : 'none';
-    list.forEach(p => {
-      const tr = document.createElement('tr');
-      tr.dataset.id = p.id;
-      const actions = role === 'manager'
-        ? `<button type="button" class="list-action-btn" data-action="edit">Edit</button>
-           <button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>`
-        : '';
-      tr.innerHTML = `
-        <td>${p.productName}</td>
-        <td>${p.packLabel}</td>
-        <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
-        <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
-        <td>${actions}</td>
-      `;
-      productListBody.appendChild(tr);
-    });
-  }
-
-  async function resetAndLoadProducts() {
-    loadedProducts = []; productsCursor = null; productsHasMore = true;
-    await loadNextProductPage();
-  }
-
-  async function loadNextProductPage() {
-    if (!productsHasMore) return;
-    setButtonLoading(loadMoreProductsBtn, 'Loading…');
-    try {
-      const result = await fetchProductsPage(productsCursor);
-      loadedProducts = loadedProducts.concat(result.items);
-      productsCursor = result.lastDoc;
-      productsHasMore = result.hasMore;
-      renderProductRows(loadedProducts);
-      loadMoreProductsBtn.style.display = productsHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load products: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(loadMoreProductsBtn);
+    function renderProductRows(list) {
+      productListBody.innerHTML = '';
+      productListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+      list.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.dataset.id = p.id;
+        tr.innerHTML = `
+          <td>${p.productName}</td>
+          <td>${p.packLabel}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
+          <td>
+            <button type="button" class="list-action-btn" data-action="edit">Edit</button>
+            <button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>
+          </td>`;
+        productListBody.appendChild(tr);
+      });
     }
-  }
 
-  loadMoreProductsBtn.addEventListener('click', loadNextProductPage);
+    async function resetAndLoadProducts() {
+      loadedProducts = []; productsCursor = null; productsHasMore = true;
+      await loadNextProductPage();
+    }
 
-  if (role === 'manager') {
+    async function loadNextProductPage() {
+      if (!productsHasMore) return;
+      setButtonLoading(loadMoreProductsBtn, 'Loading…');
+      try {
+        const result = await fetchProductsPage(productsCursor);
+        loadedProducts = loadedProducts.concat(result.items);
+        productsCursor = result.lastDoc; productsHasMore = result.hasMore;
+        renderProductRows(loadedProducts);
+        loadMoreProductsBtn.style.display = productsHasMore ? 'block' : 'none';
+      } catch (err) {
+        showToast('Could not load products: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(loadMoreProductsBtn);
+      }
+    }
+
+    loadMoreProductsBtn.addEventListener('click', loadNextProductPage);
+
     addProductBtn.addEventListener('click', async () => {
       const name = prodName.value.trim();
       const pack = prodPack.value.trim();
@@ -464,306 +517,333 @@ async function initApp(user, role) {
         clearButtonLoading(addProductBtn);
       }
     });
+
+    productListBody.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const tr = btn.closest('tr');
+      const id = tr.dataset.id;
+      const p = loadedProducts.find(p => p.id === id);
+
+      if (btn.dataset.action === 'edit') {
+        if (!p) return;
+        tr.innerHTML = `
+          <td><input class="customer-edit-input" data-field="productName" value="${p.productName}"></td>
+          <td><input class="customer-edit-input" data-field="packLabel" value="${p.packLabel}"></td>
+          <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${p.quantity ?? 0}"></td>
+          <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${p.price}"></td>
+          <td>
+            <button type="button" class="list-action-btn" data-action="save">Save</button>
+            <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
+          </td>`;
+      } else if (btn.dataset.action === 'cancel') {
+        renderProductRows(loadedProducts);
+      } else if (btn.dataset.action === 'save') {
+        const productName = tr.querySelector('[data-field="productName"]').value.trim();
+        const packLabel = tr.querySelector('[data-field="packLabel"]').value.trim();
+        const quantity = parseFloat(tr.querySelector('[data-field="quantity"]').value) || 0;
+        const price = parseFloat(tr.querySelector('[data-field="price"]').value) || 0;
+        if (!productName || !packLabel) { showToast('Name and pack cannot be empty.', 'error'); return; }
+        setButtonLoading(btn, 'Saving…');
+        try {
+          await updateProduct(id, { productName, packLabel, quantity, price });
+          const idx = loadedProducts.findIndex(p => p.id === id);
+          if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], productName, packLabel, quantity, price };
+          renderProductRows(loadedProducts);
+          await loadProductsCache();
+          showToast('Product updated.', 'success');
+        } catch (err) {
+          showToast('Could not update product: ' + err.message, 'error');
+          clearButtonLoading(btn);
+        }
+      } else if (btn.dataset.action === 'delete') {
+        const confirmed = confirm(`Delete "${p?.productName} — ${p?.packLabel}" from the catalog?\n\nThis cannot be undone.`);
+        if (!confirmed) return;
+        setButtonLoading(btn, '…');
+        try {
+          await deleteProduct(id);
+          loadedProducts = loadedProducts.filter(p => p.id !== id);
+          renderProductRows(loadedProducts);
+          await loadProductsCache();
+          showToast('Product deleted.', 'success');
+        } catch (err) {
+          showToast('Could not delete product: ' + err.message, 'error');
+          clearButtonLoading(btn);
+        }
+      }
+    });
+
+    var resetAndLoadProductsRef = resetAndLoadProducts; // exposed to viewLoaders closure below
   }
+  async function resetAndLoadProducts() { if (typeof resetAndLoadProductsRef === 'function') await resetAndLoadProductsRef(); }
 
-  productListBody.addEventListener('click', async (e) => {
-    if (role !== 'manager') return;
-    const btn = e.target.closest('button[data-action]');
-    if (!btn) return;
-    const tr = btn.closest('tr');
-    const id = tr.dataset.id;
-    const p = loadedProducts.find(p => p.id === id);
-
-    if (btn.dataset.action === 'edit') {
-      if (!p) return;
-      tr.innerHTML = `
-        <td><input class="customer-edit-input" data-field="productName" value="${p.productName}"></td>
-        <td><input class="customer-edit-input" data-field="packLabel" value="${p.packLabel}"></td>
-        <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${p.quantity ?? 0}"></td>
-        <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${p.price}"></td>
-        <td>
-          <button type="button" class="list-action-btn" data-action="save">Save</button>
-          <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
-        </td>
-      `;
-    } else if (btn.dataset.action === 'cancel') {
-      renderProductRows(loadedProducts);
-    } else if (btn.dataset.action === 'save') {
-      const productName = tr.querySelector('[data-field="productName"]').value.trim();
-      const packLabel = tr.querySelector('[data-field="packLabel"]').value.trim();
-      const quantity = parseFloat(tr.querySelector('[data-field="quantity"]').value) || 0;
-      const price = parseFloat(tr.querySelector('[data-field="price"]').value) || 0;
-      if (!productName || !packLabel) { showToast('Name and pack cannot be empty.', 'error'); return; }
-      setButtonLoading(btn, 'Saving…');
-      try {
-        await updateProduct(id, { productName, packLabel, quantity, price });
-        const idx = loadedProducts.findIndex(p => p.id === id);
-        if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], productName, packLabel, quantity, price };
-        renderProductRows(loadedProducts);
-        await loadProductsCache();
-        showToast('Product updated.', 'success');
-      } catch (err) {
-        showToast('Could not update product: ' + err.message, 'error');
-        clearButtonLoading(btn);
-      }
-    } else if (btn.dataset.action === 'delete') {
-      const confirmed = confirm(`Delete "${p?.productName} — ${p?.packLabel}" from the catalog?\n\nThis cannot be undone. Existing invoices already using it are unaffected.`);
-      if (!confirmed) return;
-      setButtonLoading(btn, '…');
-      try {
-        await deleteProduct(id);
-        loadedProducts = loadedProducts.filter(p => p.id !== id);
-        renderProductRows(loadedProducts);
-        await loadProductsCache();
-        showToast('Product deleted.', 'success');
-      } catch (err) {
-        showToast('Could not delete product: ' + err.message, 'error');
-        clearButtonLoading(btn);
-      }
-    }
-  });
-
-  // ============= FORM / INVOICE SUBMIT =============
-  if (role === 'submitter') {
-    generateBtn.textContent = 'Submit Invoice';
-    generateNote.textContent = 'Saves this invoice. A manager will handle printing/downloading it.';
-  } else {
+  // ============= NEW INVOICE FORM (manager only) =============
+  if (isManager) {
     generateBtn.textContent = 'Download PDF Invoice';
     generateNote.textContent = 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
-  }
 
-  const today = new Date();
-  els.invoiceDate.value = today.toISOString().slice(0, 10);
-  refreshPreview();
-
-  ['invoiceDate', 'custName', 'custPhone', 'custLocation', 'terms', 'providerPhone', 'notes'].forEach(id => {
-    document.getElementById(id).addEventListener('input', refreshPreview);
-    document.getElementById(id).addEventListener('change', refreshPreview);
-  });
-
-  function populateFormFromInvoice(inv) {
-    invPrefixInput.disabled = true;
-    invCounterInput.disabled = true;
-    els.invoiceNo.value = inv.invoiceNo;
-    els.invoiceDate.value = inv.date || '';
-    els.custName.value = inv.customer === '-' ? '' : inv.customer;
-    els.custPhone.value = inv.phone === '-' ? '' : inv.phone;
-    els.custLocation.value = inv.location === '-' ? '' : inv.location;
-    els.terms.value = inv.terms || 'CASH ON DELIVERY (COD)';
-    els.providerPhone.value = inv.providerPhone || '';
-    els.notes.value = inv.notes || '';
-    itemsBody.innerHTML = '';
-    (inv.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
-    editingInvoiceId = inv.id;
-    editingInvoiceNoLabel.textContent = inv.invoiceNo;
-    editingBanner.style.display = 'block';
-    generateBtn.textContent = 'Save Changes';
-    generateNote.textContent = 'Updates this invoice in place. Does not touch invoice numbering.';
-    showView('form');
+    const today = new Date();
+    els.invoiceDate.value = today.toISOString().slice(0, 10);
     refreshPreview();
-  }
 
-  function exitEditMode() {
-    editingInvoiceId = null;
-    editingBanner.style.display = 'none';
-    generateBtn.textContent = role === 'submitter' ? 'Submit Invoice' : 'Download PDF Invoice';
-    generateNote.textContent = role === 'submitter'
-      ? 'Saves this invoice. A manager will handle printing/downloading it.'
-      : 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
-    invPrefixInput.disabled = role !== 'manager';
-    invCounterInput.disabled = role !== 'manager';
-    itemsBody.innerHTML = '';
-    els.custName.value = ''; els.custPhone.value = ''; els.custLocation.value = '';
-    els.notes.value = ''; els.providerPhone.value = '';
-    els.invoiceDate.value = new Date().toISOString().slice(0, 10);
-    refreshPreview();
-  }
-
-  cancelEditBtn.addEventListener('click', (e) => { e.preventDefault(); exitEditMode(); });
-
-  generateBtn.addEventListener('click', async () => {
-    const wasEditing = !!editingInvoiceId;
-    setButtonLoading(generateBtn, wasEditing ? 'Saving…' : role === 'manager' ? 'Generating…' : 'Submitting…');
-    try {
-      const items = getItems(itemsBody);
-      let invoiceNo = els.invoiceNo.value;
-      let reservation = null;
-
-      if (!wasEditing) {
-        reservation = await incrementCounterAtomically();
-        invoiceNo = reservation.usedNo;
-      }
-
-      const meta = {
-        invoiceNo,
-        date: els.invoiceDate.value,
-        customer: els.custName.value || '-',
-        phone: els.custPhone.value || '-',
-        location: els.custLocation.value || '-',
-        terms: els.terms.value,
-        providerPhone: els.providerPhone.value.trim(),
-        notes: els.notes.value.trim(),
-        items,
-      };
-
-      let grandTotal;
-      if (role === 'manager') {
-        ({ grandTotal } = generatePdf(meta));
-      } else {
-        grandTotal = items.reduce((sum, it) => sum + it.total, 0);
-      }
-
-      if (wasEditing) {
-        await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
-        exitEditMode();
-        showToast('Invoice updated.', 'success');
-      } else {
-        await addDoc(collection(db, 'invoices'), {
-          ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
-        });
-        els.invoiceNo.value = buildInvoiceNo(reservation.next.prefix, reservation.next.counter);
-        showToast(role === 'manager' ? 'Invoice saved and downloaded.' : 'Invoice submitted.', 'success');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Could not save the invoice: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(generateBtn);
-    }
-  });
-
-  // ============= INVOICES LIST =============
-  const listTitle = document.getElementById('listTitle');
-  const listHead = document.getElementById('invoiceListHead');
-  const listBody = document.getElementById('invoiceListBody');
-  const listEmpty = document.getElementById('invoiceListEmpty');
-  const loadMoreInvoicesBtn = document.getElementById('loadMoreInvoicesBtn');
-  const invoiceSearchInput = document.getElementById('invoiceSearchInput');
-  const invoiceSearchHint = document.getElementById('invoiceSearchHint');
-  let invoiceListMode = 'default', invoiceRangeFrom = null, invoiceRangeTo = null;
-  let loadedInvoices = [], invoicesCursor = null, invoicesHasMore = true;
-
-  function renderInvoiceRows(list) {
-    listBody.innerHTML = '';
-    listEmpty.style.display = list.length === 0 ? 'block' : 'none';
-    list.forEach(inv => {
-      const tr = document.createElement('tr');
-      const productsSummary = formatItemsSummary(inv.items);
-      const base = `
-        <td>${inv.invoiceNo}</td>
-        <td>${formatDate(inv.date)}</td>
-        <td>${inv.customer}</td>
-        <td class="inv-products-cell" title="${productsSummary}">${productsSummary}</td>
-        <td>${mwk(inv.grandTotal || 0)}</td>
-      `;
-      tr.innerHTML = role === 'manager'
-        ? base + `<td><button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button><button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button></td>`
-        : base;
-      listBody.appendChild(tr);
+    ['invoiceDate', 'custName', 'custPhone', 'custLocation', 'terms', 'providerPhone', 'notes'].forEach(id => {
+      document.getElementById(id).addEventListener('input', refreshPreview);
+      document.getElementById(id).addEventListener('change', refreshPreview);
     });
-  }
 
-  function applyInvoiceSearchAndRender() {
-    const term = invoiceSearchInput.value.trim().toLowerCase();
-    const filtered = term
-      ? loadedInvoices.filter(inv => (inv.invoiceNo || '').toLowerCase().includes(term) || (inv.customer || '').toLowerCase().includes(term))
-      : loadedInvoices;
-    renderInvoiceRows(filtered);
-    invoiceSearchHint.textContent = term ? `Searching ${loadedInvoices.length} loaded invoices.` : '';
-  }
-
-  async function resetAndLoadInvoices() {
-    invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
-    invoiceSearchInput.value = '';
-    listTitle.textContent = role === 'manager' ? 'All Invoices' : 'My Submitted Invoices';
-    listHead.innerHTML = role === 'manager'
-      ? `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`
-      : `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th></tr>`;
-    await loadNextInvoicePage();
-  }
-
-  async function loadNextInvoicePage() {
-    if (!invoicesHasMore) return;
-    setButtonLoading(loadMoreInvoicesBtn, 'Loading…');
-    try {
-      let result;
-      if (invoiceListMode === 'range') result = await fetchInvoicesByDateRangePage(invoiceRangeFrom, invoiceRangeTo, invoicesCursor);
-      else if (role === 'manager') result = await fetchAllInvoicesPage(invoicesCursor);
-      else result = await fetchMyInvoicesPage(user.uid, invoicesCursor);
-      loadedInvoices = loadedInvoices.concat(result.items);
-      invoicesCursor = result.lastDoc; invoicesHasMore = result.hasMore;
-      applyInvoiceSearchAndRender();
-      loadMoreInvoicesBtn.style.display = invoicesHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load invoices: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(loadMoreInvoicesBtn);
+    function populateFormFromInvoice(inv) {
+      invPrefixInput.disabled = true;
+      invCounterInput.disabled = true;
+      els.invoiceNo.value = inv.invoiceNo;
+      els.invoiceDate.value = inv.date || '';
+      els.custName.value = inv.customer === '-' ? '' : inv.customer;
+      els.custPhone.value = inv.phone === '-' ? '' : inv.phone;
+      els.custLocation.value = inv.location === '-' ? '' : inv.location;
+      els.terms.value = inv.terms || 'CASH ON DELIVERY (COD)';
+      els.providerPhone.value = inv.providerPhone || '';
+      els.notes.value = inv.notes || '';
+      itemsBody.innerHTML = '';
+      (inv.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
+      editingInvoiceId = inv.id;
+      editingInvoiceNoLabel.textContent = inv.invoiceNo;
+      editingBanner.style.display = 'block';
+      generateBtn.textContent = 'Save Changes';
+      generateNote.textContent = 'Updates this invoice in place. Does not touch invoice numbering.';
+      showView('form');
+      refreshPreview();
     }
-  }
 
-  loadMoreInvoicesBtn.addEventListener('click', loadNextInvoicePage);
-  invoiceSearchInput.addEventListener('input', applyInvoiceSearchAndRender);
-
-  document.getElementById('applyFilterBtn').addEventListener('click', async () => {
-    if (role !== 'manager') return;
-    const from = document.getElementById('filterFrom').value;
-    const to = document.getElementById('filterTo').value;
-    if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
-    invoiceListMode = 'range'; invoiceRangeFrom = from; invoiceRangeTo = to;
-    loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true; invoiceSearchInput.value = '';
-    listTitle.textContent = `Invoices: ${from} to ${to}`;
-    listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
-    await loadNextInvoicePage();
-  });
-
-  document.getElementById('clearFilterBtn').addEventListener('click', async () => {
-    if (role !== 'manager') return;
-    document.getElementById('filterFrom').value = '';
-    document.getElementById('filterTo').value = '';
-    await resetAndLoadInvoices();
-  });
-
-  document.getElementById('exportBtn').addEventListener('click', async () => {
-    if (role !== 'manager') return;
-    const from = document.getElementById('filterFrom').value;
-    const to = document.getElementById('filterTo').value;
-    if (!from || !to) { showToast('Pick both a From and To date to export.', 'error'); return; }
-    const exportBtn = document.getElementById('exportBtn');
-    setButtonLoading(exportBtn, 'Building report…');
-    try {
-      const all = await fetchInvoicesByDateRange(from, to);
-      if (!all.length) { showToast('No invoices found in that range.', 'info'); return; }
-      await buildAndDownloadInvoiceReport(all, from, to);
-      showToast('Report downloaded.', 'success');
-    } catch (err) {
-      showToast('Could not build the report: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(exportBtn);
+    function exitEditMode() {
+      editingInvoiceId = null;
+      editingBanner.style.display = 'none';
+      generateBtn.textContent = 'Download PDF Invoice';
+      generateNote.textContent = 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
+      invPrefixInput.disabled = false;
+      invCounterInput.disabled = false;
+      itemsBody.innerHTML = '';
+      els.custName.value = ''; els.custPhone.value = ''; els.custLocation.value = '';
+      els.notes.value = ''; els.providerPhone.value = '';
+      els.invoiceDate.value = new Date().toISOString().slice(0, 10);
+      refreshPreview();
     }
-  });
 
-  listBody.addEventListener('click', async (e) => {
-    if (role !== 'manager') return;
-    const btn = e.target.closest('button[data-action]');
-    if (!btn) return;
-    setButtonLoading(btn, '…');
-    try {
-      const inv = await fetchInvoiceById(btn.dataset.id);
-      if (!inv) return;
-      if (btn.dataset.action === 'edit') {
-        populateFormFromInvoice(inv);
-      } else if (btn.dataset.action === 'download') {
-        generatePdf({ invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer, phone: inv.phone, location: inv.location, terms: inv.terms, providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [] });
-        showToast('PDF downloaded.', 'success');
+    cancelEditBtn.addEventListener('click', (e) => { e.preventDefault(); exitEditMode(); });
+
+    // ---- Generate invoice from an approved order ----
+    function loadOrderIntoInvoiceForm(order) {
+      exitEditMode();
+      generatingFromOrder = { id: order.id, orderNo: order.orderNo };
+      fromOrderNoLabel.textContent = order.orderNo;
+      fromOrderBanner.style.display = 'block';
+
+      els.custName.value = order.customerName || '';
+      els.custPhone.value = order.customerPhone === '-' ? '' : (order.customerPhone || '');
+      els.custLocation.value = order.customerLocation === '-' ? '' : (order.customerLocation || '');
+      els.notes.value = order.notes || '';
+
+      itemsBody.innerHTML = '';
+      (order.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
+
+      showView('form');
+      refreshPreview();
+      showToast(`Loaded order ${order.orderNo} — review and download.`, 'info');
+    }
+
+    function exitFromOrderMode() {
+      generatingFromOrder = null;
+      fromOrderBanner.style.display = 'none';
+    }
+
+    cancelFromOrderBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      exitFromOrderMode();
+      exitEditMode();
+    });
+
+    generateBtn.addEventListener('click', async () => {
+      const wasEditing = !!editingInvoiceId;
+      setButtonLoading(generateBtn, wasEditing ? 'Saving…' : 'Generating…');
+      try {
+        const items = getItems(itemsBody);
+        let invoiceNo = els.invoiceNo.value;
+        let reservation = null;
+
+        if (!wasEditing) {
+          reservation = await incrementCounterAtomically();
+          invoiceNo = reservation.usedNo;
+        }
+
+        const meta = {
+          invoiceNo,
+          date: els.invoiceDate.value,
+          customer: els.custName.value || '-',
+          phone: els.custPhone.value || '-',
+          location: els.custLocation.value || '-',
+          terms: els.terms.value,
+          providerPhone: els.providerPhone.value.trim(),
+          notes: els.notes.value.trim(),
+          items,
+        };
+
+        const { grandTotal } = generatePdf(meta);
+
+        if (wasEditing) {
+          await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
+          exitEditMode();
+          showToast('Invoice updated.', 'success');
+        } else {
+          const docRef = await addDoc(collection(db, 'invoices'), {
+            ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
+          });
+          els.invoiceNo.value = buildInvoiceNo(reservation.next.prefix, reservation.next.counter);
+
+          if (generatingFromOrder) {
+            try {
+              await markOrderInvoiced(generatingFromOrder.id, { invoiceId: docRef.id, invoiceNo });
+              showToast(`Invoice saved. Order ${generatingFromOrder.orderNo} marked as Invoiced.`, 'success');
+            } catch (err) {
+              showToast('Invoice saved, but could not update the order status: ' + err.message, 'error');
+            }
+            exitFromOrderMode();
+          } else {
+            showToast('Invoice saved and downloaded.', 'success');
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        showToast('Could not save the invoice: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(generateBtn);
       }
-    } catch (err) {
-      showToast('Something went wrong: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(btn);
-    }
-  });
+    });
 
-  // ============= EXPENSES =============
+    // ============= INVOICES LIST (manager only) =============
+    var listTitle = document.getElementById('listTitle');
+    var listHead = document.getElementById('invoiceListHead');
+    var listBody = document.getElementById('invoiceListBody');
+    var listEmpty = document.getElementById('invoiceListEmpty');
+    var loadMoreInvoicesBtn = document.getElementById('loadMoreInvoicesBtn');
+    var invoiceSearchInput = document.getElementById('invoiceSearchInput');
+    var invoiceSearchHint = document.getElementById('invoiceSearchHint');
+    var invoiceListMode = 'default', invoiceRangeFrom = null, invoiceRangeTo = null;
+    var loadedInvoices = [], invoicesCursor = null, invoicesHasMore = true;
+
+    function renderInvoiceRows(list) {
+      listBody.innerHTML = '';
+      listEmpty.style.display = list.length === 0 ? 'block' : 'none';
+      list.forEach(inv => {
+        const tr = document.createElement('tr');
+        const productsSummary = formatItemsSummary(inv.items);
+        tr.innerHTML = `
+          <td>${inv.invoiceNo}</td>
+          <td>${formatDate(inv.date)}</td>
+          <td>${inv.customer}</td>
+          <td class="inv-products-cell" title="${productsSummary}">${productsSummary}</td>
+          <td>${mwk(inv.grandTotal || 0)}</td>
+          <td><button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button><button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button></td>
+        `;
+        listBody.appendChild(tr);
+      });
+    }
+
+    function applyInvoiceSearchAndRender() {
+      const term = invoiceSearchInput.value.trim().toLowerCase();
+      const filtered = term
+        ? loadedInvoices.filter(inv => (inv.invoiceNo || '').toLowerCase().includes(term) || (inv.customer || '').toLowerCase().includes(term))
+        : loadedInvoices;
+      renderInvoiceRows(filtered);
+      invoiceSearchHint.textContent = term ? `Searching ${loadedInvoices.length} loaded invoices.` : '';
+    }
+
+    window.resetAndLoadInvoices = async function resetAndLoadInvoices() {
+      invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
+      invoiceSearchInput.value = '';
+      listTitle.textContent = 'All Invoices';
+      listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
+      await loadNextInvoicePage();
+    };
+
+    async function loadNextInvoicePage() {
+      if (!invoicesHasMore) return;
+      setButtonLoading(loadMoreInvoicesBtn, 'Loading…');
+      try {
+        let result;
+        if (invoiceListMode === 'range') result = await fetchInvoicesByDateRangePage(invoiceRangeFrom, invoiceRangeTo, invoicesCursor);
+        else result = await fetchAllInvoicesPage(invoicesCursor);
+        loadedInvoices = loadedInvoices.concat(result.items);
+        invoicesCursor = result.lastDoc; invoicesHasMore = result.hasMore;
+        applyInvoiceSearchAndRender();
+        loadMoreInvoicesBtn.style.display = invoicesHasMore ? 'block' : 'none';
+      } catch (err) {
+        showToast('Could not load invoices: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(loadMoreInvoicesBtn);
+      }
+    }
+
+    loadMoreInvoicesBtn.addEventListener('click', loadNextInvoicePage);
+    invoiceSearchInput.addEventListener('input', applyInvoiceSearchAndRender);
+
+    document.getElementById('applyFilterBtn').addEventListener('click', async () => {
+      const from = document.getElementById('filterFrom').value;
+      const to = document.getElementById('filterTo').value;
+      if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
+      invoiceListMode = 'range'; invoiceRangeFrom = from; invoiceRangeTo = to;
+      loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true; invoiceSearchInput.value = '';
+      listTitle.textContent = `Invoices: ${from} to ${to}`;
+      listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
+      await loadNextInvoicePage();
+    });
+
+    document.getElementById('clearFilterBtn').addEventListener('click', async () => {
+      document.getElementById('filterFrom').value = '';
+      document.getElementById('filterTo').value = '';
+      await window.resetAndLoadInvoices();
+    });
+
+    document.getElementById('exportBtn').addEventListener('click', async () => {
+      const from = document.getElementById('filterFrom').value;
+      const to = document.getElementById('filterTo').value;
+      if (!from || !to) { showToast('Pick both a From and To date to export.', 'error'); return; }
+      const exportBtn = document.getElementById('exportBtn');
+      setButtonLoading(exportBtn, 'Building report…');
+      try {
+        const all = await fetchInvoicesByDateRange(from, to);
+        if (!all.length) { showToast('No invoices found in that range.', 'info'); return; }
+        await buildAndDownloadInvoiceReport(all, from, to);
+        showToast('Report downloaded.', 'success');
+      } catch (err) {
+        showToast('Could not build the report: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(exportBtn);
+      }
+    });
+
+    listBody.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      setButtonLoading(btn, '…');
+      try {
+        const inv = await fetchInvoiceById(btn.dataset.id);
+        if (!inv) return;
+        if (btn.dataset.action === 'edit') {
+          populateFormFromInvoice(inv);
+        } else if (btn.dataset.action === 'download') {
+          generatePdf({ invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer, phone: inv.phone, location: inv.location, terms: inv.terms, providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [] });
+          showToast('PDF downloaded.', 'success');
+        }
+      } catch (err) {
+        showToast('Something went wrong: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(btn);
+      }
+    });
+
+    window.__loadOrderIntoInvoiceForm = loadOrderIntoInvoiceForm;
+  }
+  async function resetAndLoadInvoices() { if (window.resetAndLoadInvoices) await window.resetAndLoadInvoices(); }
+
+  // ============= EXPENSES (shared) =============
   const addExpenseBtn = document.getElementById('addExpenseBtn');
   const expDate = document.getElementById('expDate');
   const expCategory = document.getElementById('expCategory');
@@ -778,8 +858,8 @@ async function initApp(user, role) {
   const expenseSearchHint = document.getElementById('expenseSearchHint');
 
   expDate.value = new Date().toISOString().slice(0, 10);
-  expListTitle.textContent = role === 'manager' ? 'All Expenses' : 'My Expenses';
-  expenseListHead.innerHTML = role === 'manager'
+  expListTitle.textContent = isManager ? 'All Expenses' : 'My Expenses';
+  expenseListHead.innerHTML = isManager
     ? `<tr><th>Date</th><th>Category</th><th>Amount</th><th>Notes</th><th>By</th><th></th></tr>`
     : `<tr><th>Date</th><th>Category</th><th>Amount</th><th>Notes</th><th></th></tr>`;
 
@@ -813,11 +893,11 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = exp.id;
       const notesShort = exp.notes ? (exp.notes.length > 40 ? exp.notes.substring(0, 40) + '…' : exp.notes) : '—';
-      const byCell = role === 'manager' ? `<td style="font-size:0.72rem; color:var(--muted);">${exp.createdByEmail || '—'}</td>` : '';
-      const canEdit = role === 'manager' || exp.createdBy === user.uid;
+      const byCell = isManager ? `<td style="font-size:0.72rem; color:var(--muted);">${exp.createdByEmail || '—'}</td>` : '';
+      const canEdit = isManager || exp.createdBy === user.uid;
       const actions = `
         ${canEdit ? `<button type="button" class="list-action-btn" data-action="edit">Edit</button>` : ''}
-        ${role === 'manager' ? `<button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>` : ''}
+        ${isManager ? `<button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>` : ''}
       `;
       tr.innerHTML = `
         <td>${formatDate(exp.date)}</td>
@@ -851,7 +931,7 @@ async function initApp(user, role) {
     if (!expensesHasMore) return;
     setButtonLoading(loadMoreExpensesBtn, 'Loading…');
     try {
-      const result = role === 'manager'
+      const result = isManager
         ? await fetchAllExpensesPage(expensesCursor)
         : await fetchMyExpensesPage(user.uid, expensesCursor);
       loadedExpenses = loadedExpenses.concat(result.items);
@@ -878,8 +958,7 @@ async function initApp(user, role) {
     setButtonLoading(addExpenseBtn, 'Saving…');
     try {
       await addExpense({ date, category, amount, notes, uid: user.uid, email: user.email });
-      expAmount.value = '';
-      expNotes.value = '';
+      expAmount.value = ''; expNotes.value = '';
       expDate.value = new Date().toISOString().slice(0, 10);
       showToast('Expense logged.', 'success');
       await resetAndLoadExpenses();
@@ -899,8 +978,8 @@ async function initApp(user, role) {
 
     if (btn.dataset.action === 'edit') {
       if (!exp) return;
-      if (role !== 'manager' && exp.createdBy !== user.uid) return;
-      const byEditCell = role === 'manager' ? `<td></td>` : '';
+      if (!isManager && exp.createdBy !== user.uid) return;
+      const byEditCell = isManager ? `<td></td>` : '';
       tr.innerHTML = `
         <td><input class="customer-edit-input" data-field="date" type="date" value="${exp.date || ''}"></td>
         <td>
@@ -939,7 +1018,7 @@ async function initApp(user, role) {
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'delete') {
-      if (role !== 'manager') return;
+      if (!isManager) return;
       const confirmed = confirm(`Delete this ${exp?.category || ''} expense of ${mwk(exp?.amount || 0)}?\n\nThis cannot be undone.`);
       if (!confirmed) return;
       setButtonLoading(btn, '…');
@@ -954,6 +1033,402 @@ async function initApp(user, role) {
       }
     }
   });
+
+  // ============= ORDERS (shared list; actions differ by role) =============
+  const orderListTitle = document.getElementById('orderListTitle');
+  const orderListHead = document.getElementById('orderListHead');
+  const orderListBody = document.getElementById('orderListBody');
+  const orderListEmpty = document.getElementById('orderListEmpty');
+  const loadMoreOrdersBtn = document.getElementById('loadMoreOrdersBtn');
+  const orderStatusFilter = document.getElementById('orderStatusFilter');
+
+  let loadedOrders = [], ordersCursor = null, ordersHasMore = true;
+  let currentOrderStatusFilter = 'Submitted';
+
+  function orderStatusBadge(status) {
+    return `<span class="order-status-badge order-status-${status}">${status}</span>`;
+  }
+
+  function renderOrderRows(list) {
+    orderListBody.innerHTML = '';
+    orderListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    list.forEach(o => {
+      const tr = document.createElement('tr');
+      tr.dataset.id = o.id;
+      const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
+      const baseCells = `
+        <td>${o.orderNo}</td>
+        <td>${o.customerName}</td>
+        <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
+        <td>${mwk(o.grandTotal || 0)}</td>
+        <td>${orderStatusBadge(o.status)}</td>
+      `;
+      let actions = '';
+      if (isManager) {
+        if (o.status === 'Submitted') {
+          actions = `
+            <button type="button" class="list-action-btn" data-action="approve">Approve</button>
+            <button type="button" class="list-action-btn exp-delete-btn" data-action="reject">Reject</button>
+          `;
+        } else if (o.status === 'Approved') {
+          actions = `
+            <button type="button" class="list-action-btn" data-action="generate-invoice">Generate Invoice</button>
+            <button type="button" class="list-action-btn exp-delete-btn" data-action="cancel">Cancel</button>
+          `;
+        }
+      }
+      // Reps: no actions — only managers change order status now.
+      tr.innerHTML = baseCells + `<td>${actions}</td>`;
+      orderListBody.appendChild(tr);
+    });
+  }
+
+  async function resetAndLoadOrders() {
+    loadedOrders = []; ordersCursor = null; ordersHasMore = true;
+    orderListTitle.textContent = isManager
+      ? (currentOrderStatusFilter === 'all' ? 'All Orders' : `Orders: ${currentOrderStatusFilter}`)
+      : 'My Orders';
+    orderListHead.innerHTML = `<tr><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr>`;
+    await loadNextOrderPage();
+  }
+
+  async function loadNextOrderPage() {
+    if (!ordersHasMore) return;
+    setButtonLoading(loadMoreOrdersBtn, 'Loading…');
+    try {
+      let result;
+      if (isManager) {
+        result = currentOrderStatusFilter === 'all'
+          ? await fetchAllOrdersPage(ordersCursor)
+          : await fetchOrdersByStatusPage(currentOrderStatusFilter, ordersCursor);
+      } else {
+        result = await fetchMyOrdersPage(user.uid, ordersCursor);
+      }
+      loadedOrders = loadedOrders.concat(result.items);
+      ordersCursor = result.lastDoc; ordersHasMore = result.hasMore;
+      renderOrderRows(loadedOrders);
+      loadMoreOrdersBtn.style.display = ordersHasMore ? 'block' : 'none';
+    } catch (err) {
+      showToast('Could not load orders: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(loadMoreOrdersBtn);
+    }
+  }
+
+  loadMoreOrdersBtn.addEventListener('click', loadNextOrderPage);
+
+  if (isManager) {
+    orderStatusFilter.addEventListener('change', async () => {
+      currentOrderStatusFilter = orderStatusFilter.value;
+      await resetAndLoadOrders();
+    });
+  }
+
+  orderListBody.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    const id = tr.dataset.id;
+    const order = loadedOrders.find(o => o.id === id);
+    if (!order) return;
+
+    if (btn.dataset.action === 'approve') {
+      setButtonLoading(btn, '…');
+      try {
+        await setOrderStatus(id, 'Approved');
+        showToast(`Order ${order.orderNo} approved.`, 'success');
+        await resetAndLoadOrders();
+      } catch (err) {
+        showToast('Could not approve: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    } else if (btn.dataset.action === 'reject') {
+      const reason = prompt('Reason for rejecting this order (optional):') || '';
+      setButtonLoading(btn, '…');
+      try {
+        await setOrderStatus(id, 'Rejected', reason);
+        showToast(`Order ${order.orderNo} rejected.`, 'success');
+        await resetAndLoadOrders();
+      } catch (err) {
+        showToast('Could not reject: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    } else if (btn.dataset.action === 'cancel') {
+      const confirmed = confirm(`Cancel order ${order.orderNo}?`);
+      if (!confirmed) return;
+      setButtonLoading(btn, '…');
+      try {
+        await setOrderStatus(id, 'Cancelled');
+        showToast('Order cancelled.', 'success');
+        await resetAndLoadOrders();
+      } catch (err) {
+        showToast('Could not cancel: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    } else if (btn.dataset.action === 'generate-invoice') {
+      if (window.__loadOrderIntoInvoiceForm) window.__loadOrderIntoInvoiceForm(order);
+    }
+  });
+
+  // ============= LOG VISIT (submitter) =============
+  if (!isManager) {
+    const lvCustSearch = document.getElementById('lvCustSearch');
+    const lvCustSuggestions = document.getElementById('lvCustSuggestions');
+    const lvSelectedCustomer = document.getElementById('lvSelectedCustomer');
+    const lvCustName = document.getElementById('lvCustName');
+    const lvCustPhone = document.getElementById('lvCustPhone');
+    const lvCustLocation = document.getElementById('lvCustLocation');
+    const lvClearCustomer = document.getElementById('lvClearCustomer');
+    const lvOutcomeCard = document.getElementById('lvOutcomeCard');
+    const lvOutcomeYes = document.getElementById('lvOutcomeYes');
+    const lvOutcomeNo = document.getElementById('lvOutcomeNo');
+    const lvNoOrderFields = document.getElementById('lvNoOrderFields');
+    const lvReason = document.getElementById('lvReason');
+    const lvReasonNotes = document.getElementById('lvReasonNotes');
+    const lvSubmitNoOrderBtn = document.getElementById('lvSubmitNoOrderBtn');
+    const lvOrderFormWrap = document.getElementById('lvOrderFormWrap');
+    const lvOrderNotes = document.getElementById('lvOrderNotes');
+    const lvSubmitOrderBtn = document.getElementById('lvSubmitOrderBtn');
+
+    let lvSelected = null;
+
+    function lvResetOutcome() {
+      lvOutcomeCard.style.display = 'none';
+      lvNoOrderFields.style.display = 'none';
+      lvOrderFormWrap.style.display = 'none';
+      lvOutcomeYes.classList.remove('active');
+      lvOutcomeNo.classList.remove('active');
+      lvOrderItemsBody.innerHTML = '';
+      lvOrderNotes.value = '';
+      lvReasonNotes.value = '';
+      lvReason.value = 'Not interested';
+    }
+
+    function lvResetAll() {
+      lvSelected = null;
+      lvSelectedCustomer.style.display = 'none';
+      lvCustSearch.style.display = 'block';
+      lvCustSearch.value = '';
+      lvResetOutcome();
+    }
+
+    document.getElementById('orderAddItemBtnPlaceholder'); // no-op guard
+
+    document.getElementById('lvOrderAddItemBtn').addEventListener('click', () => {
+      addItemRow(lvOrderItemsBody, () => {}, 1, '', '');
+    });
+
+    lvCustSearch.addEventListener('input', () => {
+      const q = lvCustSearch.value.trim().toLowerCase();
+      if (!q) { lvCustSuggestions.style.display = 'none'; return; }
+      const matches = customersCache.filter(c => (c.name || '').toLowerCase().includes(q));
+      if (!matches.length) { lvCustSuggestions.style.display = 'none'; return; }
+      lvCustSuggestions.innerHTML = matches.slice(0, 8).map(c => `
+        <div class="suggestion-item" data-id="${c.id}">
+          <span class="sug-name">${c.name}</span>
+          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+        </div>
+      `).join('');
+      lvCustSuggestions.style.display = 'block';
+    });
+
+    lvCustSuggestions.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      const c = customersCache.find(c => c.id === item.dataset.id);
+      if (!c) return;
+      lvSelected = c;
+      lvCustName.textContent = c.name;
+      lvCustPhone.textContent = c.phone || '';
+      lvCustLocation.textContent = c.location || '';
+      lvSelectedCustomer.style.display = 'block';
+      lvCustSearch.style.display = 'none';
+      lvCustSuggestions.style.display = 'none';
+      lvOutcomeCard.style.display = 'block';
+    });
+
+    lvClearCustomer.addEventListener('click', (e) => {
+      e.preventDefault();
+      lvResetAll();
+    });
+
+    lvOutcomeYes.addEventListener('click', () => {
+      lvOutcomeYes.classList.add('active');
+      lvOutcomeNo.classList.remove('active');
+      lvNoOrderFields.style.display = 'none';
+      lvOrderFormWrap.style.display = 'block';
+    });
+
+    lvOutcomeNo.addEventListener('click', () => {
+      lvOutcomeNo.classList.add('active');
+      lvOutcomeYes.classList.remove('active');
+      lvOrderFormWrap.style.display = 'none';
+      lvNoOrderFields.style.display = 'block';
+    });
+
+    lvSubmitNoOrderBtn.addEventListener('click', async () => {
+      if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
+      setButtonLoading(lvSubmitNoOrderBtn, 'Saving…');
+      try {
+        await submitVisit({
+          customerId: lvSelected.id, customerName: lvSelected.name,
+          outcome: 'No Order',
+          reasonNoOrder: lvReason.value,
+          reasonNotes: lvReasonNotes.value.trim(),
+          orderId: null, orderNo: null,
+          uid: user.uid, email: user.email,
+        });
+        showToast('Visit logged.', 'success');
+        lvResetAll();
+      } catch (err) {
+        showToast('Could not log visit: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(lvSubmitNoOrderBtn);
+      }
+    });
+
+    lvSubmitOrderBtn.addEventListener('click', async () => {
+      if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
+      const items = getItems(lvOrderItemsBody);
+      if (items.length === 0) { showToast('Add at least one item.', 'error'); return; }
+
+      setButtonLoading(lvSubmitOrderBtn, 'Submitting…');
+      try {
+        const { id: orderId, orderNo } = await submitOrder({
+          customerId: lvSelected.id,
+          customerName: lvSelected.name,
+          customerPhone: lvSelected.phone || '-',
+          customerLocation: lvSelected.location || '-',
+          items,
+          notes: lvOrderNotes.value.trim(),
+          uid: user.uid,
+          email: user.email,
+        });
+        await submitVisit({
+          customerId: lvSelected.id, customerName: lvSelected.name,
+          outcome: 'Order Placed',
+          reasonNoOrder: null, reasonNotes: '',
+          orderId, orderNo,
+          uid: user.uid, email: user.email,
+        });
+        showToast(`Order ${orderNo} submitted and visit logged.`, 'success');
+        lvResetAll();
+      } catch (err) {
+        showToast('Could not submit order: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(lvSubmitOrderBtn);
+      }
+    });
+  }
+
+  // ============= MY VISITS (submitter) =============
+  if (!isManager) {
+    var myVisitsBody = document.getElementById('myVisitsBody');
+    var myVisitsEmpty = document.getElementById('myVisitsEmpty');
+    var loadMoreMyVisitsBtn = document.getElementById('loadMoreMyVisitsBtn');
+    var loadedMyVisits = [], myVisitsCursor = null, myVisitsHasMore = true;
+
+    function renderMyVisitsRows(list) {
+      myVisitsBody.innerHTML = '';
+      myVisitsEmpty.style.display = list.length === 0 ? 'block' : 'none';
+      list.forEach(v => {
+        const tr = document.createElement('tr');
+        const reason = v.outcome === 'No Order' ? (v.reasonNoOrder || '—') : '—';
+        tr.innerHTML = `
+          <td>${formatDate(v.date)}</td>
+          <td>${v.customerName}</td>
+          <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
+          <td>${reason}</td>
+        `;
+        myVisitsBody.appendChild(tr);
+      });
+    }
+
+    window.resetAndLoadMyVisits = async function resetAndLoadMyVisits() {
+      loadedMyVisits = []; myVisitsCursor = null; myVisitsHasMore = true;
+      await loadNextMyVisitsPage();
+    };
+
+    async function loadNextMyVisitsPage() {
+      if (!myVisitsHasMore) return;
+      setButtonLoading(loadMoreMyVisitsBtn, 'Loading…');
+      try {
+        const result = await fetchMyVisitsPage(user.uid, myVisitsCursor);
+        loadedMyVisits = loadedMyVisits.concat(result.items);
+        myVisitsCursor = result.lastDoc; myVisitsHasMore = result.hasMore;
+        renderMyVisitsRows(loadedMyVisits);
+        loadMoreMyVisitsBtn.style.display = myVisitsHasMore ? 'block' : 'none';
+      } catch (err) {
+        showToast('Could not load visits: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(loadMoreMyVisitsBtn);
+      }
+    }
+
+    loadMoreMyVisitsBtn.addEventListener('click', loadNextMyVisitsPage);
+  }
+  async function resetAndLoadMyVisits() { if (window.resetAndLoadMyVisits) await window.resetAndLoadMyVisits(); }
+
+  // ============= REP PERFORMANCE (manager) =============
+  if (isManager) {
+    const repSummaryBody = document.getElementById('repSummaryBody');
+    const repSummaryEmpty = document.getElementById('repSummaryEmpty');
+    const allVisitsBody = document.getElementById('allVisitsBody');
+    const allVisitsEmpty = document.getElementById('allVisitsEmpty');
+    const perfRepFilter = document.getElementById('perfRepFilter');
+    let allVisitsCache = [];
+
+    window.loadPerformanceView = async function loadPerformanceView() {
+      try {
+        allVisitsCache = await fetchAllVisitsForAggregation();
+      } catch (err) {
+        showToast('Could not load visit reports: ' + err.message, 'error');
+        return;
+      }
+
+      const summary = aggregateVisitsByRep(allVisitsCache);
+      repSummaryEmpty.style.display = summary.length === 0 ? 'block' : 'none';
+      repSummaryBody.innerHTML = summary.map(r => `
+        <tr>
+          <td>${r.repEmail}</td>
+          <td>${r.total}</td>
+          <td>${r.ordersPlaced}</td>
+          <td><strong>${r.successRate}%</strong></td>
+        </tr>
+      `).join('');
+
+      const reps = [...new Set(allVisitsCache.map(v => v.repEmail))].sort();
+      perfRepFilter.innerHTML = `<option value="all">All reps</option>` + reps.map(r => `<option value="${r}">${r}</option>`).join('');
+
+      renderAllVisits();
+    };
+
+    function renderAllVisits() {
+      const filterVal = perfRepFilter.value;
+      const filtered = filterVal === 'all' ? allVisitsCache : allVisitsCache.filter(v => v.repEmail === filterVal);
+      allVisitsEmpty.style.display = filtered.length === 0 ? 'block' : 'none';
+      allVisitsBody.innerHTML = filtered.map(v => {
+        const reason = v.outcome === 'No Order' ? (v.reasonNoOrder || '—') : '—';
+        return `
+          <tr>
+            <td>${formatDate(v.date)}</td>
+            <td>${v.repEmail}</td>
+            <td>${v.customerName}</td>
+            <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
+            <td>${reason}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    perfRepFilter.addEventListener('change', renderAllVisits);
+  }
+  async function loadPerformanceView() { if (window.loadPerformanceView) await window.loadPerformanceView(); }
+
+  // Default landing view per role — called last, after every section
+  // above has run its setup code (their `let`/`const` state variables
+  // need to exist before showView() can safely trigger their loaders).
+  await showView(isManager ? 'orders' : 'logvisit');
 
   hideAppOverlay();
 }

@@ -329,3 +329,30 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
   .total-box .amount { font-size: 1.15rem; }
   table.pv-items thead th, table.pv-items tbody td { font-size: 0.7rem; }
 }
+
+.order-status-badge{
+  display:inline-block; padding:3px 9px; border-radius:5px; font-size:0.7rem; font-weight:700; white-space:nowrap;
+}
+.order-status-Submitted{ background:#fff4e0; color:#7a5210; }
+.order-status-Approved{ background:#eef6ea; color:var(--forest-2); }
+.order-status-Rejected{ background:#fbe4e4; color:#b23b3b; }
+.order-status-Cancelled{ background:#eee; color:var(--muted); }
+.order-status-Invoiced,.order-status-Dispatched{ background:#e8f0fe; color:#1a56a0; }
+.order-status-Draft{ background:#f3f2ee; color:var(--muted); }
+
+.order-status-badge{ display:inline-block; padding:3px 9px; border-radius:5px; font-size:0.7rem; font-weight:700; white-space:nowrap; }
+.order-status-Submitted{ background:#fff4e0; color:#7a5210; }
+.order-status-Approved{ background:#eef6ea; color:var(--forest-2); }
+.order-status-Rejected{ background:#fbe4e4; color:#b23b3b; }
+.order-status-Cancelled{ background:#eee; color:var(--muted); }
+.order-status-Invoiced,.order-status-Dispatched{ background:#e8f0fe; color:#1a56a0; }
+.order-status-Draft{ background:#f3f2ee; color:var(--muted); }
+
+.outcome-toggle{ display:flex; gap:10px; }
+.outcome-btn{
+  flex:1; padding:14px; border-radius:10px; border:1.5px solid var(--line); background:#fff;
+  font-family:'Baloo 2',sans-serif; font-weight:700; font-size:0.9rem; cursor:pointer; color:var(--muted);
+}
+.outcome-btn:hover{ border-color:var(--leaf); }
+.outcome-btn.active[data-outcome="Order Placed"]{ background:#eef6ea; border-color:var(--leaf); color:var(--forest-2); }
+.outcome-btn.active[data-outcome="No Order"]{ background:#fbe4e4; border-color:#b23b3b; color:#b23b3b; }
