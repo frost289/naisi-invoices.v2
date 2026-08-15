@@ -27,7 +27,7 @@ import {
 } from './products.js';
 import {
   submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
-  fetchOrderById, setOrderStatus, markOrderInvoiced
+  fetchOrderById, setOrderStatus, markOrderInvoiced, deleteOrder
 } from './orders.js';
 import {
   submitVisit, fetchMyVisitsPage, fetchAllVisitsForAggregation, aggregateVisitsByRep,
@@ -705,6 +705,7 @@ async function initApp(user, role) {
               showToast('Invoice saved, but could not update the order status: ' + err.message, 'error');
             }
             exitFromOrderMode();
+            if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
           } else {
             showToast('Invoice saved and downloaded.', 'success');
           }
@@ -761,6 +762,7 @@ async function initApp(user, role) {
       listTitle.textContent = 'All Invoices';
       listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
       await loadNextInvoicePage();
+      if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
     };
 
     async function loadNextInvoicePage() {
@@ -840,6 +842,46 @@ async function initApp(user, role) {
     });
 
     window.__loadOrderIntoInvoiceForm = loadOrderIntoInvoiceForm;
+
+    // ---- Orders Ready to Invoice (Approved orders, shown in the Invoices tab) ----
+    const pendingInvoiceOrdersBody = document.getElementById('pendingInvoiceOrdersBody');
+    const pendingInvoiceOrdersEmpty = document.getElementById('pendingInvoiceOrdersEmpty');
+
+    window.loadPendingInvoiceOrders = async function loadPendingInvoiceOrders() {
+      try {
+        const result = await fetchOrdersByStatusPage('Approved', null);
+        const list = result.items;
+        pendingInvoiceOrdersEmpty.style.display = list.length === 0 ? 'block' : 'none';
+        pendingInvoiceOrdersBody.innerHTML = list.map(o => {
+          const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
+          return `
+            <tr>
+              <td>${o.orderNo}</td>
+              <td>${o.customerName}</td>
+              <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
+              <td>${mwk(o.grandTotal || 0)}</td>
+              <td><button type="button" class="list-action-btn" data-action="generate-invoice" data-id="${o.id}">Generate Invoice</button></td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        showToast('Could not load approved orders: ' + err.message, 'error');
+      }
+    };
+
+    pendingInvoiceOrdersBody.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action="generate-invoice"]');
+      if (!btn) return;
+      setButtonLoading(btn, '…');
+      try {
+        const order = await fetchOrderById(btn.dataset.id);
+        if (order) loadOrderIntoInvoiceForm(order);
+      } catch (err) {
+        showToast('Could not load order: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(btn);
+      }
+    });
   }
   async function resetAndLoadInvoices() { if (window.resetAndLoadInvoices) await window.resetAndLoadInvoices(); }
 
@@ -1136,31 +1178,34 @@ async function initApp(user, role) {
       setButtonLoading(btn, '…');
       try {
         await setOrderStatus(id, 'Approved');
-        showToast(`Order ${order.orderNo} approved.`, 'success');
+        showToast(`Order ${order.orderNo} approved — find it in the Invoices tab to generate the invoice.`, 'success');
         await resetAndLoadOrders();
       } catch (err) {
         showToast('Could not approve: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'reject') {
-      const reason = prompt('Reason for rejecting this order (optional):') || '';
+      const confirmed = confirm(`Reject and permanently delete order ${order.orderNo}?\n\nThis cannot be undone.`);
+      if (!confirmed) return;
       setButtonLoading(btn, '…');
       try {
-        await setOrderStatus(id, 'Rejected', reason);
-        showToast(`Order ${order.orderNo} rejected.`, 'success');
-        await resetAndLoadOrders();
+        await deleteOrder(id);
+        loadedOrders = loadedOrders.filter(o => o.id !== id);
+        renderOrderRows(loadedOrders);
+        showToast('Order rejected and removed.', 'success');
       } catch (err) {
         showToast('Could not reject: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'cancel') {
-      const confirmed = confirm(`Cancel order ${order.orderNo}?`);
+      const confirmed = confirm(`Cancel and permanently delete order ${order.orderNo}?\n\nThis cannot be undone.`);
       if (!confirmed) return;
       setButtonLoading(btn, '…');
       try {
-        await setOrderStatus(id, 'Cancelled');
-        showToast('Order cancelled.', 'success');
-        await resetAndLoadOrders();
+        await deleteOrder(id);
+        loadedOrders = loadedOrders.filter(o => o.id !== id);
+        renderOrderRows(loadedOrders);
+        showToast('Order cancelled and removed.', 'success');
       } catch (err) {
         showToast('Could not cancel: ' + err.message, 'error');
         clearButtonLoading(btn);

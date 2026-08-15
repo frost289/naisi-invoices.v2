@@ -165,6 +165,14 @@
 
 <!-- ===================== INVOICES VIEW (manager) ===================== -->
 <div id="invoicesView" class="list-section" style="display:none;">
+  <div class="card" id="pendingInvoiceOrdersCard">
+    <h2><span class="dot"></span>Orders Ready to Invoice</h2>
+    <table class="items-table" id="pendingInvoiceOrdersTable" style="width:100%;">
+      <thead><tr><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th></th></tr></thead>
+      <tbody id="pendingInvoiceOrdersBody"></tbody>
+    </table>
+    <p id="pendingInvoiceOrdersEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No approved orders waiting to be invoiced.</p>
+  </div>
   <div class="card" id="filterCard">
     <h2><span class="dot"></span>Filter by date range</h2>
     <div class="row3" style="align-items:end;">
@@ -295,14 +303,12 @@
 <div id="ordersView" class="list-section" style="display:none;">
   <div class="card" id="orderFilterCard" style="display:none;">
     <h2><span class="dot"></span>Filter by status</h2>
-    <select id="orderStatusFilter">
-      <option value="Submitted">Awaiting Processing (Submitted)</option>
-      <option value="Approved">Approved</option>
-      <option value="Invoiced">Invoiced</option>
-      <option value="Rejected">Rejected</option>
-      <option value="Cancelled">Cancelled</option>
-      <option value="all">All Orders</option>
-    </select>
+      <select id="orderStatusFilter">
+        <option value="Submitted">Awaiting Processing (Submitted)</option>
+        <option value="Approved">Approved</option>
+        <option value="Invoiced">Invoiced</option>
+        <option value="all">All Orders</option>
+      </select>
   </div>
   <div class="card">
     <h2><span class="dot"></span><span id="orderListTitle">Orders</span></h2>

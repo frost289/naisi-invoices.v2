@@ -1,6 +1,6 @@
 import { db } from './firebase.js';
 import {
-  collection, addDoc, doc, getDoc, updateDoc, getDocs,
+  collection, addDoc, doc, getDoc, updateDoc, deleteDoc, getDocs,
   serverTimestamp, query, where, orderBy, limit, startAfter
 } from 'firebase/firestore';
 import { incrementOrderCounterAtomically } from './orderNumbering.js';
@@ -77,4 +77,7 @@ export async function markOrderInvoiced(id, { invoiceId, invoiceNo }) {
     status: 'Invoiced', invoiceId, invoiceNo,
     invoicedAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
+}
+export async function deleteOrder(id) {
+  await deleteDoc(doc(db, 'orders', id));
 }
