@@ -16,13 +16,13 @@ import {
 } from './invoices.js';
 import { buildAndDownloadInvoiceReport } from './export.js';
 import {
-  fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, findExactNameMatch
+  fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation, findExactNameMatch
 } from './customers.js';
 import {
   fetchAllExpensesPage, fetchMyExpensesPage, addExpense, updateExpense, deleteExpense
 } from './expenses.js';
 import {
-  fetchAllProducts, fetchProductsPage, addProduct, updateProduct, deleteProduct,
+  fetchAllProducts, fetchProductsPage, watchAllProducts, addProduct, updateProduct, deleteProduct,
   seedDefaultProductsIfEmpty
 } from './products.js';
 import {
@@ -31,8 +31,11 @@ import {
 } from './orders.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
-  reapplyStockForOrderEdit
+  reapplyStockForOrderEdit, fetchAllStockMovementsPage, fetchStockMovementsForProduct
 } from './stock.js';
+import {
+  fetchOrdersInRange, fetchExpensesInRange, fetchVisitsInRange, buildIntervalSummary
+} from './reports.js';
 import {
   submitVisit, fetchMyVisitsPage, fetchAllVisitsForAggregation, aggregateVisitsByRep,
   NO_ORDER_REASONS
@@ -149,6 +152,7 @@ async function initApp(user, role) {
     products: document.getElementById('productsView'),
     orders: document.getElementById('ordersView'),
     performance: document.getElementById('performanceView'),
+    summary: document.getElementById('summaryView'),
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
   };
@@ -160,11 +164,12 @@ async function initApp(user, role) {
     products: document.getElementById('navProductsBtn'),
     orders: document.getElementById('navOrdersBtn'),
     performance: document.getElementById('navPerformanceBtn'),
+    summary: document.getElementById('navSummaryBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
   };
 
-  const managerOnlyNav = ['form', 'invoices', 'products', 'performance'];
+  const managerOnlyNav = ['form', 'invoices', 'products', 'performance', 'summary'];
   const submitterOnlyNav = ['logvisit', 'myvisits'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
@@ -181,6 +186,7 @@ async function initApp(user, role) {
     products: resetAndLoadProducts,
     orders: resetAndLoadOrders,
     performance: loadPerformanceView,
+    summary: loadSummaryView,
     myvisits: resetAndLoadMyVisits,
   };
 
@@ -238,6 +244,21 @@ async function initApp(user, role) {
     buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache);
   }
 
+  // Live sync: stock changes made on ANY device (a manager adjusting
+  // stock, an approval/cancellation elsewhere) update every connected
+  // screen's quick-add grid within moments — this is what makes stock
+  // tracking "live" rather than "accurate only after you refresh".
+  // loadProductsCache() above is left in place and still called after
+  // local mutations elsewhere in this file; it's now a harmless,
+  // redundant read on top of this listener, not the only source of truth.
+  function startProductsLiveSync() {
+    watchAllProducts((products) => {
+      productsCache = products;
+      if (isManager) buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
+      buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache);
+    });
+  }
+
   if (isManager) {
     try {
       const seeded = await seedDefaultProductsIfEmpty(user.uid);
@@ -255,6 +276,133 @@ async function initApp(user, role) {
   const lvOrderItemsBody = document.getElementById('lvOrderItemsBody');
 
   await loadProductsCache();
+  startProductsLiveSync();
+
+  // ============= LOCATION PICKER (shared — used by both roles) =============
+  // Uses Leaflet + OpenStreetMap tiles for the in-app pin-drop map (free,
+  // no API key needed) and a plain Google Maps search-by-coordinate URL
+  // for "view on map" (also free, no API key — a real embedded Google
+  // Maps JS API widget would need a billing-enabled key from you).
+  let lpMap = null, lpMarker = null, lpOnSave = null, lpCurrentLatLng = null;
+  const locationPickerModal = document.getElementById('locationPickerModal');
+  const lpCustomerLabel = document.getElementById('lpCustomerLabel');
+  const lpCoordsLabel = document.getElementById('lpCoordsLabel');
+  const lpErrorNote = document.getElementById('lpErrorNote');
+  const lpCloseBtn = document.getElementById('lpCloseBtn');
+  const lpCancelBtn = document.getElementById('lpCancelBtn');
+  const lpSaveBtn = document.getElementById('lpSaveBtn');
+  const lpUseMyLocationBtn = document.getElementById('lpUseMyLocationBtn');
+
+  function googleMapsUrl(lat, lng) {
+    return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+  }
+
+  function lpUpdateCoordsLabel() {
+    lpCoordsLabel.textContent = lpCurrentLatLng
+      ? `Pinned at ${lpCurrentLatLng.lat.toFixed(6)}, ${lpCurrentLatLng.lng.toFixed(6)}`
+      : 'No location set yet — tap the map to place a pin.';
+  }
+
+  function lpSetMarker(lat, lng) {
+    lpCurrentLatLng = { lat, lng };
+    if (!lpMarker) {
+      lpMarker = window.L.marker([lat, lng], { draggable: true }).addTo(lpMap);
+      lpMarker.on('dragend', () => {
+        const pos = lpMarker.getLatLng();
+        lpCurrentLatLng = { lat: pos.lat, lng: pos.lng };
+        lpUpdateCoordsLabel();
+      });
+    } else {
+      lpMarker.setLatLng([lat, lng]);
+    }
+    lpUpdateCoordsLabel();
+  }
+
+  // label: shown in the modal title. lat/lng: existing coordinates, if
+  // any (null for a brand-new customer). onSave: async (latLng) => {}
+  // called with the chosen {lat, lng} when the manager/rep hits Save.
+  function openLocationPicker({ label, lat, lng, onSave }) {
+    lpCustomerLabel.textContent = label || 'Customer';
+    lpOnSave = onSave;
+    lpErrorNote.style.display = 'none';
+    locationPickerModal.style.display = 'flex';
+
+    // Default center when there's no existing pin: Lilongwe, Malawi —
+    // this app's home market — just so the map opens somewhere useful
+    // instead of the middle of the ocean at (0,0).
+    const startLat = (typeof lat === 'number') ? lat : -13.9626;
+    const startLng = (typeof lng === 'number') ? lng : 33.7741;
+
+    if (!lpMap) {
+      lpMap = window.L.map('lpMap').setView([startLat, startLng], 14);
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19,
+      }).addTo(lpMap);
+      lpMap.on('click', (e) => { lpSetMarker(e.latlng.lat, e.latlng.lng); });
+    } else {
+      lpMap.setView([startLat, startLng], 14);
+    }
+
+    if (typeof lat === 'number' && typeof lng === 'number') {
+      lpSetMarker(lat, lng);
+    } else {
+      lpCurrentLatLng = null;
+      if (lpMarker) { lpMap.removeLayer(lpMarker); lpMarker = null; }
+      lpUpdateCoordsLabel();
+    }
+
+    // Leaflet can't measure a hidden container's size, so nudge it once
+    // the modal is actually visible on screen.
+    setTimeout(() => { if (lpMap) lpMap.invalidateSize(); }, 100);
+  }
+
+  function closeLocationPicker() {
+    locationPickerModal.style.display = 'none';
+    lpOnSave = null;
+  }
+
+  lpCloseBtn.addEventListener('click', closeLocationPicker);
+  lpCancelBtn.addEventListener('click', closeLocationPicker);
+
+  lpUseMyLocationBtn.addEventListener('click', () => {
+    if (!navigator.geolocation) { showToast('Your browser does not support location services.', 'error'); return; }
+    setButtonLoading(lpUseMyLocationBtn, 'Locating…');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        clearButtonLoading(lpUseMyLocationBtn);
+        lpMap.setView([pos.coords.latitude, pos.coords.longitude], 16);
+        lpSetMarker(pos.coords.latitude, pos.coords.longitude);
+      },
+      (err) => {
+        clearButtonLoading(lpUseMyLocationBtn);
+        showToast('Could not get your current location: ' + err.message, 'error');
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  lpSaveBtn.addEventListener('click', async () => {
+    if (!lpCurrentLatLng) {
+      lpErrorNote.textContent = 'Tap the map (or use your current location) to place a pin first.';
+      lpErrorNote.style.display = 'block';
+      return;
+    }
+    if (typeof lpOnSave === 'function') {
+      setButtonLoading(lpSaveBtn, 'Saving…');
+      try {
+        await lpOnSave(lpCurrentLatLng);
+        closeLocationPicker();
+      } catch (err) {
+        lpErrorNote.textContent = 'Could not save: ' + err.message;
+        lpErrorNote.style.display = 'block';
+      } finally {
+        clearButtonLoading(lpSaveBtn);
+      }
+    } else {
+      closeLocationPicker();
+    }
+  });
 
   if (isManager) {
     document.getElementById('addItemBtn').addEventListener('click', () => {
@@ -265,6 +413,23 @@ async function initApp(user, role) {
     const custSuggestions = document.getElementById('custSuggestions');
     const saveCustomerBtn = document.getElementById('saveCustomerBtn');
     const customerSaveNote = document.getElementById('customerSaveNote');
+    const custPinBtn = document.getElementById('custPinBtn');
+    const custLatInput = document.getElementById('custLat');
+    const custLngInput = document.getElementById('custLng');
+    const custPinNote = document.getElementById('custPinNote');
+
+    custPinBtn.addEventListener('click', () => {
+      const existingLat = custLatInput.value ? parseFloat(custLatInput.value) : null;
+      const existingLng = custLngInput.value ? parseFloat(custLngInput.value) : null;
+      openLocationPicker({
+        label: els.custName.value.trim() || 'New Customer',
+        lat: existingLat, lng: existingLng,
+        onSave: async ({ lat, lng }) => {
+          custLatInput.value = lat; custLngInput.value = lng;
+          custPinNote.textContent = `Location pinned ✓ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+        },
+      });
+    });
 
     function renderSuggestions(matches) {
       if (!matches.length) { custSuggestions.style.display = 'none'; custSuggestions.innerHTML = ''; return; }
@@ -311,9 +476,12 @@ async function initApp(user, role) {
       }
       setButtonLoading(saveCustomerBtn, 'Saving…');
       try {
-        await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), uid: user.uid });
+        const lat = custLatInput.value ? parseFloat(custLatInput.value) : null;
+        const lng = custLngInput.value ? parseFloat(custLngInput.value) : null;
+        await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), lat, lng, uid: user.uid });
         customerSaveNote.textContent = 'Saved to customer list.';
         showToast('Customer saved.', 'success');
+        custLatInput.value = ''; custLngInput.value = ''; custPinNote.textContent = '';
         await loadCustomersCache();
       } catch (err) {
         showToast('Could not save the customer: ' + err.message, 'error');
@@ -327,8 +495,25 @@ async function initApp(user, role) {
   const newCustName = document.getElementById('newCustName');
   const newCustPhone = document.getElementById('newCustPhone');
   const newCustLocation = document.getElementById('newCustLocation');
+  const newCustLat = document.getElementById('newCustLat');
+  const newCustLng = document.getElementById('newCustLng');
+  const newCustPinBtn = document.getElementById('newCustPinBtn');
+  const newCustPinNote = document.getElementById('newCustPinNote');
   const addCustomerBtn = document.getElementById('addCustomerBtn');
   const addCustomerNote = document.getElementById('addCustomerNote');
+
+  newCustPinBtn.addEventListener('click', () => {
+    const existingLat = newCustLat.value ? parseFloat(newCustLat.value) : null;
+    const existingLng = newCustLng.value ? parseFloat(newCustLng.value) : null;
+    openLocationPicker({
+      label: newCustName.value.trim() || 'New Customer',
+      lat: existingLat, lng: existingLng,
+      onSave: async ({ lat, lng }) => {
+        newCustLat.value = lat; newCustLng.value = lng;
+        newCustPinNote.textContent = `Location pinned ✓ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+      },
+    });
+  });
 
   addCustomerBtn.addEventListener('click', async () => {
     const name = newCustName.value.trim();
@@ -340,8 +525,11 @@ async function initApp(user, role) {
     }
     setButtonLoading(addCustomerBtn, 'Saving…');
     try {
-      await addCustomer({ name, phone: newCustPhone.value.trim(), location: newCustLocation.value.trim(), uid: user.uid });
+      const lat = newCustLat.value ? parseFloat(newCustLat.value) : null;
+      const lng = newCustLng.value ? parseFloat(newCustLng.value) : null;
+      await addCustomer({ name, phone: newCustPhone.value.trim(), location: newCustLocation.value.trim(), lat, lng, uid: user.uid });
       newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
+      newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
       addCustomerNote.textContent = 'Customer added.';
       showToast('Customer added.', 'success');
       await loadCustomersCache();
@@ -361,6 +549,14 @@ async function initApp(user, role) {
   const customerSearchHint = document.getElementById('customerSearchHint');
   let loadedCustomers = [], customersCursor = null, customersHasMore = true;
 
+  function customerMapCellHtml(c) {
+    const hasPin = typeof c.lat === 'number' && typeof c.lng === 'number';
+    return hasPin
+      ? `<a href="${googleMapsUrl(c.lat, c.lng)}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
+         <button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍</button>`
+      : `<button type="button" class="map-pin-btn-small" data-action="set-location">📍 Set Location</button>`;
+  }
+
   function renderCustomerRows(list) {
     customerListBody.innerHTML = '';
     customerListEmpty.style.display = list.length === 0 ? 'block' : 'none';
@@ -369,6 +565,7 @@ async function initApp(user, role) {
       tr.dataset.id = c.id;
       tr.innerHTML = `
         <td>${c.name}</td><td>${c.phone || ''}</td><td>${c.location || ''}</td>
+        <td>${customerMapCellHtml(c)}</td>
         <td><button type="button" class="list-action-btn" data-action="edit">Edit</button></td>
       `;
       customerListBody.appendChild(tr);
@@ -420,12 +617,29 @@ async function initApp(user, role) {
         <td><input class="customer-edit-input" data-field="name" value="${c.name || ''}"></td>
         <td><input class="customer-edit-input" data-field="phone" value="${c.phone || ''}"></td>
         <td><input class="customer-edit-input" data-field="location" value="${c.location || ''}"></td>
+        <td>${customerMapCellHtml(c)}</td>
         <td>
           <button type="button" class="list-action-btn" data-action="save">Save</button>
           <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
         </td>`;
     } else if (btn.dataset.action === 'cancel') {
       applyCustomerSearchAndRender();
+    } else if (btn.dataset.action === 'set-location') {
+      const c = loadedCustomers.find(c => c.id === id);
+      if (!c) return;
+      openLocationPicker({
+        label: c.name,
+        lat: typeof c.lat === 'number' ? c.lat : null,
+        lng: typeof c.lng === 'number' ? c.lng : null,
+        onSave: async ({ lat, lng }) => {
+          await updateCustomerLocation(id, { lat, lng });
+          const idx = loadedCustomers.findIndex(cc => cc.id === id);
+          if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], lat, lng };
+          await loadCustomersCache();
+          applyCustomerSearchAndRender();
+          showToast('Location saved.', 'success');
+        },
+      });
     } else if (btn.dataset.action === 'save') {
       const name = tr.querySelector('[data-field="name"]').value.trim();
       const phone = tr.querySelector('[data-field="phone"]').value.trim();
@@ -652,9 +866,94 @@ async function initApp(user, role) {
 
     window.__openStockAdjustModal = openStockAdjustModal;
 
+    // ---- Stock Movement History (audit ledger) ----
+    const stockMovementTypeLabels = {
+      manual: 'Manual Adjustment',
+      'order-approved': 'Order Approved',
+      'order-cancelled-deleted': 'Order Cancelled',
+      'order-edited': 'Order Edited',
+    };
+    const stockMovementBody = document.getElementById('stockMovementBody');
+    const stockMovementEmpty = document.getElementById('stockMovementEmpty');
+    const loadMoreStockMovementsBtn = document.getElementById('loadMoreStockMovementsBtn');
+    const stockMovementProductFilter = document.getElementById('stockMovementProductFilter');
+    let loadedMovements = [], movementsCursor = null, movementsHasMore = true, currentMovementProductFilter = 'all';
+
+    function formatMovementTimestamp(ts) {
+      if (!ts || typeof ts.toDate !== 'function') return '—';
+      const d = ts.toDate();
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function renderMovementRows(list) {
+      stockMovementBody.innerHTML = '';
+      stockMovementEmpty.style.display = list.length === 0 ? 'block' : 'none';
+      list.forEach(m => {
+        const tr = document.createElement('tr');
+        const changeText = m.delta > 0 ? `+${m.delta}` : `${m.delta}`;
+        const reasonOrOrder = m.orderNo ? `Order ${m.orderNo}` : (m.reason || '—');
+        tr.innerHTML = `
+          <td style="font-size:0.78rem; white-space:nowrap;">${formatMovementTimestamp(m.createdAt)}</td>
+          <td>${m.productName || '—'}${m.packLabel ? ' — ' + m.packLabel : ''}</td>
+          <td>${stockMovementTypeLabels[m.type] || m.type || '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace; ${m.delta < 0 ? 'color:#b3261e;' : 'color:var(--forest-2);'}">${changeText}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${m.newStock ?? '—'}</td>
+          <td style="font-size:0.78rem; color:var(--muted);">${reasonOrOrder}</td>
+          <td style="font-size:0.72rem; color:var(--muted);">${m.createdByEmail || '—'}</td>
+        `;
+        stockMovementBody.appendChild(tr);
+      });
+    }
+
+    async function resetAndLoadMovements() {
+      loadedMovements = []; movementsCursor = null; movementsHasMore = true;
+      await loadNextMovementPage();
+    }
+
+    async function loadNextMovementPage() {
+      if (!movementsHasMore) return;
+      setButtonLoading(loadMoreStockMovementsBtn, 'Loading…');
+      try {
+        const result = currentMovementProductFilter === 'all'
+          ? await fetchAllStockMovementsPage(movementsCursor)
+          : await fetchStockMovementsForProduct(currentMovementProductFilter, movementsCursor);
+        loadedMovements = loadedMovements.concat(result.items);
+        movementsCursor = result.lastDoc; movementsHasMore = result.hasMore;
+        renderMovementRows(loadedMovements);
+        loadMoreStockMovementsBtn.style.display = movementsHasMore ? 'block' : 'none';
+      } catch (err) {
+        showToast('Could not load stock movements: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(loadMoreStockMovementsBtn);
+      }
+    }
+
+    function refreshMovementProductFilterOptions() {
+      const current = stockMovementProductFilter.value;
+      stockMovementProductFilter.innerHTML = `<option value="all">All products</option>` +
+        loadedProducts.map(p => `<option value="${p.id}">${p.productName} — ${p.packLabel}</option>`).join('');
+      if ([...stockMovementProductFilter.options].some(o => o.value === current)) {
+        stockMovementProductFilter.value = current;
+      }
+    }
+
+    stockMovementProductFilter.addEventListener('change', async () => {
+      currentMovementProductFilter = stockMovementProductFilter.value;
+      await resetAndLoadMovements();
+    });
+    loadMoreStockMovementsBtn.addEventListener('click', loadNextMovementPage);
+
+    window.__loadStockMovements = async function __loadStockMovements() {
+      refreshMovementProductFilterOptions();
+      await resetAndLoadMovements();
+    };
+
     var resetAndLoadProductsRef = resetAndLoadProducts; // exposed to viewLoaders closure below
   }
-  async function resetAndLoadProducts() { if (typeof resetAndLoadProductsRef === 'function') await resetAndLoadProductsRef(); }
+  async function resetAndLoadProducts() {
+    if (typeof resetAndLoadProductsRef === 'function') await resetAndLoadProductsRef();
+    if (window.__loadStockMovements) await window.__loadStockMovements();
+  }
 
   // ============= NEW INVOICE FORM (manager only) =============
   if (isManager) {
@@ -1678,6 +1977,111 @@ async function initApp(user, role) {
     perfRepFilter.addEventListener('change', renderAllVisits);
   }
   async function loadPerformanceView() { if (window.loadPerformanceView) await window.loadPerformanceView(); }
+
+  // ============= SUMMARY (manager) =============
+  if (isManager) {
+    const sumFromInput = document.getElementById('sumFrom');
+    const sumToInput = document.getElementById('sumTo');
+    const sumResultsCard = document.getElementById('sumResultsCard');
+    const sumRangeLabel = document.getElementById('sumRangeLabel');
+    const sumResultsBody = document.getElementById('sumResultsBody');
+    const sumGenerateBtn = document.getElementById('sumGenerateBtn');
+
+    function isoDate(d) { return d.toISOString().slice(0, 10); }
+
+    function setRangeToday() {
+      const t = isoDate(new Date());
+      sumFromInput.value = t; sumToInput.value = t;
+    }
+    function setRangeThisWeek() {
+      const now = new Date();
+      const day = now.getDay(); // 0 = Sunday
+      const diffToMonday = (day === 0 ? 6 : day - 1);
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - diffToMonday);
+      sumFromInput.value = isoDate(monday);
+      sumToInput.value = isoDate(now);
+    }
+    function setRangeThisMonth() {
+      const now = new Date();
+      const first = new Date(now.getFullYear(), now.getMonth(), 1);
+      sumFromInput.value = isoDate(first);
+      sumToInput.value = isoDate(now);
+    }
+
+    function renderSummary(summary, from, to) {
+      sumRangeLabel.textContent = from === to ? formatDate(from) : `${formatDate(from)} to ${formatDate(to)}`;
+
+      const statusOrder = ['Submitted', 'Approved', 'Invoiced', 'Rejected', 'Cancelled'];
+      const statusBreakdown = statusOrder
+        .filter(s => summary.orders.byStatus[s])
+        .map(s => `<div class="summary-breakdown-row"><span>${s}</span><span>${summary.orders.byStatus[s]}</span></div>`)
+        .join('') || `<div class="summary-breakdown-row"><span style="color:var(--muted);">No orders in this range</span></div>`;
+
+      const expenseBreakdown = Object.entries(summary.expenses.byCategory)
+        .filter(([, amt]) => amt > 0)
+        .map(([cat, amt]) => `<div class="summary-breakdown-row"><span>${cat}</span><span>${mwk(amt)}</span></div>`)
+        .join('') || `<div class="summary-breakdown-row"><span style="color:var(--muted);">No expenses in this range</span></div>`;
+
+      const topProductsHtml = summary.topProducts.length
+        ? summary.topProducts.map(p => `<div class="summary-breakdown-row"><span>${p.desc}</span><span>${p.qty} units</span></div>`).join('')
+        : `<div class="summary-breakdown-row"><span style="color:var(--muted);">No items ordered in this range</span></div>`;
+
+      sumResultsBody.innerHTML = `
+        <div class="summary-grid">
+          <div class="summary-tile"><span class="summary-tile-label">Orders</span><span class="summary-tile-value">${summary.orders.total}</span></div>
+          <div class="summary-tile"><span class="summary-tile-label">Invoices</span><span class="summary-tile-value">${summary.invoices.count}</span></div>
+          <div class="summary-tile summary-tile-positive"><span class="summary-tile-label">Revenue</span><span class="summary-tile-value">${mwk(summary.invoices.revenue)}</span></div>
+          <div class="summary-tile summary-tile-negative"><span class="summary-tile-label">Expenses</span><span class="summary-tile-value">${mwk(summary.expenses.total)}</span></div>
+          <div class="summary-tile ${summary.netCashflow >= 0 ? 'summary-tile-positive' : 'summary-tile-negative'}"><span class="summary-tile-label">Net</span><span class="summary-tile-value">${mwk(summary.netCashflow)}</span></div>
+          <div class="summary-tile"><span class="summary-tile-label">Visits</span><span class="summary-tile-value">${summary.visits.total}</span><span class="summary-tile-sub">${summary.visits.successRate}% placed an order</span></div>
+        </div>
+        <div class="summary-section-title">Orders by Status</div>
+        ${statusBreakdown}
+        <div class="summary-section-title">Expenses by Category</div>
+        ${expenseBreakdown}
+        <div class="summary-section-title">Top Products Ordered</div>
+        ${topProductsHtml}
+      `;
+      sumResultsCard.style.display = 'block';
+    }
+
+    async function generateSummary() {
+      const from = sumFromInput.value, to = sumToInput.value;
+      if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
+      if (from > to) { showToast('The From date must be before the To date.', 'error'); return; }
+      setButtonLoading(sumGenerateBtn, 'Crunching numbers…');
+      try {
+        const [orders, invoices, expenses, visits] = await Promise.all([
+          fetchOrdersInRange(from, to),
+          fetchInvoicesByDateRange(from, to),
+          fetchExpensesInRange(from, to),
+          fetchVisitsInRange(from, to),
+        ]);
+        const summary = buildIntervalSummary({ orders, invoices, expenses, visits });
+        renderSummary(summary, from, to);
+      } catch (err) {
+        showToast('Could not generate summary: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(sumGenerateBtn);
+      }
+    }
+
+    document.getElementById('sumTodayBtn').addEventListener('click', () => { setRangeToday(); generateSummary(); });
+    document.getElementById('sumWeekBtn').addEventListener('click', () => { setRangeThisWeek(); generateSummary(); });
+    document.getElementById('sumMonthBtn').addEventListener('click', () => { setRangeThisMonth(); generateSummary(); });
+    sumGenerateBtn.addEventListener('click', () => generateSummary());
+
+    // Opening the Summary tab with no range picked yet defaults to
+    // "Today" and generates immediately — the closest thing to an
+    // automatic end-of-day summary without a server-side scheduler
+    // (see the note where this is wired into main.js for why).
+    window.loadSummaryView = async function loadSummaryView() {
+      if (!sumFromInput.value || !sumToInput.value) setRangeToday();
+      await generateSummary();
+    };
+  }
+  async function loadSummaryView() { if (window.loadSummaryView) await window.loadSummaryView(); }
 
   // Default landing view per role — called last, after every section
   // above has run its setup code (their `let`/`const` state variables

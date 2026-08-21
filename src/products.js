@@ -1,7 +1,7 @@
 import { db } from './firebase.js';
 import {
   collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
-  serverTimestamp, query, orderBy, limit, startAfter
+  serverTimestamp, query, orderBy, limit, startAfter, onSnapshot
 } from 'firebase/firestore';
 
 const PAGE_SIZE = 25;
@@ -33,6 +33,17 @@ export async function fetchProductsPage(cursor = null) {
     lastDoc: snap.docs.at(-1) || null,
     hasMore: snap.docs.length === PAGE_SIZE,
   };
+}
+
+// Live sync for stock levels: fires immediately on this device after any
+// local write, and within moments on every OTHER connected device too —
+// a manager adjusting stock on their phone shows up on a rep's quick-add
+// grid without either of them refreshing. Returns an unsubscribe function.
+export function watchAllProducts(onChange) {
+  const q = query(collection(db, 'products'), orderBy('productName'));
+  return onSnapshot(q, (snap) => {
+    onChange(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  });
 }
 
 // stockOnHand here is only ever the STARTING stock for a brand-new

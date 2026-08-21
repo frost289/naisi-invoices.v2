@@ -225,3 +225,15 @@ export async function fetchStockMovementsForProduct(productId, cursor = null) {
     hasMore: snap.docs.length === PAGE_SIZE,
   };
 }
+
+// ---- History across ALL products, newest first — the main stock ledger ----
+export async function fetchAllStockMovementsPage(cursor = null) {
+  const constraints = [orderBy('createdAt', 'desc'), limit(PAGE_SIZE)];
+  if (cursor) constraints.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(db, 'stockMovements'), ...constraints));
+  return {
+    items: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    lastDoc: snap.docs.at(-1) || null,
+    hasMore: snap.docs.length === PAGE_SIZE,
+  };
+}

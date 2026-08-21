@@ -362,3 +362,32 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 .outcome-btn:hover{ border-color:var(--leaf); }
 .outcome-btn.active[data-outcome="Order Placed"]{ background:#eef6ea; border-color:var(--leaf); color:var(--forest-2); }
 .outcome-btn.active[data-outcome="No Order"]{ background:#fbe4e4; border-color:#b23b3b; color:#b23b3b; }
+/* ---- Summary view tiles ---- */
+.summary-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3); margin-bottom: var(--space-4);
+}
+.summary-tile {
+  background: #f7f6f2; border-radius: 10px; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.summary-tile-label { font-size: 0.72rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.summary-tile-value { font-family: 'JetBrains Mono', monospace; font-size: 1.3rem; font-weight: 700; color: var(--ink); }
+.summary-tile-sub { font-size: 0.75rem; color: var(--muted); }
+.summary-tile-positive .summary-tile-value { color: var(--forest-2); }
+.summary-tile-negative .summary-tile-value { color: #b23b3b; }
+.summary-section-title { font-weight: 700; font-size: 0.85rem; margin: var(--space-4) 0 var(--space-2); }
+.summary-breakdown-row { display: flex; justify-content: space-between; font-size: 0.82rem; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.summary-breakdown-row:last-child { border-bottom: none; }
+
+/* ---- Location picker / map links ---- */
+.map-link-btn {
+  display: inline-block; font-size: 0.75rem; color: var(--forest-2); text-decoration: none; font-weight: 600;
+}
+.map-link-btn:hover { text-decoration: underline; }
+.map-pin-btn-small {
+  font-size: 0.72rem; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: #fff; color: var(--muted); cursor: pointer;
+}
+.map-pin-btn-small:hover { border-color: var(--leaf); color: var(--forest-2); }
+#lpMap { position: relative; z-index: 0; }
