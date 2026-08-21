@@ -14,7 +14,7 @@ import {
   fetchMyInvoicesPage, fetchAllInvoicesPage, fetchInvoicesByDateRangePage,
   fetchInvoicesByDateRange, fetchInvoiceById, updateInvoice
 } from './invoices.js';
-import { buildAndDownloadInvoiceReport } from './export.js';
+import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndDownloadCustomerReport } from './export.js';
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation, findExactNameMatch
 } from './customers.js';
@@ -538,6 +538,22 @@ async function initApp(user, role) {
       showToast('Could not add customer: ' + err.message, 'error');
     } finally {
       clearButtonLoading(addCustomerBtn);
+    }
+  });
+
+  const exportCustomersBtn = document.getElementById('exportCustomersBtn');
+  exportCustomersBtn.addEventListener('click', async () => {
+    setButtonLoading(exportCustomersBtn, 'Building report…');
+    try {
+      // customersCache is already the full, unpaginated customer list
+      // (kept in sync by loadCustomersCache()) — no need for another read.
+      if (!customersCache.length) { showToast('No customers to export yet.', 'info'); return; }
+      await buildAndDownloadCustomerReport(customersCache);
+      showToast('Customer list downloaded.', 'success');
+    } catch (err) {
+      showToast('Could not build the customer report: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(exportCustomersBtn);
     }
   });
 
@@ -1282,6 +1298,35 @@ async function initApp(user, role) {
   expenseListHead.innerHTML = isManager
     ? `<tr><th>Date</th><th>Category</th><th>Amount</th><th>Notes</th><th>By</th><th></th></tr>`
     : `<tr><th>Date</th><th>Category</th><th>Amount</th><th>Notes</th><th></th></tr>`;
+
+  // Exporting pulls the FULL date range from Firestore directly (not
+  // just what's paginated on screen), which for a submitter would query
+  // across everyone's expenses — something the security rules correctly
+  // block (submitters can only read their own). So this stays manager-only,
+  // consistent with the Invoices export already being manager-only.
+  const expenseExportCard = document.getElementById('expenseExportCard');
+  if (isManager) {
+    expenseExportCard.style.display = 'block';
+    const expExportFrom = document.getElementById('expExportFrom');
+    const expExportTo = document.getElementById('expExportTo');
+    const expExportBtn = document.getElementById('expExportBtn');
+    expExportBtn.addEventListener('click', async () => {
+      const from = expExportFrom.value, to = expExportTo.value;
+      if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
+      if (from > to) { showToast('The From date must be before the To date.', 'error'); return; }
+      setButtonLoading(expExportBtn, 'Building report…');
+      try {
+        const all = await fetchExpensesInRange(from, to);
+        if (!all.length) { showToast('No expenses found in that range.', 'info'); return; }
+        await buildAndDownloadExpenseReport(all, from, to);
+        showToast('Report downloaded.', 'success');
+      } catch (err) {
+        showToast('Could not build the report: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(expExportBtn);
+      }
+    });
+  }
 
   let loadedExpenses = [], expensesCursor = null, expensesHasMore = true;
 

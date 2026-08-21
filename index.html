@@ -251,6 +251,7 @@
       <input type="text" id="customerSearchInput" placeholder="Customer name...">
       <p class="search-hint" id="customerSearchHint"></p>
     </div>
+    <button type="button" class="list-action-btn" id="exportCustomersBtn" style="margin-bottom:10px;">Export All Customers to Excel</button>
     <table class="items-table" id="customerListTable" style="width:100%;">
       <thead><tr><th>Name</th><th>Phone</th><th>Location</th><th>Map</th><th></th></tr></thead>
       <tbody id="customerListBody"></tbody>
@@ -326,6 +327,16 @@
   <div class="card">
     <h2><span class="dot"></span>Summary <span style="font-size:0.7rem; font-weight:400; color:var(--muted);">(loaded records)</span></h2>
     <div id="expenseSummary"></div>
+  </div>
+
+  <div class="card" id="expenseExportCard" style="display:none;">
+    <h2><span class="dot"></span>Export to Excel</h2>
+    <div class="row3" style="align-items:end;">
+      <div class="field"><label>From</label><input type="date" id="expExportFrom"></div>
+      <div class="field"><label>To</label><input type="date" id="expExportTo"></div>
+      <div class="field"><button type="button" class="generate-btn" id="expExportBtn">Export Expenses</button></div>
+    </div>
+    <p class="numbering-hint">Exports every expense in the selected range, plus a category summary — not just what's currently loaded on screen.</p>
   </div>
 
   <div class="card">

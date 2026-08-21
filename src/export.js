@@ -137,3 +137,104 @@ export async function buildAndDownloadInvoiceReport(invoices, fromDate, toDate) 
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+function downloadWorkbookBuffer(buffer, filename) {
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function buildAndDownloadExpenseReport(expenses, fromDate, toDate) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Naisi Foods Invoice Generator';
+  workbook.created = new Date();
+
+  const dataSheet = workbook.addWorksheet('Expenses');
+  dataSheet.columns = [
+    { header: 'Date',       key: 'date',     width: 12 },
+    { header: 'Category',   key: 'category', width: 14 },
+    { header: 'Amount (MWK)', key: 'amount', width: 16 },
+    { header: 'Notes',      key: 'notes',    width: 40 },
+    { header: 'Logged By',  key: 'byEmail',  width: 26 },
+  ];
+  dataSheet.getRow(1).font = { bold: true };
+  // Newest-first from the query, but a report reads better chronologically.
+  [...expenses].reverse().forEach(e => {
+    dataSheet.addRow({
+      date: e.date, category: e.category, amount: e.amount || 0,
+      notes: e.notes || '', byEmail: e.createdByEmail || '—',
+    });
+  });
+  dataSheet.getColumn('amount').numFmt = '#,##0.00';
+  dataSheet.getColumn('notes').alignment = { wrapText: true };
+
+  const summarySheet = workbook.addWorksheet('Summary by Category');
+  const totals = { Transport: 0, Meals: 0, Other: 0 };
+  expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
+  const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+
+  summarySheet.getCell('A1').value = `Report range: ${fromDate} to ${toDate}`;
+  summarySheet.getCell('A1').font = { bold: true, size: 12 };
+  summarySheet.columns = [
+    { header: 'Category', key: 'category', width: 20 },
+    { header: 'Total (MWK)', key: 'total', width: 18 },
+  ];
+  summarySheet.getRow(3).values = ['Category', 'Total (MWK)'];
+  summarySheet.getRow(3).font = { bold: true };
+  Object.entries(totals).forEach(([cat, amt], i) => {
+    summarySheet.getRow(4 + i).values = [cat, amt];
+  });
+  summarySheet.getRow(4 + Object.keys(totals).length).values = ['Grand Total', grand];
+  summarySheet.getRow(4 + Object.keys(totals).length).font = { bold: true };
+  summarySheet.getColumn('total').numFmt = '#,##0.00';
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadWorkbookBuffer(buffer, `naisi-expenses_${fromDate}_to_${toDate}.xlsx`);
+}
+
+function formatFirestoreTimestamp(ts) {
+  if (!ts || typeof ts.toDate !== 'function') return '—';
+  return ts.toDate().toISOString().slice(0, 10);
+}
+
+export async function buildAndDownloadCustomerReport(customers) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Naisi Foods Invoice Generator';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Customers');
+  sheet.columns = [
+    { header: 'Name',          key: 'name',     width: 26 },
+    { header: 'Phone',         key: 'phone',    width: 18 },
+    { header: 'Location',      key: 'location', width: 22 },
+    { header: 'Latitude',      key: 'lat',      width: 14 },
+    { header: 'Longitude',     key: 'lng',      width: 14 },
+    { header: 'Map Link',      key: 'mapLink',  width: 46 },
+    { header: 'Added On',      key: 'addedOn',  width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+
+  customers.forEach(c => {
+    const hasPin = typeof c.lat === 'number' && typeof c.lng === 'number';
+    const row = sheet.addRow({
+      name: c.name || '—',
+      phone: c.phone || '—',
+      location: c.location || '—',
+      lat: hasPin ? c.lat : '—',
+      lng: hasPin ? c.lng : '—',
+      mapLink: hasPin ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}` : '—',
+      addedOn: formatFirestoreTimestamp(c.createdAt),
+    });
+    if (hasPin) {
+      const cell = row.getCell('mapLink');
+      cell.value = { text: 'View on Map', hyperlink: cell.value };
+      cell.font = { color: { argb: 'FF1a56a0' }, underline: true };
+    }
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadWorkbookBuffer(buffer, `naisi-customers_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
