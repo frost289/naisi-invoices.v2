@@ -9,12 +9,13 @@ const PAGE_SIZE = 25;
 // Your original hardcoded catalog, now used as one-time seed data instead
 // of being baked into the code — so the app behaves exactly like before
 // on first run, but everything after that lives in Firestore and is
-// manager-editable.
+// manager-editable. stockOnHand starts at 0 for seeded products — a
+// manager sets real starting stock via the Adjust Stock screen.
 export const DEFAULT_PRODUCTS = [
-  { productName: 'Angel Instant Dry Yeast', packLabel: 'Box (25 × 10g Sachets)', quantity: 25, price: 10500 },
-  { productName: 'Angel Instant Dry Yeast', packLabel: 'Case (12 Boxes)', quantity: 12, price: 114000 },
-  { productName: 'Bakerdream Instant Dry Yeast', packLabel: '1 × 450g Pack', quantity: 1, price: 8000 },
-  { productName: 'Bakerdream Instant Dry Yeast', packLabel: 'Case (20 Packs)', quantity: 20, price: 153000 },
+  { productName: 'Angel Instant Dry Yeast', packLabel: 'Box (25 × 10g Sachets)', quantity: 25, price: 10500, stockOnHand: 0 },
+  { productName: 'Angel Instant Dry Yeast', packLabel: 'Case (12 Boxes)', quantity: 12, price: 114000, stockOnHand: 0 },
+  { productName: 'Bakerdream Instant Dry Yeast', packLabel: '1 × 450g Pack', quantity: 1, price: 8000, stockOnHand: 0 },
+  { productName: 'Bakerdream Instant Dry Yeast', packLabel: 'Case (20 Packs)', quantity: 20, price: 153000, stockOnHand: 0 },
 ];
 
 export async function fetchAllProducts() {
@@ -34,17 +35,26 @@ export async function fetchProductsPage(cursor = null) {
   };
 }
 
-export async function addProduct({ productName, packLabel, quantity, price, uid }) {
+// stockOnHand here is only ever the STARTING stock for a brand-new
+// product — there's no "previous" figure to log against, so this
+// writes it directly rather than going through the stock ledger.
+// Every change after creation must go through adjustStockManually()
+// or an order approval/cancellation so it stays logged.
+export async function addProduct({ productName, packLabel, quantity, price, stockOnHand, uid }) {
   await addDoc(collection(db, 'products'), {
     productName, packLabel,
     quantity: parseFloat(quantity) || 0,
     price: parseFloat(price) || 0,
+    stockOnHand: parseFloat(stockOnHand) || 0,
     createdBy: uid,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
 }
 
+// Deliberately does NOT touch stockOnHand — catalog edits (rename,
+// re-pack, reprice) should never silently change stock. Use
+// adjustStockManually() for that, so it's always logged.
 export async function updateProduct(id, { productName, packLabel, quantity, price }) {
   await updateDoc(doc(db, 'products', id), {
     productName, packLabel,

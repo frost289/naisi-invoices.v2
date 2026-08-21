@@ -241,13 +241,14 @@
       <div class="field"><label>Quantity <span class="auto-tag">units per pack</span></label><input type="number" id="prodQuantity" min="0" step="1" placeholder="e.g. 25"></div>
       <div class="field"><label>Price (MWK)</label><input type="number" id="prodPrice" min="0" step="1" placeholder="0"></div>
     </div>
-    <p class="numbering-hint">Quantity is how many units are in this pack — e.g. 25 sachets in a Box, or 12 boxes in a Case.</p>
+    <div class="field"><label>Starting Stock on Hand <span class="auto-tag">optional, default 0</span></label><input type="number" id="prodStock" min="0" step="1" placeholder="0"></div>
+    <p class="numbering-hint">Quantity is how many units are in this pack — e.g. 25 sachets in a Box, or 12 boxes in a Case. Stock on Hand is separate — it's how many of this exact pack you currently have, and it only changes here at creation. After that, use "Adjust Stock" or place/approve orders.</p>
     <button type="button" class="generate-btn" id="addProductBtn">Add to Catalog</button>
   </div>
   <div class="card">
     <h2><span class="dot"></span>Product Catalog</h2>
     <table class="items-table" id="productListTable" style="width:100%;">
-      <thead><tr><th>Product</th><th>Pack</th><th>Quantity</th><th>Price</th><th></th></tr></thead>
+      <thead><tr><th>Product</th><th>Pack</th><th>Quantity</th><th>Stock</th><th>Price</th><th></th></tr></thead>
       <tbody id="productListBody"></tbody>
     </table>
     <p id="productListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No products yet.</p>
@@ -436,6 +437,72 @@
 </div>
 </div>
 
+</div>
+
+<!-- ===================== EDIT ORDER MODAL (manager only) ===================== -->
+<div id="editOrderModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Edit Order <span id="editOrderNoLabel"></span></h2>
+      <button type="button" class="modal-close-btn" id="eoCloseBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="field">
+      <label>Customer Name</label>
+      <input type="text" id="eoCustName" autocomplete="off">
+    </div>
+    <div class="row2">
+      <div class="field"><label>Phone</label><input type="tel" id="eoCustPhone"></div>
+      <div class="field"><label>Location</label><input type="text" id="eoCustLocation"></div>
+    </div>
+
+    <div class="quick-add-label">Quick add — tap a product</div>
+    <div class="quick-add-grid" id="eoQuickAddGrid"></div>
+    <table class="items-table" id="eoItemsTable">
+      <thead><tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr></thead>
+      <tbody id="eoItemsBody"></tbody>
+    </table>
+    <button class="add-item-btn" id="eoAddItemBtn" type="button">+ Add custom item</button>
+
+    <div class="field">
+      <label>Notes</label>
+      <textarea id="eoNotes" placeholder="Any extra notes on this order..."></textarea>
+    </div>
+
+    <p id="eoErrorNote" style="color:#b3261e; font-size:0.78rem; display:none; margin-bottom:8px;"></p>
+
+    <div class="modal-actions">
+      <button type="button" class="list-action-btn" id="eoSaveBtn">Save Changes</button>
+      <button type="button" class="list-action-btn" id="eoCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="stockAdjustModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Adjust Stock — <span id="saProductLabel"></span></h2>
+      <button type="button" class="modal-close-btn" id="saCloseBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <p class="numbering-hint">Current stock on hand: <strong id="saCurrentStock">0</strong></p>
+
+    <div class="field">
+      <label>Adjustment <span class="auto-tag">use a negative number to remove stock</span></label>
+      <input type="number" id="saDelta" step="1" placeholder="e.g. 50 or -5">
+    </div>
+    <div class="field">
+      <label>Reason</label>
+      <input type="text" id="saReason" placeholder="e.g. New delivery from supplier, stock count correction...">
+    </div>
+
+    <p id="saErrorNote" style="color:#b3261e; font-size:0.78rem; display:none; margin-bottom:8px;"></p>
+
+    <div class="modal-actions">
+      <button type="button" class="list-action-btn" id="saSaveBtn">Save Adjustment</button>
+      <button type="button" class="list-action-btn" id="saCancelBtn">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <script type="module" src="/src/main.js"></script>

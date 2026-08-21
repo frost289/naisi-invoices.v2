@@ -163,6 +163,8 @@ textarea { resize: vertical; min-height: 52px; }
 .quick-add-btn:hover { border-color: var(--leaf); background: #f3faf1; transform: translateY(-1px); }
 .quick-add-btn .qa-name { display: block; font-size: 0.76rem; font-weight: 700; color: var(--forest); line-height: 1.25; }
 .quick-add-btn .qa-pack { display: block; font-size: 0.68rem; color: var(--muted); margin-top: 1px; }
+.quick-add-btn .qa-stock { display: block; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--muted); margin-top: 2px; }
+.quick-add-btn .qa-stock-low { color: #b3261e; font-weight: 700; }
 .quick-add-btn .qa-price { display: block; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; font-weight: 700; color: var(--amber); margin-top: 4px; }
 
 .generate-btn {
@@ -275,6 +277,18 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 .load-more-btn { display: block; margin: var(--space-3) auto 0; background: none; border: 1.5px dashed var(--leaf); color: var(--forest-2); border-radius: 8px; padding: 8px 20px; min-height: var(--touch-min); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
 .load-more-btn:hover { background: #eef6ea; }
 
+/* Edit Order modal */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(23,36,26,0.55);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: var(--space-5) var(--space-3); overflow-y: auto; z-index: 1000;
+}
+.modal-box { width: 100%; max-width: 640px; margin: var(--space-5) 0; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.modal-close-btn { background: none; border: none; font-size: 1.6rem; line-height: 1; color: var(--muted); cursor: pointer; padding: 0 4px; min-height: var(--touch-min); }
+.modal-close-btn:hover { color: var(--ink); }
+.modal-actions { display: flex; gap: var(--space-2); }
+
 /* ===== Expenses ===== */
 .exp-summary-tiles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
 .exp-tile { border-radius: 10px; padding: 12px 14px; text-align: center; }
@@ -333,14 +347,6 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 .order-status-badge{
   display:inline-block; padding:3px 9px; border-radius:5px; font-size:0.7rem; font-weight:700; white-space:nowrap;
 }
-.order-status-Submitted{ background:#fff4e0; color:#7a5210; }
-.order-status-Approved{ background:#eef6ea; color:var(--forest-2); }
-.order-status-Rejected{ background:#fbe4e4; color:#b23b3b; }
-.order-status-Cancelled{ background:#eee; color:var(--muted); }
-.order-status-Invoiced,.order-status-Dispatched{ background:#e8f0fe; color:#1a56a0; }
-.order-status-Draft{ background:#f3f2ee; color:var(--muted); }
-
-.order-status-badge{ display:inline-block; padding:3px 9px; border-radius:5px; font-size:0.7rem; font-weight:700; white-space:nowrap; }
 .order-status-Submitted{ background:#fff4e0; color:#7a5210; }
 .order-status-Approved{ background:#eef6ea; color:var(--forest-2); }
 .order-status-Rejected{ background:#fbe4e4; color:#b23b3b; }

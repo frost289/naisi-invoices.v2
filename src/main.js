@@ -27,8 +27,12 @@ import {
 } from './products.js';
 import {
   submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
-  fetchOrderById, setOrderStatus, markOrderInvoiced, deleteOrder
+  fetchOrderById, setOrderStatus, markOrderInvoiced, updateOrderDetails, deleteOrder
 } from './orders.js';
+import {
+  adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
+  reapplyStockForOrderEdit
+} from './stock.js';
 import {
   submitVisit, fetchMyVisitsPage, fetchAllVisitsForAggregation, aggregateVisitsByRep,
   NO_ORDER_REASONS
@@ -452,21 +456,25 @@ async function initApp(user, role) {
     const prodPack = document.getElementById('prodPack');
     const prodQuantity = document.getElementById('prodQuantity');
     const prodPrice = document.getElementById('prodPrice');
+    const prodStock = document.getElementById('prodStock');
     let loadedProducts = [], productsCursor = null, productsHasMore = true;
 
     function renderProductRows(list) {
       productListBody.innerHTML = '';
       productListEmpty.style.display = list.length === 0 ? 'block' : 'none';
       list.forEach(p => {
+        const stock = p.stockOnHand ?? 0;
         const tr = document.createElement('tr');
         tr.dataset.id = p.id;
         tr.innerHTML = `
           <td>${p.productName}</td>
           <td>${p.packLabel}</td>
           <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace; ${stock <= 0 ? 'color:#b3261e; font-weight:700;' : ''}">${stock}</td>
           <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
           <td>
             <button type="button" class="list-action-btn" data-action="edit">Edit</button>
+            <button type="button" class="list-action-btn" data-action="adjust-stock">Adjust Stock</button>
             <button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>
           </td>`;
         productListBody.appendChild(tr);
@@ -501,13 +509,14 @@ async function initApp(user, role) {
       const pack = prodPack.value.trim();
       const quantity = parseFloat(prodQuantity.value);
       const price = parseFloat(prodPrice.value);
+      const stockOnHand = parseFloat(prodStock.value) || 0;
       if (!name || !pack) { showToast('Enter both a product name and a pack.', 'error'); return; }
       if (!quantity || quantity <= 0) { showToast('Enter a quantity greater than 0.', 'error'); return; }
       if (!price || price <= 0) { showToast('Enter a price greater than 0.', 'error'); return; }
       setButtonLoading(addProductBtn, 'Saving…');
       try {
-        await addProduct({ productName: name, packLabel: pack, quantity, price, uid: user.uid });
-        prodName.value = ''; prodPack.value = ''; prodQuantity.value = ''; prodPrice.value = '';
+        await addProduct({ productName: name, packLabel: pack, quantity, price, stockOnHand, uid: user.uid });
+        prodName.value = ''; prodPack.value = ''; prodQuantity.value = ''; prodPrice.value = ''; prodStock.value = '';
         showToast('Product added to catalog.', 'success');
         await resetAndLoadProducts();
         await loadProductsCache();
@@ -570,8 +579,78 @@ async function initApp(user, role) {
           showToast('Could not delete product: ' + err.message, 'error');
           clearButtonLoading(btn);
         }
+      } else if (btn.dataset.action === 'adjust-stock') {
+        if (window.__openStockAdjustModal) window.__openStockAdjustModal(p);
       }
     });
+
+    // ============= STOCK ADJUSTMENT MODAL (manager only) =============
+    const stockAdjustModal = document.getElementById('stockAdjustModal');
+    const saProductLabel = document.getElementById('saProductLabel');
+    const saCurrentStock = document.getElementById('saCurrentStock');
+    const saDelta = document.getElementById('saDelta');
+    const saReason = document.getElementById('saReason');
+    const saErrorNote = document.getElementById('saErrorNote');
+    const saSaveBtn = document.getElementById('saSaveBtn');
+    const saCancelBtn = document.getElementById('saCancelBtn');
+    const saCloseBtn = document.getElementById('saCloseBtn');
+
+    let adjustingProduct = null;
+
+    function openStockAdjustModal(product) {
+      adjustingProduct = product;
+      saErrorNote.style.display = 'none';
+      saProductLabel.textContent = `${product.productName} — ${product.packLabel}`;
+      saCurrentStock.textContent = product.stockOnHand ?? 0;
+      saDelta.value = '';
+      saReason.value = '';
+      stockAdjustModal.style.display = 'flex';
+    }
+
+    function closeStockAdjustModal() {
+      stockAdjustModal.style.display = 'none';
+      adjustingProduct = null;
+    }
+
+    saCancelBtn.addEventListener('click', closeStockAdjustModal);
+    saCloseBtn.addEventListener('click', closeStockAdjustModal);
+    stockAdjustModal.addEventListener('click', (e) => {
+      if (e.target === stockAdjustModal) closeStockAdjustModal();
+    });
+
+    saSaveBtn.addEventListener('click', async () => {
+      if (!adjustingProduct) return;
+      const delta = parseFloat(saDelta.value);
+      const reason = saReason.value.trim();
+      if (!delta) {
+        saErrorNote.textContent = 'Enter a non-zero adjustment.';
+        saErrorNote.style.display = 'block';
+        return;
+      }
+      if (!reason) {
+        saErrorNote.textContent = 'Enter a reason for this adjustment.';
+        saErrorNote.style.display = 'block';
+        return;
+      }
+      saErrorNote.style.display = 'none';
+      setButtonLoading(saSaveBtn, 'Saving…');
+      try {
+        await adjustStockManually(adjustingProduct.id, delta, { reason, uid: user.uid, email: user.email });
+        const idx = loadedProducts.findIndex(p => p.id === adjustingProduct.id);
+        if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], stockOnHand: (loadedProducts[idx].stockOnHand || 0) + delta };
+        renderProductRows(loadedProducts);
+        await loadProductsCache();
+        showToast('Stock adjusted.', 'success');
+        closeStockAdjustModal();
+      } catch (err) {
+        saErrorNote.textContent = 'Could not save: ' + err.message;
+        saErrorNote.style.display = 'block';
+      } finally {
+        clearButtonLoading(saSaveBtn);
+      }
+    });
+
+    window.__openStockAdjustModal = openStockAdjustModal;
 
     var resetAndLoadProductsRef = resetAndLoadProducts; // exposed to viewLoaders closure below
   }
@@ -1109,11 +1188,13 @@ async function initApp(user, role) {
       if (isManager) {
         if (o.status === 'Submitted') {
           actions = `
+            <button type="button" class="list-action-btn" data-action="edit">Edit</button>
             <button type="button" class="list-action-btn" data-action="approve">Approve</button>
             <button type="button" class="list-action-btn exp-delete-btn" data-action="reject">Reject</button>
           `;
         } else if (o.status === 'Approved') {
           actions = `
+            <button type="button" class="list-action-btn" data-action="edit">Edit</button>
             <button type="button" class="list-action-btn" data-action="generate-invoice">Generate Invoice</button>
             <button type="button" class="list-action-btn exp-delete-btn" data-action="cancel">Cancel</button>
           `;
@@ -1175,45 +1256,173 @@ async function initApp(user, role) {
     if (!order) return;
 
     if (btn.dataset.action === 'approve') {
+      const shortages = (order.items || [])
+        .filter(it => it.productId)
+        .map(it => {
+          const p = productsCache.find(pp => pp.id === it.productId);
+          const available = p ? (p.stockOnHand ?? 0) : 0;
+          return { desc: it.desc, needed: it.qty, available };
+        })
+        .filter(s => s.needed > s.available);
+
+      if (shortages.length > 0) {
+        const msg = 'Stock is short for:\n' +
+          shortages.map(s => `• ${s.desc}: need ${s.needed}, have ${s.available}`).join('\n') +
+          '\n\nApprove anyway?';
+        if (!confirm(msg)) return;
+      }
+
       setButtonLoading(btn, '…');
       try {
-        await setOrderStatus(id, 'Approved');
-        showToast(`Order ${order.orderNo} approved — find it in the Invoices tab to generate the invoice.`, 'success');
+        await approveOrderWithStock(order, { uid: user.uid, email: user.email });
+        showToast(`Order ${order.orderNo} approved.`, 'success');
         await resetAndLoadOrders();
+        await loadProductsCache();
       } catch (err) {
         showToast('Could not approve: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'reject') {
-      const confirmed = confirm(`Reject and permanently delete order ${order.orderNo}?\n\nThis cannot be undone.`);
-      if (!confirmed) return;
+      // Submitted orders never touched stock, so rejecting one is just
+      // a status change — kept (not deleted) so there's a record of
+      // why it didn't go through.
+      const reason = prompt(`Reason for rejecting order ${order.orderNo} (optional):`) || '';
       setButtonLoading(btn, '…');
       try {
-        await deleteOrder(id);
-        loadedOrders = loadedOrders.filter(o => o.id !== id);
-        renderOrderRows(loadedOrders);
-        showToast('Order rejected and removed.', 'success');
+        await setOrderStatus(id, 'Rejected', reason);
+        showToast(`Order ${order.orderNo} rejected.`, 'success');
+        await resetAndLoadOrders();
       } catch (err) {
         showToast('Could not reject: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'cancel') {
-      const confirmed = confirm(`Cancel and permanently delete order ${order.orderNo}?\n\nThis cannot be undone.`);
+      // Approved orders already had stock decremented, so cancelling
+      // one must restore it — cancelApprovedOrderAndDelete does that
+      // and hard-deletes the order in the same transaction, logging a
+      // stockMovements entry so the stock change is still auditable
+      // even though the order record itself is gone.
+      const confirmed = confirm(`Cancel and permanently delete order ${order.orderNo}?\n\nThis restores the stock that was reserved when it was approved. This cannot be undone.`);
       if (!confirmed) return;
       setButtonLoading(btn, '…');
       try {
-        await deleteOrder(id);
+        await cancelApprovedOrderAndDelete(order, { uid: user.uid, email: user.email });
         loadedOrders = loadedOrders.filter(o => o.id !== id);
         renderOrderRows(loadedOrders);
-        showToast('Order cancelled and removed.', 'success');
+        showToast('Order cancelled, deleted, and stock restored.', 'success');
+        await loadProductsCache();
       } catch (err) {
         showToast('Could not cancel: ' + err.message, 'error');
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'generate-invoice') {
       if (window.__loadOrderIntoInvoiceForm) window.__loadOrderIntoInvoiceForm(order);
+    } else if (btn.dataset.action === 'edit') {
+      if (window.__openEditOrderModal) window.__openEditOrderModal(order);
     }
   });
+
+  // ============= EDIT ORDER MODAL (manager only) =============
+  if (isManager) {
+    const editOrderModal = document.getElementById('editOrderModal');
+    const editOrderNoLabel = document.getElementById('editOrderNoLabel');
+    const eoCustName = document.getElementById('eoCustName');
+    const eoCustPhone = document.getElementById('eoCustPhone');
+    const eoCustLocation = document.getElementById('eoCustLocation');
+    const eoQuickAddGrid = document.getElementById('eoQuickAddGrid');
+    const eoItemsBody = document.getElementById('eoItemsBody');
+    const eoAddItemBtn = document.getElementById('eoAddItemBtn');
+    const eoNotes = document.getElementById('eoNotes');
+    const eoErrorNote = document.getElementById('eoErrorNote');
+    const eoSaveBtn = document.getElementById('eoSaveBtn');
+    const eoCancelBtn = document.getElementById('eoCancelBtn');
+    const eoCloseBtn = document.getElementById('eoCloseBtn');
+
+    let editingOrder = null;
+
+    function openEditOrderModal(order) {
+      editingOrder = order;
+      eoErrorNote.style.display = 'none';
+      editOrderNoLabel.textContent = order.orderNo;
+      eoCustName.value = order.customerName || '';
+      eoCustPhone.value = order.customerPhone || '';
+      eoCustLocation.value = order.customerLocation || '';
+      eoNotes.value = order.notes || '';
+      eoItemsBody.innerHTML = '';
+      (order.items || []).forEach(it =>
+        addItemRow(eoItemsBody, () => {}, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity)
+      );
+      // Quick-add grid uses whatever's currently in productsCache (loaded on app init).
+      buildQuickAddGrid(eoQuickAddGrid, eoItemsBody, () => {}, productsCache);
+      editOrderModal.style.display = 'flex';
+    }
+
+    function closeEditOrderModal() {
+      editOrderModal.style.display = 'none';
+      editingOrder = null;
+      eoItemsBody.innerHTML = '';
+    }
+
+    eoAddItemBtn.addEventListener('click', () => addItemRow(eoItemsBody, () => {}));
+    eoCancelBtn.addEventListener('click', closeEditOrderModal);
+    eoCloseBtn.addEventListener('click', closeEditOrderModal);
+    editOrderModal.addEventListener('click', (e) => {
+      if (e.target === editOrderModal) closeEditOrderModal();
+    });
+
+    eoSaveBtn.addEventListener('click', async () => {
+      if (!editingOrder) return;
+      const customerName = eoCustName.value.trim();
+      const customerPhone = eoCustPhone.value.trim();
+      const customerLocation = eoCustLocation.value.trim();
+      const notes = eoNotes.value.trim();
+      const items = getItems(eoItemsBody);
+
+      if (!customerName) {
+        eoErrorNote.textContent = 'Customer name cannot be empty.';
+        eoErrorNote.style.display = 'block';
+        return;
+      }
+      if (items.length === 0) {
+        eoErrorNote.textContent = 'Add at least one item.';
+        eoErrorNote.style.display = 'block';
+        return;
+      }
+      eoErrorNote.style.display = 'none';
+      setButtonLoading(eoSaveBtn, 'Saving…');
+      try {
+        await updateOrderDetails(editingOrder.id, {
+          customerId: editingOrder.customerId || null,
+          customerName, customerPhone, customerLocation,
+          items, notes,
+        });
+        // Stock was already decremented once when this order was Approved —
+        // re-apply just the difference so it doesn't double-count or drift.
+        if (editingOrder.status === 'Approved') {
+          await reapplyStockForOrderEdit(editingOrder, items, { uid: user.uid, email: user.email });
+          await loadProductsCache();
+        }
+        const idx = loadedOrders.findIndex(o => o.id === editingOrder.id);
+        if (idx !== -1) {
+          const grandTotal = items.reduce((sum, it) => sum + (it.total || 0), 0);
+          loadedOrders[idx] = {
+            ...loadedOrders[idx],
+            customerName, customerPhone, customerLocation, items, notes, grandTotal,
+          };
+        }
+        renderOrderRows(loadedOrders);
+        showToast(`Order ${editingOrder.orderNo} updated.`, 'success');
+        closeEditOrderModal();
+      } catch (err) {
+        eoErrorNote.textContent = 'Could not save: ' + err.message;
+        eoErrorNote.style.display = 'block';
+      } finally {
+        clearButtonLoading(eoSaveBtn);
+      }
+    });
+
+    window.__openEditOrderModal = openEditOrderModal;
+  }
 
   // ============= LOG VISIT (submitter) =============
   if (!isManager) {
