@@ -67,6 +67,7 @@ select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
 @media (max-width: 480px) {
   .view-nav { display: flex; width: 100%; border-radius: 0; }
   .nav-tab { flex: 1; text-align: center; padding: 8px 6px; font-size: 0.8rem; }
+  .logout-btn { padding: 6px 10px; font-size: 0.72rem; }
 }
 
 .topbar {
@@ -87,9 +88,16 @@ select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
   pointer-events: none;
 }
 .topbar img { height: 42px; display: block; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.25)); }
-.topbar .titles { display: flex; flex-direction: column; gap: 1px; }
-.topbar h1 { font-family: 'Baloo 2', sans-serif; color: #fff; font-size: 1.25rem; margin: 0; letter-spacing: 0.2px; }
-.topbar p { margin: 0; color: var(--leaf-light); font-size: 0.78rem; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase; }
+.topbar .titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow: hidden; }
+.topbar h1 { font-family: 'Baloo 2', sans-serif; color: #fff; font-size: 1.25rem; margin: 0; letter-spacing: 0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar p { margin: 0; color: var(--leaf-light); font-size: 0.78rem; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logout-btn {
+  margin-left: auto; position: relative; z-index: 1; flex-shrink: 0;
+  background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.3);
+  color: #fff; font-size: 0.78rem; font-weight: 600; padding: 8px 16px;
+  border-radius: 8px; cursor: pointer; min-height: var(--touch-min); white-space: nowrap;
+}
+.logout-btn:hover { background: rgba(255,255,255,0.22); }
 
 .layout { display: grid; grid-template-columns: minmax(340px, 460px) 1fr; gap: 0; align-items: start; max-width: 1400px; margin: 0 auto; }
 .panel { padding: var(--space-6) 30px 60px; }

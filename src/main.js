@@ -1,7 +1,7 @@
 import './style.css';
 import { LOGO_DATA_URI } from './logo.js';
 import { auth, db } from './firebase.js';
-import { watchAuth, login } from './auth.js';
+import { watchAuth, login, logout } from './auth.js';
 import { getUserRole } from './roles.js';
 import { addItemRow, buildQuickAddGrid, getItems, mwk } from './items.js';
 import { updatePreview, formatDate } from './preview.js';
@@ -93,6 +93,23 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
   } finally {
     clearButtonLoading(btn);
   }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  const confirmed = confirm('Log out of Naisi Foods?');
+  if (!confirmed) return;
+  try {
+    await logout();
+  } catch (e) {
+    showToast('Could not log out: ' + e.message, 'error');
+    return;
+  }
+  // initApp() only ever wires up its role-based UI and event listeners
+  // ONCE per page load (see appInitialized below) — a full reload is the
+  // simplest way to guarantee whoever logs in next (possibly a different
+  // role entirely) gets a completely clean app instead of stale listeners
+  // still pointed at the previous user.
+  window.location.reload();
 });
 
 let appInitialized = false;
