@@ -1527,6 +1527,87 @@ async function initApp(user, role) {
   let loadedOrders = [], ordersCursor = null, ordersHasMore = true;
   let currentOrderStatusFilter = 'Submitted';
 
+  // ---- Order Preview modal (manager reviews an order before approving) ----
+  const orderPreviewModal = document.getElementById('orderPreviewModal');
+  const opOrderNoLabel = document.getElementById('opOrderNoLabel');
+  const opCustomerName = document.getElementById('opCustomerName');
+  const opCustomerPhone = document.getElementById('opCustomerPhone');
+  const opCustomerLocation = document.getElementById('opCustomerLocation');
+  const opSubmittedBy = document.getElementById('opSubmittedBy');
+  const opItemsBody = document.getElementById('opItemsBody');
+  const opGrandTotal = document.getElementById('opGrandTotal');
+  const opNotesWrap = document.getElementById('opNotesWrap');
+  const opNotes = document.getElementById('opNotes');
+  const opShortageWarning = document.getElementById('opShortageWarning');
+  const opConfirmBtn = document.getElementById('opConfirmBtn');
+  const opCancelBtn = document.getElementById('opCancelBtn');
+  const opCloseBtn = document.getElementById('opCloseBtn');
+  let opOnConfirm = null;
+
+  // order: the order doc. options.shortages: stock shortfalls to warn
+  // about (same shape used by the approve handler below). options.onConfirm:
+  // async () => {} run when the manager clicks the primary action button.
+  function openOrderPreviewModal(order, { confirmLabel = 'Approve Order', shortages = [], onConfirm } = {}) {
+    opOrderNoLabel.textContent = order.orderNo;
+    opCustomerName.textContent = order.customerName || '—';
+    opCustomerPhone.textContent = (order.customerPhone && order.customerPhone !== '-') ? order.customerPhone : '—';
+    opCustomerLocation.textContent = (order.customerLocation && order.customerLocation !== '-') ? order.customerLocation : '—';
+    opSubmittedBy.textContent = order.createdByEmail || '—';
+
+    const items = order.items || [];
+    opItemsBody.innerHTML = items.map(it => `
+      <tr>
+        <td>${it.qty}</td>
+        <td>${it.desc || '—'}</td>
+        <td class="num">${mwk(it.price || 0)}</td>
+        <td class="num">${mwk((it.qty || 0) * (it.price || 0))}</td>
+      </tr>
+    `).join('') || `<tr><td colspan="4" style="color:var(--muted);">No items on this order.</td></tr>`;
+    opGrandTotal.textContent = mwk(order.grandTotal || 0);
+
+    if (order.notes && order.notes.trim()) {
+      opNotes.textContent = order.notes;
+      opNotesWrap.style.display = 'block';
+    } else {
+      opNotesWrap.style.display = 'none';
+    }
+
+    if (shortages.length > 0) {
+      opShortageWarning.innerHTML = '<strong>Stock is short for:</strong><br>' +
+        shortages.map(s => `${s.desc}: need ${s.needed}, have ${s.available}`).join('<br>');
+      opShortageWarning.style.display = 'block';
+    } else {
+      opShortageWarning.style.display = 'none';
+    }
+
+    opConfirmBtn.textContent = confirmLabel;
+    opConfirmBtn.style.display = onConfirm ? 'block' : 'none';
+    opOnConfirm = onConfirm || null;
+    orderPreviewModal.style.display = 'flex';
+  }
+
+  function closeOrderPreviewModal() {
+    orderPreviewModal.style.display = 'none';
+    opOnConfirm = null;
+  }
+
+  opCloseBtn.addEventListener('click', closeOrderPreviewModal);
+  opCancelBtn.addEventListener('click', closeOrderPreviewModal);
+  orderPreviewModal.addEventListener('click', (e) => { if (e.target === orderPreviewModal) closeOrderPreviewModal(); });
+
+  opConfirmBtn.addEventListener('click', async () => {
+    if (typeof opOnConfirm !== 'function') return;
+    setButtonLoading(opConfirmBtn, 'Working…');
+    try {
+      await opOnConfirm();
+      closeOrderPreviewModal();
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      clearButtonLoading(opConfirmBtn);
+    }
+  });
+
   function orderStatusBadge(status) {
     return `<span class="order-status-badge order-status-${status}">${status}</span>`;
   }
@@ -1626,23 +1707,16 @@ async function initApp(user, role) {
         })
         .filter(s => s.needed > s.available);
 
-      if (shortages.length > 0) {
-        const msg = 'Stock is short for:\n' +
-          shortages.map(s => `• ${s.desc}: need ${s.needed}, have ${s.available}`).join('\n') +
-          '\n\nApprove anyway?';
-        if (!confirm(msg)) return;
-      }
-
-      setButtonLoading(btn, '…');
-      try {
-        await approveOrderWithStock(order, { uid: user.uid, email: user.email });
-        showToast(`Order ${order.orderNo} approved.`, 'success');
-        await resetAndLoadOrders();
-        await loadProductsCache();
-      } catch (err) {
-        showToast('Could not approve: ' + err.message, 'error');
-        clearButtonLoading(btn);
-      }
+      openOrderPreviewModal(order, {
+        confirmLabel: 'Approve Order',
+        shortages,
+        onConfirm: async () => {
+          await approveOrderWithStock(order, { uid: user.uid, email: user.email });
+          showToast(`Order ${order.orderNo} approved.`, 'success');
+          await resetAndLoadOrders();
+          await loadProductsCache();
+        },
+      });
     } else if (btn.dataset.action === 'reject') {
       // Submitted orders never touched stock, so rejecting one is just
       // a status change — kept (not deleted) so there's a record of
