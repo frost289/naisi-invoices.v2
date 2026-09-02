@@ -40,7 +40,8 @@
     <h1 id="appTitle">Naisi Foods</h1>
     <p id="appSubtitle">Sales &amp; Invoicing</p>
   </div>
-  <button type="button" id="logoutBtn" class="logout-btn">Log Out</button>
+  <button type="button" id="profileBtn" class="logout-btn" style="margin-left:auto; margin-right:8px;">👤 Profile</button>
+  <button type="button" id="logoutBtn" class="logout-btn" style="margin-left:0;">Log Out</button>
 </div>
 
 <div class="view-nav" id="viewNav">
@@ -232,11 +233,16 @@
     <h2><span class="dot"></span>Add Customer</h2>
     <div class="row2">
       <div class="field"><label>Name</label><input type="text" id="newCustName" placeholder="Customer name"></div>
-      <div class="field"><label>Phone</label><input type="tel" id="newCustPhone" placeholder="e.g. 0999 123 456"></div>
+      <div class="field">
+        <label>Phone <span class="auto-tag">optional</span></label>
+        <input type="tel" id="newCustPhone" placeholder="e.g. 0999 123 456">
+        <p id="newCustPhoneError" style="color:#b3261e; font-size:0.72rem; display:none; margin-top:3px;"></p>
+      </div>
     </div>
-    <div class="field">
+    <div class="field" style="position:relative;">
       <label>Location</label>
-      <input type="text" id="newCustLocation" placeholder="e.g. Section 8">
+      <input type="text" id="newCustLocation" placeholder="Start typing to search approved locations..." autocomplete="off">
+      <div id="newCustLocationSuggestions" class="suggestions-dropdown" style="display:none;"></div>
       <input type="hidden" id="newCustLat">
       <input type="hidden" id="newCustLng">
       <button type="button" class="add-item-btn" id="newCustPinBtn" style="margin-top:6px;">📍 Pin Location on Map</button>
@@ -245,6 +251,17 @@
     <button type="button" class="generate-btn" id="addCustomerBtn">Add Customer</button>
     <p id="addCustomerNote" style="font-size:0.72rem; color:var(--muted); margin-top:6px;"></p>
   </div>
+
+  <div class="card" id="manageLocationsCard" style="display:none;">
+    <h2><span class="dot"></span>Approved Locations</h2>
+    <p class="numbering-hint">Manager-only. This is the standard list customers and invoices pick their location from.</p>
+    <div class="row2">
+      <div class="field"><label>New Location</label><input type="text" id="newLocationName" placeholder="e.g. Area 25"></div>
+      <div class="field" style="display:flex; align-items:end;"><button type="button" class="generate-btn" id="addLocationBtn">Add Location</button></div>
+    </div>
+    <div id="locationsList" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;"></div>
+  </div>
+
   <div class="card">
     <h2><span class="dot"></span>Manage Customers</h2>
     <div class="field list-search">
@@ -259,6 +276,25 @@
     </table>
     <p id="customerListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No customers saved yet.</p>
     <button type="button" class="load-more-btn" id="loadMoreCustomersBtn" style="display:none;">Load 25 more</button>
+  </div>
+
+  <div class="card" id="mergeCustomersCard" style="display:none;">
+    <h2><span class="dot"></span>Merge Duplicate Customers</h2>
+    <p class="numbering-hint">Manager-only. Moves all orders, visits, and invoices from one record onto the other, then deletes the duplicate. This cannot be undone.</p>
+    <div class="row2">
+      <div class="field" style="position:relative;">
+        <label>Keep This Customer</label>
+        <input type="text" id="mergeKeepSearch" placeholder="Search by name..." autocomplete="off">
+        <div id="mergeKeepSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+      </div>
+      <div class="field" style="position:relative;">
+        <label>Merge This Into It (will be deleted)</label>
+        <input type="text" id="mergeAwaySearch" placeholder="Search by name..." autocomplete="off">
+        <div id="mergeAwaySuggestions" class="suggestions-dropdown" style="display:none;"></div>
+      </div>
+    </div>
+    <div id="mergePreview" style="display:none; background:#f7f6f2; border-radius:8px; padding:12px 14px; margin:10px 0; font-size:0.85rem;"></div>
+    <button type="button" class="generate-btn" id="mergeConfirmBtn" style="display:none;">Confirm Merge</button>
   </div>
 </div>
 
@@ -363,6 +399,7 @@
       <select id="orderStatusFilter">
         <option value="Submitted">Awaiting Processing (Submitted)</option>
         <option value="Approved">Approved</option>
+        <option value="Invoicing">Invoicing (in progress)</option>
         <option value="Invoiced">Invoiced</option>
         <option value="all">All Orders</option>
       </select>
@@ -434,10 +471,19 @@
         <label>Customer Name</label>
         <input type="text" id="custName" placeholder="Start typing to search or add new..." autocomplete="off">
         <div id="custSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+        <input type="hidden" id="custCustomerId">
       </div>
       <div class="row2">
-        <div class="field"><label>Phone</label><input type="tel" id="custPhone" placeholder="e.g. 0999 123 456"></div>
-        <div class="field"><label>Location</label><input type="text" id="custLocation" placeholder="e.g. Section 8"></div>
+        <div class="field">
+          <label>Phone <span class="auto-tag">optional</span></label>
+          <input type="tel" id="custPhone" placeholder="e.g. 0999 123 456">
+          <p id="custPhoneError" style="color:#b3261e; font-size:0.72rem; display:none; margin-top:3px;"></p>
+        </div>
+        <div class="field" style="position:relative;">
+          <label>Location</label>
+          <input type="text" id="custLocation" placeholder="Search approved locations..." autocomplete="off">
+          <div id="custLocationSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+        </div>
       </div>
       <input type="hidden" id="custLat">
       <input type="hidden" id="custLng">
@@ -568,9 +614,19 @@
 
     <div id="opShortageWarning" style="display:none; background:#fff4e0; border:1px solid var(--amber); border-radius:8px; padding:10px 14px; margin-top:14px; font-size:0.82rem; color:#7a5210;"></div>
 
-    <div class="modal-actions" style="margin-top:16px;">
+    <div class="modal-actions" id="opMainActions" style="margin-top:16px;">
       <button type="button" class="generate-btn" id="opConfirmBtn" style="flex:1;">Approve Order</button>
       <button type="button" class="list-action-btn" id="opCancelBtn">Close</button>
+    </div>
+    <button type="button" class="list-action-btn exp-delete-btn" id="opOverrideBtn" style="display:none; width:100%; margin-top:8px;">Approve Anyway (Override Stock)</button>
+
+    <div id="opPostApproveActions" style="display:none; margin-top:16px;">
+      <p style="color:var(--forest-2); font-weight:600; font-size:0.85rem; margin-bottom:10px;">✓ Order approved. What next?</p>
+      <div class="modal-actions">
+        <button type="button" class="list-action-btn" id="opEditNowBtn" style="flex:1;">Edit Order</button>
+        <button type="button" class="generate-btn" id="opPrintNowBtn" style="flex:1;">Generate &amp; Print Invoice</button>
+      </div>
+      <button type="button" class="list-action-btn" id="opDoneBtn" style="width:100%; margin-top:8px;">Done for Now</button>
     </div>
   </div>
 </div>
@@ -621,6 +677,57 @@
       <button type="button" class="generate-btn" id="lpSaveBtn" style="flex:1;">Save Location</button>
       <button type="button" class="list-action-btn" id="lpCancelBtn">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- ===================== PROFILE MODAL (shared) ===================== -->
+<div id="profileModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>My Profile</h2>
+      <button type="button" class="modal-close-btn" id="profileCloseBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="field"><label>Email</label><input type="text" id="profileEmail" readonly></div>
+    <div class="field"><label>Display Name</label><input type="text" id="profileName" placeholder="e.g. John Banda"></div>
+    <p class="numbering-hint">Your display name is what shows up in reports instead of your email address.</p>
+
+    <div id="previewAsWrap" style="display:none; margin-top:16px; padding-top:16px; border-top:1px solid var(--line);">
+      <div class="field">
+        <label>Preview App As <span class="auto-tag">for testing only — doesn't change your real role</span></label>
+        <select id="previewAsSelect">
+          <option value="manager">Manager (my real role)</option>
+          <option value="submitter">Sales Rep (preview)</option>
+        </select>
+      </div>
+      <p class="numbering-hint">Switches what you see so you can check both experiences. Reloads the app.</p>
+    </div>
+
+    <p id="profileErrorNote" style="color:#b3261e; font-size:0.78rem; display:none; margin-top:8px;"></p>
+
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" class="generate-btn" id="profileSaveBtn" style="flex:1;">Save</button>
+      <button type="button" class="list-action-btn" id="profileCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== DUPLICATE CUSTOMER MODAL (shared) ===================== -->
+<div id="duplicateCustomerModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Possible Duplicate Customer</h2>
+      <button type="button" class="modal-close-btn" id="dupCloseBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <p class="numbering-hint">This looks like it might already exist. Choose an existing customer below, or create a new record anyway.</p>
+    <div id="dupMatchesList"></div>
+
+    <div class="modal-actions" style="margin-top:16px;">
+      <button type="button" class="generate-btn" id="dupCreateAnywayBtn" style="flex:1;">Create New Anyway</button>
+      <button type="button" class="list-action-btn" id="dupCancelBtn">Cancel</button>
+    </div>
+    <p id="dupManagerOnlyNote" style="font-size:0.72rem; color:var(--muted); margin-top:8px; display:none;">Only a manager can confirm creating a likely duplicate.</p>
   </div>
 </div>
 

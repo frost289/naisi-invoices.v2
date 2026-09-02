@@ -16,8 +16,15 @@ import {
 } from './invoices.js';
 import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndDownloadCustomerReport } from './export.js';
 import {
-  fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation, findExactNameMatch
+  fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation,
+  normalizeText, normalizePhone, formatPhoneForDisplay, findPossibleDuplicates, countCustomerActivity, mergeCustomers
 } from './customers.js';
+import {
+  fetchAllLocations, addLocation, deleteLocation, findLocationByName, googleMapsSearchUrlForLocation
+} from './locations.js';
+import {
+  fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail
+} from './userProfiles.js';
 import {
   fetchAllExpensesPage, fetchMyExpensesPage, addExpense, updateExpense, deleteExpense
 } from './expenses.js';
@@ -27,7 +34,8 @@ import {
 } from './products.js';
 import {
   submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
-  fetchOrderById, setOrderStatus, markOrderInvoiced, updateOrderDetails, deleteOrder
+  fetchOrderById, setOrderStatus, markOrderInvoiced, updateOrderDetails,
+  beginInvoiceGeneration, revertInvoiceGeneration
 } from './orders.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
@@ -118,12 +126,21 @@ async function initApp(user, role) {
   if (appInitialized) { hideAppOverlay(); return; }
   appInitialized = true;
 
-  const isManager = role === 'manager';
+  // realRole is the actual Firestore-verified role and never changes —
+  // Firestore security rules check config/roles server-side regardless
+  // of anything below, so this override can't grant real permissions,
+  // only hide/show manager-only UI for a manager who wants to see what
+  // a rep's screen looks like without needing a second test account.
+  const realRole = role;
+  const isManager = (realRole === 'manager') && (localStorage.getItem('naisi_previewAsRole') !== 'submitter');
 
   document.getElementById('topbarLogo').src = LOGO_DATA_URI;
   document.getElementById('previewLogo').src = LOGO_DATA_URI;
   document.getElementById('appTitle').textContent = 'Naisi Foods';
   document.getElementById('appSubtitle').textContent = isManager ? 'Management' : 'Sales Rep';
+  if (realRole === 'manager' && !isManager) {
+    document.getElementById('appSubtitle').textContent = 'Sales Rep (Preview)';
+  }
 
   const itemsBody = document.getElementById('itemsBody');
   const quickAddGrid = document.getElementById('quickAddGrid');
@@ -288,6 +305,19 @@ async function initApp(user, role) {
   async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
   await loadCustomersCache();
 
+  // ============= LOCATIONS: approved list cache (shared) =============
+  let locationsCache = [];
+  async function loadLocationsCache() { locationsCache = await fetchAllLocations(); }
+  await loadLocationsCache();
+
+  // ============= USER PROFILES: email -> display name (shared) =============
+  // Used to show names instead of emails in reports (Rep Performance,
+  // Stock Movement History, Order Preview, Expenses "By" column).
+  let profilesByUid = {};
+  async function loadProfilesCache() { profilesByUid = await fetchAllProfiles(); }
+  await loadProfilesCache();
+  function displayNameForEmail(email) { return resolveNameByEmail(profilesByUid, email); }
+
   // === references used by both roles ===
   const lvQuickAddGrid = document.getElementById('lvQuickAddGrid');
   const lvOrderItemsBody = document.getElementById('lvOrderItemsBody');
@@ -421,6 +451,181 @@ async function initApp(user, role) {
     }
   });
 
+  // ============= PROFILE MODAL (shared) =============
+  const profileModal = document.getElementById('profileModal');
+  const profileBtn = document.getElementById('profileBtn');
+  const profileCloseBtn = document.getElementById('profileCloseBtn');
+  const profileCancelBtn = document.getElementById('profileCancelBtn');
+  const profileSaveBtn = document.getElementById('profileSaveBtn');
+  const profileEmail = document.getElementById('profileEmail');
+  const profileName = document.getElementById('profileName');
+  const profileErrorNote = document.getElementById('profileErrorNote');
+  const previewAsWrap = document.getElementById('previewAsWrap');
+  const previewAsSelect = document.getElementById('previewAsSelect');
+
+  function openProfileModal() {
+    profileEmail.value = user.email;
+    profileName.value = (profilesByUid[user.uid] && profilesByUid[user.uid].name) || '';
+    profileErrorNote.style.display = 'none';
+    if (realRole === 'manager') {
+      previewAsWrap.style.display = 'block';
+      previewAsSelect.value = localStorage.getItem('naisi_previewAsRole') === 'submitter' ? 'submitter' : 'manager';
+    } else {
+      previewAsWrap.style.display = 'none';
+    }
+    profileModal.style.display = 'flex';
+  }
+  function closeProfileModal() { profileModal.style.display = 'none'; }
+
+  profileBtn.addEventListener('click', openProfileModal);
+  profileCloseBtn.addEventListener('click', closeProfileModal);
+  profileCancelBtn.addEventListener('click', closeProfileModal);
+  profileModal.addEventListener('click', (e) => { if (e.target === profileModal) closeProfileModal(); });
+
+  profileSaveBtn.addEventListener('click', async () => {
+    setButtonLoading(profileSaveBtn, 'Saving…');
+    try {
+      await saveMyProfile(user.uid, { name: profileName.value, email: user.email });
+      await loadProfilesCache();
+
+      if (realRole === 'manager') {
+        const currentOverride = localStorage.getItem('naisi_previewAsRole') === 'submitter' ? 'submitter' : 'manager';
+        if (previewAsSelect.value !== currentOverride) {
+          if (previewAsSelect.value === 'submitter') localStorage.setItem('naisi_previewAsRole', 'submitter');
+          else localStorage.removeItem('naisi_previewAsRole');
+          showToast('Switching preview mode…', 'info');
+          window.location.reload();
+          return;
+        }
+      }
+      showToast('Profile saved.', 'success');
+      closeProfileModal();
+    } catch (err) {
+      profileErrorNote.textContent = 'Could not save: ' + err.message;
+      profileErrorNote.style.display = 'block';
+    } finally {
+      clearButtonLoading(profileSaveBtn);
+    }
+  });
+
+  // ============= LOCATION SEARCH-SELECT (shared helper) =============
+  // Wires a text input + suggestions dropdown to the approved locations
+  // list only — this is what "standardizes locations" instead of free
+  // text. Reps can only pick an existing entry; managers get offered an
+  // inline "add this as a new standard location" option when what they
+  // typed doesn't match anything yet.
+  function initLocationSearchSelect(inputEl, suggestionsEl) {
+    function render(matches) {
+      if (!matches.length) { suggestionsEl.style.display = 'none'; suggestionsEl.innerHTML = ''; return; }
+      suggestionsEl.innerHTML = matches.slice(0, 8).map(l => `
+        <div class="suggestion-item" data-name="${l.name}"><span class="sug-name">${l.name}</span></div>
+      `).join('');
+      suggestionsEl.style.display = 'block';
+    }
+    inputEl.addEventListener('input', () => {
+      const q = inputEl.value.trim().toLowerCase();
+      if (!q) { suggestionsEl.style.display = 'none'; return; }
+      render(locationsCache.filter(l => l.name.toLowerCase().includes(q)));
+    });
+    inputEl.addEventListener('focus', () => {
+      if (inputEl.value.trim()) render(locationsCache.filter(l => l.name.toLowerCase().includes(inputEl.value.trim().toLowerCase())));
+    });
+    inputEl.addEventListener('blur', () => { setTimeout(() => { suggestionsEl.style.display = 'none'; }, 150); });
+    suggestionsEl.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      inputEl.value = item.dataset.name;
+      suggestionsEl.style.display = 'none';
+    });
+  }
+
+  // Validates a typed location against the approved list before a
+  // customer/invoice save proceeds. Returns the standardized name to
+  // save, or null if the save should be blocked (error already shown).
+  async function resolveLocationForSave(rawLocation) {
+    const typed = normalizeText(rawLocation);
+    if (!typed) return ''; // location is optional
+    const existing = findLocationByName(locationsCache, typed);
+    if (existing) return existing.name;
+
+    if (!isManager) {
+      showToast(`"${typed}" isn't in the approved locations list. Pick one from the dropdown, or ask your manager to add it.`, 'error');
+      return null;
+    }
+    const confirmed = confirm(`"${typed}" isn't in the approved locations list yet.\n\nAdd it as a new standard location and continue?`);
+    if (!confirmed) return null;
+    try {
+      const added = await addLocation(typed, user.uid);
+      locationsCache.push(added);
+      locationsCache.sort((a, b) => a.name.localeCompare(b.name));
+      return added.name;
+    } catch (err) {
+      showToast('Could not add the location: ' + err.message, 'error');
+      return null;
+    }
+  }
+
+  // ============= DUPLICATE CUSTOMER CHECK (shared helper) =============
+  const duplicateCustomerModal = document.getElementById('duplicateCustomerModal');
+  const dupMatchesList = document.getElementById('dupMatchesList');
+  const dupCreateAnywayBtn = document.getElementById('dupCreateAnywayBtn');
+  const dupCancelBtn = document.getElementById('dupCancelBtn');
+  const dupCloseBtn = document.getElementById('dupCloseBtn');
+  const dupManagerOnlyNote = document.getElementById('dupManagerOnlyNote');
+
+  // Shows the duplicate modal if matches exist. Resolves to:
+  //   { action: 'use', customer }   — user picked an existing record
+  //   { action: 'create' }          — proceed with a new record anyway
+  //   { action: 'cancel' }          — abort the save entirely
+  // If there are no matches at all, resolves immediately to 'create'
+  // without showing anything, so normal saves are never interrupted.
+  function checkForDuplicateCustomer(candidate, excludeId = null) {
+    const matches = findPossibleDuplicates(customersCache, candidate, excludeId);
+    if (matches.length === 0) return Promise.resolve({ action: 'create' });
+
+    return new Promise((resolve) => {
+      dupMatchesList.innerHTML = matches.map(m => `
+        <div class="suggestion-item" data-id="${m.customer.id}" style="border:1px solid var(--line); border-radius:8px; margin-bottom:8px; padding:10px 12px;">
+          <div style="font-weight:700;">${m.customer.name}</div>
+          <div style="font-size:0.78rem; color:var(--muted);">${m.customer.phone || 'No phone'} · ${m.customer.location || 'No location'}</div>
+          <div style="font-size:0.72rem; color:#b3261e; margin-top:4px;">Matches on: ${m.reasons.join(', ')}</div>
+          <button type="button" class="list-action-btn" data-action="use-existing" style="margin-top:6px;">Use This Customer</button>
+        </div>
+      `).join('');
+      dupManagerOnlyNote.style.display = isManager ? 'none' : 'block';
+      dupCreateAnywayBtn.style.display = isManager ? 'block' : 'none';
+      duplicateCustomerModal.style.display = 'flex';
+
+      function cleanup() {
+        duplicateCustomerModal.style.display = 'none';
+        dupMatchesList.removeEventListener('click', onListClick);
+        dupCreateAnywayBtn.removeEventListener('click', onCreateAnyway);
+        dupCancelBtn.removeEventListener('click', onCancel);
+        dupCloseBtn.removeEventListener('click', onCancel);
+      }
+      function onListClick(e) {
+        const btn = e.target.closest('button[data-action="use-existing"]');
+        if (!btn) return;
+        const id = btn.closest('[data-id]').dataset.id;
+        const customer = matches.find(m => m.customer.id === id).customer;
+        cleanup();
+        resolve({ action: 'use', customer });
+      }
+      function onCreateAnyway() {
+        cleanup();
+        resolve({ action: 'create' });
+      }
+      function onCancel() {
+        cleanup();
+        resolve({ action: 'cancel' });
+      }
+      dupMatchesList.addEventListener('click', onListClick);
+      dupCreateAnywayBtn.addEventListener('click', onCreateAnyway);
+      dupCancelBtn.addEventListener('click', onCancel);
+      dupCloseBtn.addEventListener('click', onCancel);
+    });
+  }
+
   if (isManager) {
     document.getElementById('addItemBtn').addEventListener('click', () => {
       addItemRow(itemsBody, refreshPreview, 1, '', '');
@@ -434,6 +639,10 @@ async function initApp(user, role) {
     const custLatInput = document.getElementById('custLat');
     const custLngInput = document.getElementById('custLng');
     const custPinNote = document.getElementById('custPinNote');
+    const custCustomerIdInput = document.getElementById('custCustomerId');
+    const custPhoneError = document.getElementById('custPhoneError');
+
+    initLocationSearchSelect(els.custLocation, document.getElementById('custLocationSuggestions'));
 
     custPinBtn.addEventListener('click', () => {
       const existingLat = custLatInput.value ? parseFloat(custLatInput.value) : null;
@@ -462,6 +671,7 @@ async function initApp(user, role) {
     els.custName.addEventListener('input', () => {
       const q = els.custName.value.trim().toLowerCase();
       customerSaveNote.textContent = '';
+      custCustomerIdInput.value = ''; // typing manually means this is no longer a confirmed existing-customer match
       if (!q) { custSuggestions.style.display = 'none'; return; }
       renderSuggestions(customersCache.filter(c => (c.name || '').toLowerCase().includes(q)));
     });
@@ -472,8 +682,9 @@ async function initApp(user, role) {
       const customer = customersCache.find(c => c.id === item.dataset.id);
       if (!customer) return;
       els.custName.value = customer.name;
-      els.custPhone.value = customer.phone || '';
+      els.custPhone.value = customer.phone ? formatPhoneForDisplay(customer.phone) : '';
       els.custLocation.value = customer.location || '';
+      custCustomerIdInput.value = customer.id;
       custSuggestions.style.display = 'none';
       updatePreview(els);
     });
@@ -481,21 +692,39 @@ async function initApp(user, role) {
     saveCustomerBtn.addEventListener('click', async () => {
       const name = els.custName.value.trim();
       if (!name) { showToast('Enter a customer name first.', 'error'); return; }
-      const existing = findExactNameMatch(customersCache, name);
-      if (existing) {
-        const proceed = confirm(`A customer named "${name}" already exists.\n\nOK = save as a new entry anyway\nCancel = keep using the existing one`);
-        if (!proceed) {
-          els.custPhone.value = existing.phone || '';
-          els.custLocation.value = existing.location || '';
-          updatePreview(els);
-          return;
-        }
+
+      custPhoneError.style.display = 'none';
+      const phoneResult = normalizePhone(els.custPhone.value);
+      if (!phoneResult.valid) {
+        custPhoneError.textContent = phoneResult.error;
+        custPhoneError.style.display = 'block';
+        return;
       }
+
+      const resolvedLocation = await resolveLocationForSave(els.custLocation.value);
+      if (resolvedLocation === null) return; // blocked or cancelled — message already shown
+      els.custLocation.value = resolvedLocation;
+
+      const dup = await checkForDuplicateCustomer(
+        { name, phone: phoneResult.value, location: resolvedLocation }
+      );
+      if (dup.action === 'cancel') return;
+      if (dup.action === 'use') {
+        els.custName.value = dup.customer.name;
+        els.custPhone.value = dup.customer.phone ? formatPhoneForDisplay(dup.customer.phone) : '';
+        els.custLocation.value = dup.customer.location || '';
+        custCustomerIdInput.value = dup.customer.id;
+        updatePreview(els);
+        showToast('Using existing customer.', 'info');
+        return;
+      }
+
       setButtonLoading(saveCustomerBtn, 'Saving…');
       try {
         const lat = custLatInput.value ? parseFloat(custLatInput.value) : null;
         const lng = custLngInput.value ? parseFloat(custLngInput.value) : null;
-        await addCustomer({ name, phone: els.custPhone.value.trim(), location: els.custLocation.value.trim(), lat, lng, uid: user.uid });
+        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
+        custCustomerIdInput.value = newId;
         customerSaveNote.textContent = 'Saved to customer list.';
         showToast('Customer saved.', 'success');
         custLatInput.value = ''; custLngInput.value = ''; custPinNote.textContent = '';
@@ -511,6 +740,7 @@ async function initApp(user, role) {
   // ============= Add Customer (shared — both roles) =============
   const newCustName = document.getElementById('newCustName');
   const newCustPhone = document.getElementById('newCustPhone');
+  const newCustPhoneError = document.getElementById('newCustPhoneError');
   const newCustLocation = document.getElementById('newCustLocation');
   const newCustLat = document.getElementById('newCustLat');
   const newCustLng = document.getElementById('newCustLng');
@@ -518,6 +748,8 @@ async function initApp(user, role) {
   const newCustPinNote = document.getElementById('newCustPinNote');
   const addCustomerBtn = document.getElementById('addCustomerBtn');
   const addCustomerNote = document.getElementById('addCustomerNote');
+
+  initLocationSearchSelect(newCustLocation, document.getElementById('newCustLocationSuggestions'));
 
   newCustPinBtn.addEventListener('click', () => {
     const existingLat = newCustLat.value ? parseFloat(newCustLat.value) : null;
@@ -535,16 +767,33 @@ async function initApp(user, role) {
   addCustomerBtn.addEventListener('click', async () => {
     const name = newCustName.value.trim();
     if (!name) { showToast('Enter a customer name.', 'error'); return; }
-    const existing = findExactNameMatch(customersCache, name);
-    if (existing) {
-      const proceed = confirm(`A customer named "${name}" already exists.\n\nOK = save as a new entry anyway\nCancel = don't save`);
-      if (!proceed) return;
+
+    newCustPhoneError.style.display = 'none';
+    const phoneResult = normalizePhone(newCustPhone.value);
+    if (!phoneResult.valid) {
+      newCustPhoneError.textContent = phoneResult.error;
+      newCustPhoneError.style.display = 'block';
+      return;
     }
+
+    const resolvedLocation = await resolveLocationForSave(newCustLocation.value);
+    if (resolvedLocation === null) return;
+    newCustLocation.value = resolvedLocation;
+
+    const dup = await checkForDuplicateCustomer({ name, phone: phoneResult.value, location: resolvedLocation });
+    if (dup.action === 'cancel') return;
+    if (dup.action === 'use') {
+      showToast(`"${dup.customer.name}" already exists — no new record created.`, 'info');
+      newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
+      newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
+      return;
+    }
+
     setButtonLoading(addCustomerBtn, 'Saving…');
     try {
       const lat = newCustLat.value ? parseFloat(newCustLat.value) : null;
       const lng = newCustLng.value ? parseFloat(newCustLng.value) : null;
-      await addCustomer({ name, phone: newCustPhone.value.trim(), location: newCustLocation.value.trim(), lat, lng, uid: user.uid });
+      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
       newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
       newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
       addCustomerNote.textContent = 'Customer added.';
@@ -584,10 +833,18 @@ async function initApp(user, role) {
 
   function customerMapCellHtml(c) {
     const hasPin = typeof c.lat === 'number' && typeof c.lng === 'number';
-    return hasPin
-      ? `<a href="${googleMapsUrl(c.lat, c.lng)}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
-         <button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍</button>`
-      : `<button type="button" class="map-pin-btn-small" data-action="set-location">📍 Set Location</button>`;
+    if (hasPin) {
+      return `<a href="${googleMapsUrl(c.lat, c.lng)}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
+         <button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍</button>`;
+    }
+    // No exact pin yet — fall back to a Google Maps text search on the
+    // location name, same idea as a WhatsApp text-location share: it
+    // still opens Google Maps and centers roughly on the right place.
+    const fallbackUrl = googleMapsSearchUrlForLocation(c.location);
+    const fallbackLink = fallbackUrl
+      ? `<a href="${fallbackUrl}" target="_blank" rel="noopener" class="map-link-btn">Search on Map</a>`
+      : '';
+    return `${fallbackLink}<button type="button" class="map-pin-btn-small" data-action="set-location" style="${fallbackLink ? 'margin-left:6px;' : ''}">📍 Set Location</button>`;
   }
 
   function renderCustomerRows(list) {
@@ -597,7 +854,7 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = c.id;
       tr.innerHTML = `
-        <td>${c.name}</td><td>${c.phone || ''}</td><td>${c.location || ''}</td>
+        <td>${c.name}</td><td>${c.phone ? formatPhoneForDisplay(c.phone) : ''}</td><td>${c.location || ''}</td>
         <td>${customerMapCellHtml(c)}</td>
         <td><button type="button" class="list-action-btn" data-action="edit">Edit</button></td>
       `;
@@ -648,13 +905,22 @@ async function initApp(user, role) {
       if (!c) return;
       tr.innerHTML = `
         <td><input class="customer-edit-input" data-field="name" value="${c.name || ''}"></td>
-        <td><input class="customer-edit-input" data-field="phone" value="${c.phone || ''}"></td>
-        <td><input class="customer-edit-input" data-field="location" value="${c.location || ''}"></td>
+        <td>
+          <input class="customer-edit-input" data-field="phone" value="${c.phone ? formatPhoneForDisplay(c.phone) : ''}">
+          <p class="customer-edit-phone-error" style="color:#b3261e; font-size:0.7rem; display:none; margin-top:2px;"></p>
+        </td>
+        <td style="position:relative;">
+          <input class="customer-edit-input customer-edit-location" data-field="location" value="${c.location || ''}" autocomplete="off">
+          <div class="suggestions-dropdown customer-edit-location-suggestions" style="display:none;"></div>
+        </td>
         <td>${customerMapCellHtml(c)}</td>
         <td>
           <button type="button" class="list-action-btn" data-action="save">Save</button>
           <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
         </td>`;
+      const locInput = tr.querySelector('.customer-edit-location');
+      const locSuggestions = tr.querySelector('.customer-edit-location-suggestions');
+      initLocationSearchSelect(locInput, locSuggestions);
     } else if (btn.dataset.action === 'cancel') {
       applyCustomerSearchAndRender();
     } else if (btn.dataset.action === 'set-location') {
@@ -675,14 +941,35 @@ async function initApp(user, role) {
       });
     } else if (btn.dataset.action === 'save') {
       const name = tr.querySelector('[data-field="name"]').value.trim();
-      const phone = tr.querySelector('[data-field="phone"]').value.trim();
-      const location = tr.querySelector('[data-field="location"]').value.trim();
+      const rawPhone = tr.querySelector('[data-field="phone"]').value;
+      const rawLocation = tr.querySelector('[data-field="location"]').value;
       if (!name) { showToast('Name cannot be empty.', 'error'); return; }
+
+      const phoneErrorEl = tr.querySelector('.customer-edit-phone-error');
+      phoneErrorEl.style.display = 'none';
+      const phoneResult = normalizePhone(rawPhone);
+      if (!phoneResult.valid) {
+        phoneErrorEl.textContent = phoneResult.error;
+        phoneErrorEl.style.display = 'block';
+        return;
+      }
+
+      const resolvedLocation = await resolveLocationForSave(rawLocation);
+      if (resolvedLocation === null) return;
+
+      const dup = await checkForDuplicateCustomer({ name, phone: phoneResult.value, location: resolvedLocation }, id);
+      if (dup.action === 'cancel') return;
+      if (dup.action === 'use') {
+        showToast(`That matches "${dup.customer.name}" — edit cancelled to avoid creating a duplicate.`, 'info');
+        applyCustomerSearchAndRender();
+        return;
+      }
+
       setButtonLoading(btn, 'Saving…');
       try {
-        await updateCustomer(id, { name, phone, location });
+        await updateCustomer(id, { name, phone: phoneResult.value, location: resolvedLocation });
         const idx = loadedCustomers.findIndex(c => c.id === id);
-        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], name, phone, location };
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], name, phone: phoneResult.value, location: resolvedLocation };
         await loadCustomersCache();
         applyCustomerSearchAndRender();
         showToast('Customer updated.', 'success');
@@ -692,6 +979,148 @@ async function initApp(user, role) {
       }
     }
   });
+
+  // ============= MANAGE LOCATIONS (manager only) =============
+  if (isManager) {
+    document.getElementById('manageLocationsCard').style.display = 'block';
+    const newLocationName = document.getElementById('newLocationName');
+    const addLocationBtn = document.getElementById('addLocationBtn');
+    const locationsList = document.getElementById('locationsList');
+
+    function renderLocationsList() {
+      locationsList.innerHTML = locationsCache.length
+        ? locationsCache.map(l => `
+            <span style="display:inline-flex; align-items:center; gap:6px; background:#f7f6f2; border-radius:20px; padding:6px 8px 6px 14px; font-size:0.82rem;">
+              ${l.name}
+              <button type="button" class="map-pin-btn-small" data-action="delete-location" data-id="${l.id}" style="border:none; background:none; color:#b3261e; padding:2px 6px;">✕</button>
+            </span>
+          `).join('')
+        : `<p style="color:var(--muted); font-size:0.82rem;">No approved locations yet — add your first one above.</p>`;
+    }
+    renderLocationsList();
+
+    addLocationBtn.addEventListener('click', async () => {
+      const name = newLocationName.value.trim();
+      if (!name) { showToast('Enter a location name.', 'error'); return; }
+      if (findLocationByName(locationsCache, name)) { showToast('That location is already in the list.', 'info'); return; }
+      setButtonLoading(addLocationBtn, 'Adding…');
+      try {
+        const added = await addLocation(name, user.uid);
+        locationsCache.push(added);
+        locationsCache.sort((a, b) => a.name.localeCompare(b.name));
+        renderLocationsList();
+        newLocationName.value = '';
+        showToast('Location added.', 'success');
+      } catch (err) {
+        showToast('Could not add location: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(addLocationBtn);
+      }
+    });
+
+    locationsList.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action="delete-location"]');
+      if (!btn) return;
+      const loc = locationsCache.find(l => l.id === btn.dataset.id);
+      if (!loc) return;
+      const confirmed = confirm(`Remove "${loc.name}" from the approved locations list?\n\nExisting customers already using it are unaffected — this only stops it appearing as a suggestion for new entries.`);
+      if (!confirmed) return;
+      try {
+        await deleteLocation(loc.id);
+        locationsCache = locationsCache.filter(l => l.id !== loc.id);
+        renderLocationsList();
+        showToast('Location removed.', 'success');
+      } catch (err) {
+        showToast('Could not remove location: ' + err.message, 'error');
+      }
+    });
+  }
+
+  // ============= MERGE CUSTOMERS (manager only) =============
+  if (isManager) {
+    document.getElementById('mergeCustomersCard').style.display = 'block';
+    const mergeKeepSearch = document.getElementById('mergeKeepSearch');
+    const mergeKeepSuggestions = document.getElementById('mergeKeepSuggestions');
+    const mergeAwaySearch = document.getElementById('mergeAwaySearch');
+    const mergeAwaySuggestions = document.getElementById('mergeAwaySuggestions');
+    const mergePreview = document.getElementById('mergePreview');
+    const mergeConfirmBtn = document.getElementById('mergeConfirmBtn');
+    let mergeKeepCustomer = null, mergeAwayCustomer = null;
+
+    function wireMergeSearch(inputEl, suggestionsEl, onPick) {
+      inputEl.addEventListener('input', () => {
+        const q = inputEl.value.trim().toLowerCase();
+        if (!q) { suggestionsEl.style.display = 'none'; return; }
+        const matches = customersCache.filter(c => (c.name || '').toLowerCase().includes(q)).slice(0, 8);
+        if (!matches.length) { suggestionsEl.style.display = 'none'; return; }
+        suggestionsEl.innerHTML = matches.map(c => `
+          <div class="suggestion-item" data-id="${c.id}">
+            <span class="sug-name">${c.name}</span>
+            <span class="sug-meta">${c.phone ? formatPhoneForDisplay(c.phone) : ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+          </div>
+        `).join('');
+        suggestionsEl.style.display = 'block';
+      });
+      inputEl.addEventListener('blur', () => setTimeout(() => { suggestionsEl.style.display = 'none'; }, 150));
+      suggestionsEl.addEventListener('mousedown', (e) => {
+        const item = e.target.closest('.suggestion-item');
+        if (!item) return;
+        const customer = customersCache.find(c => c.id === item.dataset.id);
+        if (!customer) return;
+        inputEl.value = customer.name;
+        suggestionsEl.style.display = 'none';
+        onPick(customer);
+      });
+    }
+
+    async function updateMergePreview() {
+      mergeConfirmBtn.style.display = 'none';
+      mergePreview.style.display = 'none';
+      if (!mergeKeepCustomer || !mergeAwayCustomer) return;
+      if (mergeKeepCustomer.id === mergeAwayCustomer.id) {
+        mergePreview.style.display = 'block';
+        mergePreview.innerHTML = `<span style="color:#b3261e;">Choose two different customers.</span>`;
+        return;
+      }
+      mergePreview.style.display = 'block';
+      mergePreview.innerHTML = 'Checking activity to move…';
+      try {
+        const counts = await countCustomerActivity(mergeAwayCustomer.id);
+        mergePreview.innerHTML = `
+          <strong>${mergeAwayCustomer.name}</strong> will be deleted. Its
+          <strong>${counts.orders}</strong> order(s), <strong>${counts.visits}</strong> visit(s), and
+          <strong>${counts.invoices}</strong> invoice(s) will move onto <strong>${mergeKeepCustomer.name}</strong>.
+          <br><span style="color:var(--muted); font-size:0.78rem;">Note: only invoices created since this merge feature shipped carry the link needed to move — older invoices won't be found by this count.</span>
+        `;
+        mergeConfirmBtn.style.display = 'block';
+      } catch (err) {
+        mergePreview.innerHTML = `<span style="color:#b3261e;">Could not check activity: ${err.message}</span>`;
+      }
+    }
+
+    wireMergeSearch(mergeKeepSearch, mergeKeepSuggestions, (c) => { mergeKeepCustomer = c; updateMergePreview(); });
+    wireMergeSearch(mergeAwaySearch, mergeAwaySuggestions, (c) => { mergeAwayCustomer = c; updateMergePreview(); });
+
+    mergeConfirmBtn.addEventListener('click', async () => {
+      if (!mergeKeepCustomer || !mergeAwayCustomer) return;
+      const confirmed = confirm(`Merge "${mergeAwayCustomer.name}" into "${mergeKeepCustomer.name}"?\n\nThis cannot be undone.`);
+      if (!confirmed) return;
+      setButtonLoading(mergeConfirmBtn, 'Merging…');
+      try {
+        const result = await mergeCustomers(mergeKeepCustomer.id, mergeAwayCustomer.id);
+        showToast(`Merged. Moved ${result.orders} order(s), ${result.visits} visit(s), ${result.invoices} invoice(s).`, 'success');
+        mergeKeepSearch.value = ''; mergeAwaySearch.value = '';
+        mergeKeepCustomer = null; mergeAwayCustomer = null;
+        mergePreview.style.display = 'none'; mergeConfirmBtn.style.display = 'none';
+        await loadCustomersCache();
+        await resetAndLoadCustomers();
+      } catch (err) {
+        showToast('Could not merge: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(mergeConfirmBtn);
+      }
+    });
+  }
 
   // ============= PRODUCTS: manage catalog (manager only) =============
   if (isManager) {
@@ -932,7 +1361,7 @@ async function initApp(user, role) {
           <td style="font-family:'JetBrains Mono',monospace; ${m.delta < 0 ? 'color:#b3261e;' : 'color:var(--forest-2);'}">${changeText}</td>
           <td style="font-family:'JetBrains Mono',monospace;">${m.newStock ?? '—'}</td>
           <td style="font-size:0.78rem; color:var(--muted);">${reasonOrOrder}</td>
-          <td style="font-size:0.72rem; color:var(--muted);">${m.createdByEmail || '—'}</td>
+          <td style="font-size:0.72rem; color:var(--muted);">${displayNameForEmail(m.createdByEmail)}</td>
         `;
         stockMovementBody.appendChild(tr);
       });
@@ -1010,6 +1439,7 @@ async function initApp(user, role) {
       els.custName.value = inv.customer === '-' ? '' : inv.customer;
       els.custPhone.value = inv.phone === '-' ? '' : inv.phone;
       els.custLocation.value = inv.location === '-' ? '' : inv.location;
+      document.getElementById('custCustomerId').value = inv.customerId || '';
       els.terms.value = inv.terms || 'CASH ON DELIVERY (COD)';
       els.providerPhone.value = inv.providerPhone || '';
       els.notes.value = inv.notes || '';
@@ -1033,6 +1463,7 @@ async function initApp(user, role) {
       invCounterInput.disabled = false;
       itemsBody.innerHTML = '';
       els.custName.value = ''; els.custPhone.value = ''; els.custLocation.value = '';
+      document.getElementById('custCustomerId').value = '';
       els.notes.value = ''; els.providerPhone.value = '';
       els.invoiceDate.value = new Date().toISOString().slice(0, 10);
       refreshPreview();
@@ -1050,6 +1481,7 @@ async function initApp(user, role) {
       els.custName.value = order.customerName || '';
       els.custPhone.value = order.customerPhone === '-' ? '' : (order.customerPhone || '');
       els.custLocation.value = order.customerLocation === '-' ? '' : (order.customerLocation || '');
+      document.getElementById('custCustomerId').value = order.customerId || '';
       els.notes.value = order.notes || '';
 
       itemsBody.innerHTML = '';
@@ -1073,8 +1505,21 @@ async function initApp(user, role) {
 
     generateBtn.addEventListener('click', async () => {
       const wasEditing = !!editingInvoiceId;
+      const fromOrder = generatingFromOrder; // capture now — cleared partway through on success
       setButtonLoading(generateBtn, wasEditing ? 'Saving…' : 'Generating…');
+
+      let lockAcquired = false;
       try {
+        // Lock BEFORE any other work: a double-click, a second browser
+        // tab open on the same order, or a retry after a dropped
+        // connection all hit this and fail here instead of quietly
+        // creating a second invoice for the same order. See
+        // beginInvoiceGeneration in orders.js for how the guarantee works.
+        if (!wasEditing && fromOrder) {
+          await beginInvoiceGeneration(fromOrder.id);
+          lockAcquired = true;
+        }
+
         const items = getItems(itemsBody);
         let invoiceNo = els.invoiceNo.value;
         let reservation = null;
@@ -1088,6 +1533,7 @@ async function initApp(user, role) {
           invoiceNo,
           date: els.invoiceDate.value,
           customer: els.custName.value || '-',
+          customerId: document.getElementById('custCustomerId').value || null,
           phone: els.custPhone.value || '-',
           location: els.custLocation.value || '-',
           terms: els.terms.value,
@@ -1108,13 +1554,9 @@ async function initApp(user, role) {
           });
           els.invoiceNo.value = buildInvoiceNo(reservation.next.prefix, reservation.next.counter);
 
-          if (generatingFromOrder) {
-            try {
-              await markOrderInvoiced(generatingFromOrder.id, { invoiceId: docRef.id, invoiceNo });
-              showToast(`Invoice saved. Order ${generatingFromOrder.orderNo} marked as Invoiced.`, 'success');
-            } catch (err) {
-              showToast('Invoice saved, but could not update the order status: ' + err.message, 'error');
-            }
+          if (fromOrder) {
+            await markOrderInvoiced(fromOrder.id, { invoiceId: docRef.id, invoiceNo });
+            showToast(`Invoice saved. Order ${fromOrder.orderNo} marked as Invoiced.`, 'success');
             exitFromOrderMode();
             if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
           } else {
@@ -1123,7 +1565,18 @@ async function initApp(user, role) {
         }
       } catch (err) {
         console.error(err);
-        showToast('Could not save the invoice: ' + err.message, 'error');
+        if (err.alreadyInvoiced) {
+          showToast(`This order was already invoiced as ${err.invoiceNo}.`, 'error');
+          exitFromOrderMode();
+        } else {
+          showToast('Could not save the invoice: ' + err.message, 'error');
+        }
+        // If the lock was acquired but something after it failed, put
+        // the order back to Approved instead of leaving it stuck in
+        // "Invoicing" forever with no way to retry.
+        if (lockAcquired && fromOrder) {
+          try { await revertInvoiceGeneration(fromOrder.id); } catch (revertErr) { console.error(revertErr); }
+        }
       } finally {
         clearButtonLoading(generateBtn);
       }
@@ -1335,7 +1788,9 @@ async function initApp(user, role) {
       try {
         const all = await fetchExpensesInRange(from, to);
         if (!all.length) { showToast('No expenses found in that range.', 'info'); return; }
-        await buildAndDownloadExpenseReport(all, from, to);
+        await loadProfilesCache();
+        const withNames = all.map(e => ({ ...e, createdByName: displayNameForEmail(e.createdByEmail) }));
+        await buildAndDownloadExpenseReport(withNames, from, to);
         showToast('Report downloaded.', 'success');
       } catch (err) {
         showToast('Could not build the report: ' + err.message, 'error');
@@ -1375,7 +1830,7 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = exp.id;
       const notesShort = exp.notes ? (exp.notes.length > 40 ? exp.notes.substring(0, 40) + '…' : exp.notes) : '—';
-      const byCell = isManager ? `<td style="font-size:0.72rem; color:var(--muted);">${exp.createdByEmail || '—'}</td>` : '';
+      const byCell = isManager ? `<td style="font-size:0.72rem; color:var(--muted);">${displayNameForEmail(exp.createdByEmail)}</td>` : '';
       const canEdit = isManager || exp.createdBy === user.uid;
       const actions = `
         ${canEdit ? `<button type="button" class="list-action-btn" data-action="edit">Edit</button>` : ''}
@@ -1539,20 +1994,36 @@ async function initApp(user, role) {
   const opNotesWrap = document.getElementById('opNotesWrap');
   const opNotes = document.getElementById('opNotes');
   const opShortageWarning = document.getElementById('opShortageWarning');
+  const opMainActions = document.getElementById('opMainActions');
   const opConfirmBtn = document.getElementById('opConfirmBtn');
   const opCancelBtn = document.getElementById('opCancelBtn');
   const opCloseBtn = document.getElementById('opCloseBtn');
+  const opOverrideBtn = document.getElementById('opOverrideBtn');
+  const opPostApproveActions = document.getElementById('opPostApproveActions');
+  const opEditNowBtn = document.getElementById('opEditNowBtn');
+  const opPrintNowBtn = document.getElementById('opPrintNowBtn');
+  const opDoneBtn = document.getElementById('opDoneBtn');
   let opOnConfirm = null;
+  let opOnApproveWithOverride = null;
+  let opCurrentOrder = null;
 
   // order: the order doc. options.shortages: stock shortfalls to warn
-  // about (same shape used by the approve handler below). options.onConfirm:
-  // async () => {} run when the manager clicks the primary action button.
-  function openOrderPreviewModal(order, { confirmLabel = 'Approve Order', shortages = [], onConfirm } = {}) {
+  // about upfront (a client-side hint only — the real check happens
+  // server-side inside approveOrderWithStock's transaction, since
+  // productsCache here could be stale). options.onConfirm: async () =>
+  // {} run when the manager clicks the primary action button; return
+  // { approved: true } from it to switch the modal into the
+  // post-approval Edit/Print chooser instead of just closing.
+  // options.onApproveWithOverride: shown only if onConfirm throws a
+  // stock-shortage error — lets a manager push through anyway.
+  function openOrderPreviewModal(order, { confirmLabel = 'Approve Order', shortages = [], onConfirm, onApproveWithOverride } = {}) {
+    opCurrentOrder = order;
+    opOnApproveWithOverride = onApproveWithOverride || null;
     opOrderNoLabel.textContent = order.orderNo;
     opCustomerName.textContent = order.customerName || '—';
     opCustomerPhone.textContent = (order.customerPhone && order.customerPhone !== '-') ? order.customerPhone : '—';
     opCustomerLocation.textContent = (order.customerLocation && order.customerLocation !== '-') ? order.customerLocation : '—';
-    opSubmittedBy.textContent = order.createdByEmail || '—';
+    opSubmittedBy.textContent = displayNameForEmail(order.createdByEmail);
 
     const items = order.items || [];
     opItemsBody.innerHTML = items.map(it => `
@@ -1580,6 +2051,9 @@ async function initApp(user, role) {
       opShortageWarning.style.display = 'none';
     }
 
+    opMainActions.style.display = 'flex';
+    opOverrideBtn.style.display = 'none';
+    opPostApproveActions.style.display = 'none';
     opConfirmBtn.textContent = confirmLabel;
     opConfirmBtn.style.display = onConfirm ? 'block' : 'none';
     opOnConfirm = onConfirm || null;
@@ -1589,23 +2063,71 @@ async function initApp(user, role) {
   function closeOrderPreviewModal() {
     orderPreviewModal.style.display = 'none';
     opOnConfirm = null;
+    opOnApproveWithOverride = null;
+    opCurrentOrder = null;
+    opMainActions.style.display = 'flex';
+    opOverrideBtn.style.display = 'none';
+    opPostApproveActions.style.display = 'none';
   }
 
   opCloseBtn.addEventListener('click', closeOrderPreviewModal);
   opCancelBtn.addEventListener('click', closeOrderPreviewModal);
+  opDoneBtn.addEventListener('click', closeOrderPreviewModal);
   orderPreviewModal.addEventListener('click', (e) => { if (e.target === orderPreviewModal) closeOrderPreviewModal(); });
+
+  function showPostApproveActions() {
+    opMainActions.style.display = 'none';
+    opOverrideBtn.style.display = 'none';
+    opShortageWarning.style.display = 'none';
+    opPostApproveActions.style.display = 'block';
+  }
 
   opConfirmBtn.addEventListener('click', async () => {
     if (typeof opOnConfirm !== 'function') return;
     setButtonLoading(opConfirmBtn, 'Working…');
     try {
-      await opOnConfirm();
-      closeOrderPreviewModal();
+      const result = await opOnConfirm();
+      if (result && result.approved) showPostApproveActions();
+      else closeOrderPreviewModal();
     } catch (err) {
-      showToast(err.message, 'error');
+      if (err.isStockShortage && opOnApproveWithOverride) {
+        opShortageWarning.innerHTML = '<strong>Stock is short for:</strong><br>' +
+          err.shortages.map(s => `${s.desc}: need ${s.needed}, have ${s.available}`).join('<br>');
+        opShortageWarning.style.display = 'block';
+        opOverrideBtn.style.display = 'block';
+      } else {
+        showToast(err.message, 'error');
+      }
     } finally {
       clearButtonLoading(opConfirmBtn);
     }
+  });
+
+  opOverrideBtn.addEventListener('click', async () => {
+    if (typeof opOnApproveWithOverride !== 'function') return;
+    const confirmed = confirm('Approve anyway even though stock is insufficient?\n\nStock will go negative for the short item(s) and will need reconciling later.');
+    if (!confirmed) return;
+    setButtonLoading(opOverrideBtn, 'Approving…');
+    try {
+      await opOnApproveWithOverride();
+      showPostApproveActions();
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      clearButtonLoading(opOverrideBtn);
+    }
+  });
+
+  opEditNowBtn.addEventListener('click', () => {
+    const order = opCurrentOrder;
+    closeOrderPreviewModal();
+    if (order && window.__openEditOrderModal) window.__openEditOrderModal(order);
+  });
+
+  opPrintNowBtn.addEventListener('click', () => {
+    const order = opCurrentOrder;
+    closeOrderPreviewModal();
+    if (order && window.__loadOrderIntoInvoiceForm) window.__loadOrderIntoInvoiceForm(order);
   });
 
   function orderStatusBadge(status) {
@@ -1711,8 +2233,20 @@ async function initApp(user, role) {
         confirmLabel: 'Approve Order',
         shortages,
         onConfirm: async () => {
+          // approveOrderWithStock throws an error with .isStockShortage
+          // if stock turns out to be insufficient (checked fresh, inside
+          // its own transaction — not just against this possibly-stale
+          // shortages array). The modal catches that and offers the
+          // override button below instead of a dead-end error toast.
           await approveOrderWithStock(order, { uid: user.uid, email: user.email });
           showToast(`Order ${order.orderNo} approved.`, 'success');
+          await resetAndLoadOrders();
+          await loadProductsCache();
+          return { approved: true };
+        },
+        onApproveWithOverride: async () => {
+          await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock: true });
+          showToast(`Order ${order.orderNo} approved (stock override).`, 'success');
           await resetAndLoadOrders();
           await loadProductsCache();
         },
@@ -1901,11 +2435,12 @@ async function initApp(user, role) {
       lvResetOutcome();
     }
 
-    document.getElementById('orderAddItemBtnPlaceholder'); // no-op guard
-
-    document.getElementById('lvOrderAddItemBtn').addEventListener('click', () => {
-      addItemRow(lvOrderItemsBody, () => {}, 1, '', '');
-    });
+    // Reps can only use Quick Add from the catalog — free-text custom
+    // items are how inconsistent/misspelled product descriptions creep
+    // into orders, so that's manager-only (see the New Invoice form and
+    // Edit Order modal, which both keep their "+ Add custom item"
+    // button since those are already manager-only screens).
+    document.getElementById('lvOrderAddItemBtn').style.display = 'none';
 
     lvCustSearch.addEventListener('input', () => {
       const q = lvCustSearch.value.trim().toLowerCase();
@@ -2070,6 +2605,7 @@ async function initApp(user, role) {
     window.loadPerformanceView = async function loadPerformanceView() {
       try {
         allVisitsCache = await fetchAllVisitsForAggregation();
+        await loadProfilesCache(); // refresh in case a rep set/changed their name since page load
       } catch (err) {
         showToast('Could not load visit reports: ' + err.message, 'error');
         return;
@@ -2079,7 +2615,7 @@ async function initApp(user, role) {
       repSummaryEmpty.style.display = summary.length === 0 ? 'block' : 'none';
       repSummaryBody.innerHTML = summary.map(r => `
         <tr>
-          <td>${r.repEmail}</td>
+          <td>${displayNameForEmail(r.repEmail)}</td>
           <td>${r.total}</td>
           <td>${r.ordersPlaced}</td>
           <td><strong>${r.successRate}%</strong></td>
@@ -2087,7 +2623,8 @@ async function initApp(user, role) {
       `).join('');
 
       const reps = [...new Set(allVisitsCache.map(v => v.repEmail))].sort();
-      perfRepFilter.innerHTML = `<option value="all">All reps</option>` + reps.map(r => `<option value="${r}">${r}</option>`).join('');
+      perfRepFilter.innerHTML = `<option value="all">All reps</option>` +
+        reps.map(r => `<option value="${r}">${displayNameForEmail(r)}</option>`).join('');
 
       renderAllVisits();
     };
@@ -2101,7 +2638,7 @@ async function initApp(user, role) {
         return `
           <tr>
             <td>${formatDate(v.date)}</td>
-            <td>${v.repEmail}</td>
+            <td>${displayNameForEmail(v.repEmail)}</td>
             <td>${v.customerName}</td>
             <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
             <td>${reason}</td>

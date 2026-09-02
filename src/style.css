@@ -357,6 +357,7 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 }
 .order-status-Submitted{ background:#fff4e0; color:#7a5210; }
 .order-status-Approved{ background:#eef6ea; color:var(--forest-2); }
+.order-status-Invoicing{ background:#e8f0fe; color:#1a56a0; }
 .order-status-Rejected{ background:#fbe4e4; color:#b23b3b; }
 .order-status-Cancelled{ background:#eee; color:var(--muted); }
 .order-status-Invoiced,.order-status-Dispatched{ background:#e8f0fe; color:#1a56a0; }

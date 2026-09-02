@@ -38,7 +38,20 @@ export async function adjustStockManually(productId, delta, { reason, uid, email
 // with only some of its stock decremented, or vice versa. Only items
 // with a productId (added via quick-add, tied to a real catalog
 // product) are tracked — free-text/custom line items are skipped.
-export async function approveOrderWithStock(order, { uid, email }) {
+//
+// The status check below (must currently be 'Submitted') is what makes
+// this safe against double-clicks, page retries, or two people
+// approving the same order at once: Firestore transactions are
+// optimistic-concurrency-controlled, so if two approval attempts race,
+// the second one re-reads the order INSIDE its own transaction attempt
+// and sees the first attempt's committed 'Approved' status, and throws
+// here instead of decrementing stock a second time. This is not a
+// soft protection — it holds even across browser tabs/devices.
+//
+// allowNegativeStock is a manager-only escape hatch (enforced in the
+// UI layer, not here) for the rare real-world case where you need to
+// approve anyway and reconcile stock later.
+export async function approveOrderWithStock(order, { uid, email, allowNegativeStock = false }) {
   const trackedItems = (order.items || []).filter(it => it.productId);
 
   await runTransaction(db, async (tx) => {
@@ -53,6 +66,26 @@ export async function approveOrderWithStock(order, { uid, email }) {
     const productRefs = trackedItems.map(it => doc(db, 'products', it.productId));
     const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
 
+    // Hard stock check BEFORE any writes happen. Without this, stock
+    // could silently go negative on every over-committed approval —
+    // exactly the bug this replaces. A manager can still push through
+    // with allowNegativeStock, but by explicit choice, not by default.
+    if (!allowNegativeStock) {
+      const shortages = [];
+      trackedItems.forEach((it, i) => {
+        const snap = productSnaps[i];
+        if (!snap.exists()) return;
+        const available = snap.data().stockOnHand || 0;
+        if (it.qty > available) shortages.push({ desc: it.desc, needed: it.qty, available });
+      });
+      if (shortages.length > 0) {
+        const err = new Error('Insufficient stock for: ' + shortages.map(s => `${s.desc} (need ${s.needed}, have ${s.available})`).join(', '));
+        err.isStockShortage = true;
+        err.shortages = shortages;
+        throw err;
+      }
+    }
+
     tx.update(orderRef, {
       status: 'Approved', stockApplied: true,
       approvedAt: serverTimestamp(), updatedAt: serverTimestamp(),
@@ -63,7 +96,7 @@ export async function approveOrderWithStock(order, { uid, email }) {
       if (!snap.exists()) return; // product was deleted since the order was placed — skip
       const product = snap.data();
       const previousStock = product.stockOnHand || 0;
-      const newStock = previousStock - it.qty; // allowed to go negative — soft warning happens in the UI before this is called
+      const newStock = previousStock - it.qty;
 
       tx.update(productRefs[i], { stockOnHand: newStock, updatedAt: serverTimestamp() });
 
@@ -71,7 +104,8 @@ export async function approveOrderWithStock(order, { uid, email }) {
       tx.set(movementRef, {
         productId: it.productId, productName: product.productName, packLabel: product.packLabel,
         type: 'order-approved', delta: -it.qty, previousStock, newStock,
-        reason: '', orderId: order.id, orderNo: order.orderNo,
+        reason: allowNegativeStock && newStock < 0 ? 'Manager override — approved despite insufficient stock' : '',
+        orderId: order.id, orderNo: order.orderNo,
         createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
       });
     });

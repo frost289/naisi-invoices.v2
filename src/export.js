@@ -165,7 +165,7 @@ export async function buildAndDownloadExpenseReport(expenses, fromDate, toDate) 
   [...expenses].reverse().forEach(e => {
     dataSheet.addRow({
       date: e.date, category: e.category, amount: e.amount || 0,
-      notes: e.notes || '', byEmail: e.createdByEmail || '—',
+      notes: e.notes || '', byEmail: e.createdByName || e.createdByEmail || '—',
     });
   });
   dataSheet.getColumn('amount').numFmt = '#,##0.00';
