@@ -146,6 +146,11 @@ textarea { resize: vertical; min-height: 52px; }
 .items-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
 .items-table th { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); text-align: left; padding: 0 6px 6px; font-weight: 600; }
 .items-table td { padding: 4px 6px; vertical-align: top; }
+.order-date-group-row {
+  font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--forest-2); background: #f7f6f2; padding: 8px 6px !important;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
 .items-table input { padding: 7px 8px; font-size: 16px; min-height: 40px; }
 .qty-col { width: 52px; }
 .price-col { width: 110px; }

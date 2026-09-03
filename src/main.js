@@ -2134,10 +2134,34 @@ async function initApp(user, role) {
     return `<span class="order-status-badge order-status-${status}">${status}</span>`;
   }
 
+  // Today / Yesterday / full-date section headers, same idea as a chat
+  // app's date dividers — makes it obvious at a glance which orders are
+  // most recent without having to read timestamps row by row. The list
+  // itself is already sorted newest-first (orderBy('createdAt','desc')
+  // in orders.js), so this only needs to detect when the date changes
+  // between consecutive rows, not re-sort anything.
+  function orderDateGroupLabel(ts) {
+    if (!ts || typeof ts.toDate !== 'function') return 'Date unknown';
+    const d = ts.toDate();
+    const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const diffDays = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+    if (diffDays === 0) return 'Today';
+    if (diffDays === 1) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }
+
   function renderOrderRows(list) {
     orderListBody.innerHTML = '';
     orderListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    let lastGroupLabel = null;
     list.forEach(o => {
+      const groupLabel = orderDateGroupLabel(o.createdAt);
+      if (groupLabel !== lastGroupLabel) {
+        lastGroupLabel = groupLabel;
+        const groupTr = document.createElement('tr');
+        groupTr.innerHTML = `<td colspan="6" class="order-date-group-row">${groupLabel}</td>`;
+        orderListBody.appendChild(groupTr);
+      }
       const tr = document.createElement('tr');
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
