@@ -203,11 +203,19 @@ async function initApp(user, role) {
     myvisits: document.getElementById('navMyVisitsBtn'),
   };
 
-  const managerOnlyNav = ['form', 'invoices', 'products', 'performance', 'summary'];
+  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary'];
   const submitterOnlyNav = ['logvisit', 'myvisits'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
   submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
+
+  // "New Invoice" is hidden from the nav entirely — the form behind it
+  // is still very much alive, just reached two other ways instead:
+  // editing an existing invoice (Invoices list) and generating one
+  // from an approved order (Order Preview / Orders list). Manually
+  // starting a blank invoice with no order behind it isn't a workflow
+  // this business uses anymore.
+  navBtns.form.style.display = 'none';
 
   navBtns.orders.textContent = isManager ? 'Orders' : 'My Orders';
   document.getElementById('orderFilterCard').style.display = isManager ? 'block' : 'none';
@@ -1469,7 +1477,11 @@ async function initApp(user, role) {
       refreshPreview();
     }
 
-    cancelEditBtn.addEventListener('click', (e) => { e.preventDefault(); exitEditMode(); });
+    cancelEditBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      exitEditMode();
+      showView('invoices');
+    });
 
     // ---- Generate invoice from an approved order ----
     function loadOrderIntoInvoiceForm(order) {
@@ -1501,6 +1513,7 @@ async function initApp(user, role) {
       e.preventDefault();
       exitFromOrderMode();
       exitEditMode();
+      showView('orders');
     });
 
     generateBtn.addEventListener('click', async () => {
@@ -1548,6 +1561,7 @@ async function initApp(user, role) {
           await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
           exitEditMode();
           showToast('Invoice updated.', 'success');
+          showView('invoices');
         } else {
           const docRef = await addDoc(collection(db, 'invoices'), {
             ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
@@ -1559,6 +1573,7 @@ async function initApp(user, role) {
             showToast(`Invoice saved. Order ${fromOrder.orderNo} marked as Invoiced.`, 'success');
             exitFromOrderMode();
             if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+            showView('orders');
           } else {
             showToast('Invoice saved and downloaded.', 'success');
           }
@@ -1568,6 +1583,7 @@ async function initApp(user, role) {
         if (err.alreadyInvoiced) {
           showToast(`This order was already invoiced as ${err.invoiceNo}.`, 'error');
           exitFromOrderMode();
+          showView('orders');
         } else {
           showToast('Could not save the invoice: ' + err.message, 'error');
         }
@@ -1998,6 +2014,7 @@ async function initApp(user, role) {
   const opConfirmBtn = document.getElementById('opConfirmBtn');
   const opCancelBtn = document.getElementById('opCancelBtn');
   const opCloseBtn = document.getElementById('opCloseBtn');
+  const opEditBeforeApproveBtn = document.getElementById('opEditBeforeApproveBtn');
   const opOverrideBtn = document.getElementById('opOverrideBtn');
   const opPostApproveActions = document.getElementById('opPostApproveActions');
   const opEditNowBtn = document.getElementById('opEditNowBtn');
@@ -2116,6 +2133,12 @@ async function initApp(user, role) {
     } finally {
       clearButtonLoading(opOverrideBtn);
     }
+  });
+
+  opEditBeforeApproveBtn.addEventListener('click', () => {
+    const order = opCurrentOrder;
+    closeOrderPreviewModal();
+    if (order && window.__openEditOrderModal) window.__openEditOrderModal(order);
   });
 
   opEditNowBtn.addEventListener('click', () => {
