@@ -406,6 +406,10 @@
   </div>
   <div class="card">
     <h2><span class="dot"></span><span id="orderListTitle">Orders</span></h2>
+    <div id="bulkApproveBar" style="display:none; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+      <button type="button" class="generate-btn" id="bulkApproveBtn" style="width:auto;" disabled>Approve Selected (0)</button>
+      <span id="bulkApproveHint" style="font-size:0.78rem; color:var(--muted);">Tick the orders you want to approve, then approve them all at once.</span>
+    </div>
     <table class="items-table" id="orderListTable" style="width:100%;">
       <thead id="orderListHead"></thead>
       <tbody id="orderListBody"></tbody>
@@ -581,6 +585,59 @@
       <button type="button" class="list-action-btn" id="eoSaveBtn">Save Changes</button>
       <button type="button" class="list-action-btn" id="eoCancelBtn">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- ===================== GENERATE INVOICE MODAL (manager) ===================== -->
+<div id="generateInvoiceModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Generate Invoice — <span id="giOrderNoLabel"></span></h2>
+      <button type="button" class="modal-close-btn" id="giCloseBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="row2">
+      <div class="field"><label>Date</label><input type="date" id="giDate"></div>
+      <div class="field">
+        <label>Terms</label>
+        <select id="giTerms">
+          <option value="CASH ON DELIVERY (COD)" selected>Cash on Delivery (COD)</option>
+          <option value="CASH">Cash</option>
+          <option value="BANK TRANSFER">Bank Transfer</option>
+          <option value="MOBILE MONEY">Mobile Money</option>
+          <option value="NET 7">Net 7 days</option>
+          <option value="NET 30">Net 30 days</option>
+        </select>
+      </div>
+    </div>
+    <div class="field"><label>Provider Phone <span class="auto-tag">optional</span></label><input type="tel" id="giProviderPhone" placeholder="e.g. 0999 000 000"></div>
+
+    <div class="field"><label>Customer Name</label><input type="text" id="giCustName" autocomplete="off"></div>
+    <div class="row2">
+      <div class="field"><label>Phone</label><input type="tel" id="giCustPhone"></div>
+      <div class="field"><label>Location</label><input type="text" id="giCustLocation"></div>
+    </div>
+
+    <div class="quick-add-label">Quick add — tap a product</div>
+    <div class="quick-add-grid" id="giQuickAddGrid"></div>
+    <table class="items-table" id="giItemsTable">
+      <thead><tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr></thead>
+      <tbody id="giItemsBody"></tbody>
+    </table>
+    <button class="add-item-btn" id="giAddItemBtn" type="button">+ Add custom item</button>
+
+    <div class="field">
+      <label>Notes</label>
+      <textarea id="giNotes" placeholder="Any extra notes to print on the invoice..."></textarea>
+    </div>
+
+    <p id="giErrorNote" style="color:#b3261e; font-size:0.78rem; display:none; margin-top:8px;"></p>
+
+    <div class="modal-actions" style="margin-top:12px;">
+      <button type="button" class="generate-btn" id="giGenerateBtn" style="flex:1;">Generate &amp; Download Invoice</button>
+      <button type="button" class="list-action-btn" id="giCancelBtn">Cancel</button>
+    </div>
+    <p class="numbering-hint" style="margin-top:8px;">Downloads the PDF immediately and marks this order as Invoiced — you stay right here, no need to leave this page.</p>
   </div>
 </div>
 

@@ -1721,6 +1721,135 @@ async function initApp(user, role) {
       }
     });
 
+    // ---- Generate Invoice modal (popup, no page navigation) ----
+    // Replaces the old flow of navigating to the full New Invoice form
+    // for the specific case of turning an Approved order into an
+    // invoice: same editable fields (customer info, items, notes), but
+    // as a popup — matches the Order Preview modal's pattern, and
+    // downloading the PDF here never leaves this page.
+    const generateInvoiceModal = document.getElementById('generateInvoiceModal');
+    const giOrderNoLabel = document.getElementById('giOrderNoLabel');
+    const giDate = document.getElementById('giDate');
+    const giTerms = document.getElementById('giTerms');
+    const giProviderPhone = document.getElementById('giProviderPhone');
+    const giCustName = document.getElementById('giCustName');
+    const giCustPhone = document.getElementById('giCustPhone');
+    const giCustLocation = document.getElementById('giCustLocation');
+    const giQuickAddGrid = document.getElementById('giQuickAddGrid');
+    const giItemsBody = document.getElementById('giItemsBody');
+    const giAddItemBtn = document.getElementById('giAddItemBtn');
+    const giNotes = document.getElementById('giNotes');
+    const giErrorNote = document.getElementById('giErrorNote');
+    const giGenerateBtn = document.getElementById('giGenerateBtn');
+    const giCancelBtn = document.getElementById('giCancelBtn');
+    const giCloseBtn = document.getElementById('giCloseBtn');
+    let generatingOrder = null;
+
+    function openGenerateInvoiceModal(order) {
+      generatingOrder = order;
+      giErrorNote.style.display = 'none';
+      giOrderNoLabel.textContent = order.orderNo;
+      giDate.value = new Date().toISOString().slice(0, 10);
+      giTerms.value = 'CASH ON DELIVERY (COD)';
+      giProviderPhone.value = '';
+      giCustName.value = order.customerName || '';
+      giCustPhone.value = order.customerPhone === '-' ? '' : (order.customerPhone || '');
+      giCustLocation.value = order.customerLocation === '-' ? '' : (order.customerLocation || '');
+      giNotes.value = order.notes || '';
+      giItemsBody.innerHTML = '';
+      (order.items || []).forEach(it =>
+        addItemRow(giItemsBody, () => {}, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity)
+      );
+      buildQuickAddGrid(giQuickAddGrid, giItemsBody, () => {}, productsCache);
+      generateInvoiceModal.style.display = 'flex';
+    }
+
+    function closeGenerateInvoiceModal() {
+      generateInvoiceModal.style.display = 'none';
+      generatingOrder = null;
+      giItemsBody.innerHTML = '';
+    }
+
+    giAddItemBtn.addEventListener('click', () => addItemRow(giItemsBody, () => {}));
+    giCancelBtn.addEventListener('click', closeGenerateInvoiceModal);
+    giCloseBtn.addEventListener('click', closeGenerateInvoiceModal);
+    generateInvoiceModal.addEventListener('click', (e) => { if (e.target === generateInvoiceModal) closeGenerateInvoiceModal(); });
+
+    giGenerateBtn.addEventListener('click', async () => {
+      if (!generatingOrder) return;
+      const order = generatingOrder;
+      const customerName = giCustName.value.trim();
+      const items = getItems(giItemsBody);
+      giErrorNote.style.display = 'none';
+
+      if (!customerName) {
+        giErrorNote.textContent = 'Customer name cannot be empty.';
+        giErrorNote.style.display = 'block';
+        return;
+      }
+      if (items.length === 0) {
+        giErrorNote.textContent = 'Add at least one item.';
+        giErrorNote.style.display = 'block';
+        return;
+      }
+
+      setButtonLoading(giGenerateBtn, 'Generating…');
+      let lockAcquired = false;
+      try {
+        // Same duplicate-invoice lock as the full-page flow — a
+        // double-click or a retry after a dropped connection fails
+        // here instead of quietly creating a second invoice.
+        await beginInvoiceGeneration(order.id);
+        lockAcquired = true;
+
+        const reservation = await incrementCounterAtomically();
+        const invoiceNo = reservation.usedNo;
+
+        const meta = {
+          invoiceNo,
+          date: giDate.value,
+          customer: customerName,
+          customerId: order.customerId || null,
+          phone: giCustPhone.value.trim() || '-',
+          location: giCustLocation.value.trim() || '-',
+          terms: giTerms.value,
+          providerPhone: giProviderPhone.value.trim(),
+          notes: giNotes.value.trim(),
+          items,
+        };
+
+        // generatePdf() calls jsPDF's doc.save() internally, which
+        // triggers a normal browser download — no navigation, no page
+        // change, the manager stays exactly where they were.
+        const { grandTotal } = generatePdf(meta);
+
+        const docRef = await addDoc(collection(db, 'invoices'), {
+          ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
+        });
+
+        await markOrderInvoiced(order.id, { invoiceId: docRef.id, invoiceNo });
+
+        showToast(`Invoice ${invoiceNo} downloaded. Order ${order.orderNo} marked as Invoiced.`, 'success');
+        closeGenerateInvoiceModal();
+        await resetAndLoadOrders();
+        if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+      } catch (err) {
+        console.error(err);
+        if (err.alreadyInvoiced) {
+          giErrorNote.textContent = `This order was already invoiced as ${err.invoiceNo}.`;
+        } else {
+          giErrorNote.textContent = 'Could not generate the invoice: ' + err.message;
+        }
+        giErrorNote.style.display = 'block';
+        if (lockAcquired) {
+          try { await revertInvoiceGeneration(order.id); } catch (revertErr) { console.error(revertErr); }
+        }
+      } finally {
+        clearButtonLoading(giGenerateBtn);
+      }
+    });
+
+    window.__openGenerateInvoiceModal = openGenerateInvoiceModal;
     window.__loadOrderIntoInvoiceForm = loadOrderIntoInvoiceForm;
 
     // ---- Orders Ready to Invoice (Approved orders, shown in the Invoices tab) ----
@@ -1755,7 +1884,7 @@ async function initApp(user, role) {
       setButtonLoading(btn, '…');
       try {
         const order = await fetchOrderById(btn.dataset.id);
-        if (order) loadOrderIntoInvoiceForm(order);
+        if (order) openGenerateInvoiceModal(order);
       } catch (err) {
         showToast('Could not load order: ' + err.message, 'error');
       } finally {
@@ -1997,6 +2126,16 @@ async function initApp(user, role) {
 
   let loadedOrders = [], ordersCursor = null, ordersHasMore = true;
   let currentOrderStatusFilter = 'Submitted';
+  const selectedOrderIds = new Set();
+  const bulkApproveBar = document.getElementById('bulkApproveBar');
+  const bulkApproveBtn = document.getElementById('bulkApproveBtn');
+
+  function updateBulkApproveBar() {
+    if (!isManager) return;
+    bulkApproveBar.style.display = 'flex';
+    bulkApproveBtn.textContent = `Approve Selected (${selectedOrderIds.size})`;
+    bulkApproveBtn.disabled = selectedOrderIds.size === 0;
+  }
 
   // ---- Order Preview modal (manager reviews an order before approving) ----
   const orderPreviewModal = document.getElementById('orderPreviewModal');
@@ -2150,7 +2289,7 @@ async function initApp(user, role) {
   opPrintNowBtn.addEventListener('click', () => {
     const order = opCurrentOrder;
     closeOrderPreviewModal();
-    if (order && window.__loadOrderIntoInvoiceForm) window.__loadOrderIntoInvoiceForm(order);
+    if (order && window.__openGenerateInvoiceModal) window.__openGenerateInvoiceModal(order);
   });
 
   function orderStatusBadge(status) {
@@ -2176,19 +2315,24 @@ async function initApp(user, role) {
   function renderOrderRows(list) {
     orderListBody.innerHTML = '';
     orderListEmpty.style.display = list.length === 0 ? 'block' : 'none';
+    const groupColspan = isManager ? 7 : 6;
     let lastGroupLabel = null;
     list.forEach(o => {
       const groupLabel = orderDateGroupLabel(o.createdAt);
       if (groupLabel !== lastGroupLabel) {
         lastGroupLabel = groupLabel;
         const groupTr = document.createElement('tr');
-        groupTr.innerHTML = `<td colspan="6" class="order-date-group-row">${groupLabel}</td>`;
+        groupTr.innerHTML = `<td colspan="${groupColspan}" class="order-date-group-row">${groupLabel}</td>`;
         orderListBody.appendChild(groupTr);
       }
       const tr = document.createElement('tr');
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
+      const checkboxCell = isManager
+        ? `<td>${o.status === 'Submitted' ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
+        : '';
       const baseCells = `
+        ${checkboxCell}
         <td>${o.orderNo}</td>
         <td>${o.customerName}</td>
         <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
@@ -2219,10 +2363,14 @@ async function initApp(user, role) {
 
   async function resetAndLoadOrders() {
     loadedOrders = []; ordersCursor = null; ordersHasMore = true;
+    selectedOrderIds.clear();
+    updateBulkApproveBar();
     orderListTitle.textContent = isManager
       ? (currentOrderStatusFilter === 'all' ? 'All Orders' : `Orders: ${currentOrderStatusFilter}`)
       : 'My Orders';
-    orderListHead.innerHTML = `<tr><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr>`;
+    orderListHead.innerHTML = isManager
+      ? `<tr><th></th><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr>`
+      : `<tr><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr>`;
     await loadNextOrderPage();
   }
 
@@ -2255,6 +2403,57 @@ async function initApp(user, role) {
     orderStatusFilter.addEventListener('change', async () => {
       currentOrderStatusFilter = orderStatusFilter.value;
       await resetAndLoadOrders();
+    });
+
+    orderListBody.addEventListener('change', (e) => {
+      const cb = e.target.closest('.bulk-approve-checkbox');
+      if (!cb) return;
+      if (cb.checked) selectedOrderIds.add(cb.dataset.id);
+      else selectedOrderIds.delete(cb.dataset.id);
+      updateBulkApproveBar();
+    });
+
+    // Approves every selected Submitted order, one at a time — not in
+    // parallel, so each one gets its own clean Firestore transaction
+    // and a clear individual result instead of a pile of racing writes.
+    // Orders short on stock are skipped (not force-approved) and
+    // reported at the end; use the single-order Approve flow with its
+    // manager override if one of those genuinely needs pushing through.
+    bulkApproveBtn.addEventListener('click', async () => {
+      const ids = [...selectedOrderIds];
+      if (!ids.length) return;
+      const confirmed = confirm(`Approve ${ids.length} selected order(s)?\n\nAny that are short on stock will be skipped and reported, not forced through.`);
+      if (!confirmed) return;
+
+      setButtonLoading(bulkApproveBtn, `Approving 0 / ${ids.length}…`);
+      let approved = 0;
+      const failures = [];
+      for (let i = 0; i < ids.length; i++) {
+        const order = loadedOrders.find(o => o.id === ids[i]);
+        bulkApproveBtn.querySelector('span:last-child')
+          ? (bulkApproveBtn.querySelector('span:last-child').textContent = `Approving ${i + 1} / ${ids.length}…`)
+          : null;
+        if (!order) { failures.push({ orderNo: ids[i], reason: 'No longer in this list' }); continue; }
+        try {
+          await approveOrderWithStock(order, { uid: user.uid, email: user.email });
+          approved++;
+        } catch (err) {
+          failures.push({ orderNo: order.orderNo, reason: err.isStockShortage ? 'Insufficient stock' : err.message });
+        }
+      }
+      clearButtonLoading(bulkApproveBtn);
+
+      if (failures.length === 0) {
+        showToast(`Approved all ${approved} selected order(s).`, 'success');
+      } else {
+        showToast(
+          `Approved ${approved} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
+          'error'
+        );
+      }
+      selectedOrderIds.clear();
+      await resetAndLoadOrders();
+      await loadProductsCache();
     });
   }
 
@@ -2332,7 +2531,7 @@ async function initApp(user, role) {
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'generate-invoice') {
-      if (window.__loadOrderIntoInvoiceForm) window.__loadOrderIntoInvoiceForm(order);
+      if (window.__openGenerateInvoiceModal) window.__openGenerateInvoiceModal(order);
     } else if (btn.dataset.action === 'edit') {
       if (window.__openEditOrderModal) window.__openEditOrderModal(order);
     }
