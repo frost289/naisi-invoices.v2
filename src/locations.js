@@ -1,6 +1,6 @@
 import { db } from './firebase.js';
 import {
-  collection, addDoc, getDocs, doc, deleteDoc, query, orderBy, serverTimestamp
+  collection, addDoc, getDocs, doc, deleteDoc, updateDoc, query, orderBy, serverTimestamp
 } from 'firebase/firestore';
 import { normalizeText } from './customers.js';
 
@@ -12,17 +12,21 @@ export async function fetchAllLocations() {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-export async function addLocation(name, uid) {
+export async function addLocation(name, uid, { pendingReview = false } = {}) {
   const clean = normalizeText(name);
   if (!clean) throw new Error('Enter a location name.');
   const docRef = await addDoc(collection(db, 'locations'), {
-    name: clean, createdBy: uid, createdAt: serverTimestamp(),
+    name: clean, pendingReview, createdBy: uid, createdAt: serverTimestamp(),
   });
-  return { id: docRef.id, name: clean };
+  return { id: docRef.id, name: clean, pendingReview };
 }
 
 export async function deleteLocation(id) {
   await deleteDoc(doc(db, 'locations', id));
+}
+
+export async function markLocationReviewed(id) {
+  await updateDoc(doc(db, 'locations', id), { pendingReview: false });
 }
 
 export function findLocationByName(locationsCache, name) {

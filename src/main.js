@@ -20,7 +20,7 @@ import {
   normalizeText, normalizePhone, formatPhoneForDisplay, findPossibleDuplicates, countCustomerActivity, mergeCustomers
 } from './customers.js';
 import {
-  fetchAllLocations, addLocation, deleteLocation, findLocationByName, googleMapsSearchUrlForLocation
+  fetchAllLocations, addLocation, deleteLocation, markLocationReviewed, findLocationByName, googleMapsSearchUrlForLocation
 } from './locations.js';
 import {
   fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail
@@ -556,10 +556,25 @@ async function initApp(user, role) {
     const existing = findLocationByName(locationsCache, typed);
     if (existing) return existing.name;
 
+    // Reps are out in the field creating customers at genuinely new
+    // locations all the time — blocking the whole customer save until
+    // a manager pre-approves that location string would defeat the
+    // point of their job. So a rep's new location is added right away
+    // (flagged pendingReview so the manager can spot and clean up any
+    // typos/duplicates later), never blocked.
     if (!isManager) {
-      showToast(`"${typed}" isn't in the approved locations list. Pick one from the dropdown, or ask your manager to add it.`, 'error');
-      return null;
+      try {
+        const added = await addLocation(typed, user.uid, { pendingReview: true });
+        locationsCache.push(added);
+        locationsCache.sort((a, b) => a.name.localeCompare(b.name));
+        showToast(`New location "${added.name}" added.`, 'info');
+        return added.name;
+      } catch (err) {
+        showToast('Could not save the location: ' + err.message, 'error');
+        return null;
+      }
     }
+
     const confirmed = confirm(`"${typed}" isn't in the approved locations list yet.\n\nAdd it as a new standard location and continue?`);
     if (!confirmed) return null;
     try {
@@ -998,8 +1013,10 @@ async function initApp(user, role) {
     function renderLocationsList() {
       locationsList.innerHTML = locationsCache.length
         ? locationsCache.map(l => `
-            <span style="display:inline-flex; align-items:center; gap:6px; background:#f7f6f2; border-radius:20px; padding:6px 8px 6px 14px; font-size:0.82rem;">
+            <span style="display:inline-flex; align-items:center; gap:6px; background:${l.pendingReview ? '#fff4e0' : '#f7f6f2'}; border-radius:20px; padding:6px 8px 6px 14px; font-size:0.82rem;">
               ${l.name}
+              ${l.pendingReview ? `<span style="color:#7a5210; font-weight:700; font-size:0.68rem; text-transform:uppercase;">New</span>
+                <button type="button" class="map-pin-btn-small" data-action="review-location" data-id="${l.id}" style="border:none; background:none; color:var(--forest-2); padding:2px 6px;" title="Mark reviewed">✓</button>` : ''}
               <button type="button" class="map-pin-btn-small" data-action="delete-location" data-id="${l.id}" style="border:none; background:none; color:#b3261e; padding:2px 6px;">✕</button>
             </span>
           `).join('')
@@ -1027,6 +1044,20 @@ async function initApp(user, role) {
     });
 
     locationsList.addEventListener('click', async (e) => {
+      const reviewBtn = e.target.closest('button[data-action="review-location"]');
+      if (reviewBtn) {
+        const loc = locationsCache.find(l => l.id === reviewBtn.dataset.id);
+        if (!loc) return;
+        try {
+          await markLocationReviewed(loc.id);
+          loc.pendingReview = false;
+          renderLocationsList();
+          showToast('Marked as reviewed.', 'success');
+        } catch (err) {
+          showToast('Could not update: ' + err.message, 'error');
+        }
+        return;
+      }
       const btn = e.target.closest('button[data-action="delete-location"]');
       if (!btn) return;
       const loc = locationsCache.find(l => l.id === btn.dataset.id);
