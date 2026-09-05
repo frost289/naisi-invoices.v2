@@ -633,11 +633,20 @@
 
     <p id="giErrorNote" style="color:#b3261e; font-size:0.78rem; display:none; margin-top:8px;"></p>
 
-    <div class="modal-actions" style="margin-top:12px;">
+    <div class="modal-actions" id="giMainActions" style="margin-top:12px;">
       <button type="button" class="generate-btn" id="giGenerateBtn" style="flex:1;">Generate &amp; Download Invoice</button>
       <button type="button" class="list-action-btn" id="giCancelBtn">Cancel</button>
     </div>
-    <p class="numbering-hint" style="margin-top:8px;">Downloads the PDF immediately and marks this order as Invoiced — you stay right here, no need to leave this page.</p>
+    <p class="numbering-hint" id="giMainHint" style="margin-top:8px;">Downloads the PDF immediately and marks this order as Invoiced — you stay right here, no need to leave this page.</p>
+
+    <div id="giPostGenerateActions" style="display:none; margin-top:12px;">
+      <p style="color:var(--forest-2); font-weight:600; font-size:0.85rem; margin-bottom:10px;">✓ Invoice generated and downloaded.</p>
+      <div class="modal-actions">
+        <button type="button" class="generate-btn" id="giSendWhatsAppBtn" style="flex:1; display:none;">Send via WhatsApp</button>
+        <button type="button" class="list-action-btn" id="giDoneBtn" style="flex:1;">Done</button>
+      </div>
+      <p id="giNoPhoneNote" style="display:none; font-size:0.78rem; color:var(--muted); margin-top:8px;">No phone number on file for this customer, so WhatsApp isn't available here — you can still send the downloaded PDF manually.</p>
+    </div>
   </div>
 </div>
 

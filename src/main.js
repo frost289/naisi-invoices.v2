@@ -17,7 +17,7 @@ import {
 import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndDownloadCustomerReport } from './export.js';
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation,
-  normalizeText, normalizePhone, formatPhoneForDisplay, findPossibleDuplicates, countCustomerActivity, mergeCustomers
+  normalizeText, normalizePhone, formatPhoneForDisplay, toWhatsAppNumber, findPossibleDuplicates, countCustomerActivity, mergeCustomers
 } from './customers.js';
 import {
   fetchAllLocations, addLocation, deleteLocation, markLocationReviewed, findLocationByName, googleMapsSearchUrlForLocation
@@ -1461,6 +1461,48 @@ async function initApp(user, role) {
     generateBtn.textContent = 'Download PDF Invoice';
     generateNote.textContent = 'Generates a print-ready PDF, logs the invoice to Firestore, and increments the counter.';
 
+    // ---- Send an invoice via WhatsApp ----
+    // There is no way for a website to auto-attach a file to a SPECIFIC
+    // WhatsApp contact without Meta's paid Business API and a backend
+    // server — that's out of reach here. So this picks the best
+    // available option automatically:
+    //  1) Native share sheet with the actual PDF attached (works on
+    //     most mobile Chrome/Safari) — the file goes straight into
+    //     whichever app is picked, but the CONTACT is chosen by
+    //     whoever uses the share sheet, not by this code.
+    //  2) A wa.me link that opens the CORRECT customer's chat directly
+    //     with a message ready — but click-to-chat links only support
+    //     pre-filled text, never a file, so the already-downloaded PDF
+    //     has to be attached by hand.
+    // Never both at once (auto-contact AND auto-attach) — that
+    // combination genuinely isn't possible from a plain website.
+    async function sendInvoiceViaWhatsApp({ pdfDoc, filename, phone, customerName, invoiceNo, grandTotal }) {
+      const message = `Hi ${customerName}, here is your invoice ${invoiceNo} from Naisi Foods for ${mwk(grandTotal)}. The PDF is attached.`;
+
+      if (pdfDoc && navigator.share && navigator.canShare) {
+        try {
+          const blob = pdfDoc.output('blob');
+          const file = new File([blob], filename, { type: 'application/pdf' });
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file], text: message, title: `Invoice ${invoiceNo}` });
+            showToast('Share sheet opened — pick WhatsApp and the customer to send the PDF.', 'success');
+            return;
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') return; // user cancelled the share sheet — don't fall back
+          console.warn('Web Share failed, falling back to a WhatsApp chat link:', err);
+        }
+      }
+
+      const waNumber = toWhatsAppNumber(phone);
+      if (!waNumber) {
+        showToast('No valid phone number on file for this customer — cannot open WhatsApp automatically.', 'error');
+        return;
+      }
+      window.open(`https://wa.me/${waNumber}?text=${encodeURIComponent(message)}`, '_blank');
+      showToast('WhatsApp opened with a message ready — attach the downloaded PDF before sending.', 'info');
+    }
+
     const today = new Date();
     els.invoiceDate.value = today.toISOString().slice(0, 10);
     refreshPreview();
@@ -1646,13 +1688,18 @@ async function initApp(user, role) {
       list.forEach(inv => {
         const tr = document.createElement('tr');
         const productsSummary = formatItemsSummary(inv.items);
+        const hasWhatsApp = !!toWhatsAppNumber(inv.phone);
         tr.innerHTML = `
           <td>${inv.invoiceNo}</td>
           <td>${formatDate(inv.date)}</td>
           <td>${inv.customer}</td>
           <td class="inv-products-cell" title="${productsSummary}">${productsSummary}</td>
           <td>${mwk(inv.grandTotal || 0)}</td>
-          <td><button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button><button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button></td>
+          <td>
+            <button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button>
+            <button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button>
+            ${hasWhatsApp ? `<button type="button" class="list-action-btn" data-action="whatsapp" data-id="${inv.id}">WhatsApp</button>` : ''}
+          </td>
         `;
         listBody.appendChild(tr);
       });
@@ -1744,6 +1791,15 @@ async function initApp(user, role) {
         } else if (btn.dataset.action === 'download') {
           generatePdf({ invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer, phone: inv.phone, location: inv.location, terms: inv.terms, providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [] });
           showToast('PDF downloaded.', 'success');
+        } else if (btn.dataset.action === 'whatsapp') {
+          // Re-generates the PDF fresh from the saved invoice data (same
+          // as Download does) so there's a real file to attach if the
+          // device's share sheet supports it.
+          const { filename, doc: pdfDoc } = generatePdf({ invoiceNo: inv.invoiceNo, date: inv.date, customer: inv.customer, phone: inv.phone, location: inv.location, terms: inv.terms, providerPhone: inv.providerPhone, notes: inv.notes, items: inv.items || [] });
+          await sendInvoiceViaWhatsApp({
+            pdfDoc, filename, phone: inv.phone, customerName: inv.customer,
+            invoiceNo: inv.invoiceNo, grandTotal: inv.grandTotal || 0,
+          });
         }
       } catch (err) {
         showToast('Something went wrong: ' + err.message, 'error');
@@ -1771,14 +1827,24 @@ async function initApp(user, role) {
     const giAddItemBtn = document.getElementById('giAddItemBtn');
     const giNotes = document.getElementById('giNotes');
     const giErrorNote = document.getElementById('giErrorNote');
+    const giMainActions = document.getElementById('giMainActions');
+    const giMainHint = document.getElementById('giMainHint');
     const giGenerateBtn = document.getElementById('giGenerateBtn');
     const giCancelBtn = document.getElementById('giCancelBtn');
     const giCloseBtn = document.getElementById('giCloseBtn');
+    const giPostGenerateActions = document.getElementById('giPostGenerateActions');
+    const giSendWhatsAppBtn = document.getElementById('giSendWhatsAppBtn');
+    const giNoPhoneNote = document.getElementById('giNoPhoneNote');
+    const giDoneBtn = document.getElementById('giDoneBtn');
     let generatingOrder = null;
+    let lastGeneratedInvoice = null; // { pdfDoc, filename, phone, customerName, invoiceNo, grandTotal }
 
     function openGenerateInvoiceModal(order) {
       generatingOrder = order;
       giErrorNote.style.display = 'none';
+      giMainActions.style.display = 'flex';
+      giMainHint.style.display = 'block';
+      giPostGenerateActions.style.display = 'none';
       giOrderNoLabel.textContent = order.orderNo;
       giDate.value = new Date().toISOString().slice(0, 10);
       giTerms.value = 'CASH ON DELIVERY (COD)';
@@ -1798,13 +1864,25 @@ async function initApp(user, role) {
     function closeGenerateInvoiceModal() {
       generateInvoiceModal.style.display = 'none';
       generatingOrder = null;
+      lastGeneratedInvoice = null;
       giItemsBody.innerHTML = '';
     }
 
     giAddItemBtn.addEventListener('click', () => addItemRow(giItemsBody, () => {}));
     giCancelBtn.addEventListener('click', closeGenerateInvoiceModal);
     giCloseBtn.addEventListener('click', closeGenerateInvoiceModal);
+    giDoneBtn.addEventListener('click', closeGenerateInvoiceModal);
     generateInvoiceModal.addEventListener('click', (e) => { if (e.target === generateInvoiceModal) closeGenerateInvoiceModal(); });
+
+    giSendWhatsAppBtn.addEventListener('click', async () => {
+      if (!lastGeneratedInvoice) return;
+      setButtonLoading(giSendWhatsAppBtn, 'Opening…');
+      try {
+        await sendInvoiceViaWhatsApp(lastGeneratedInvoice);
+      } finally {
+        clearButtonLoading(giSendWhatsAppBtn);
+      }
+    });
 
     giGenerateBtn.addEventListener('click', async () => {
       if (!generatingOrder) return;
@@ -1835,13 +1913,14 @@ async function initApp(user, role) {
 
         const reservation = await incrementCounterAtomically();
         const invoiceNo = reservation.usedNo;
+        const custPhone = giCustPhone.value.trim();
 
         const meta = {
           invoiceNo,
           date: giDate.value,
           customer: customerName,
           customerId: order.customerId || null,
-          phone: giCustPhone.value.trim() || '-',
+          phone: custPhone || '-',
           location: giCustLocation.value.trim() || '-',
           terms: giTerms.value,
           providerPhone: giProviderPhone.value.trim(),
@@ -1851,8 +1930,12 @@ async function initApp(user, role) {
 
         // generatePdf() calls jsPDF's doc.save() internally, which
         // triggers a normal browser download — no navigation, no page
-        // change, the manager stays exactly where they were.
-        const { grandTotal } = generatePdf(meta);
+        // change, the manager stays exactly where they were. It also
+        // hands back the jsPDF doc object itself (aliased to pdfDoc
+        // here — 'doc' is already the imported Firestore doc() function
+        // in this file) so it can be re-packaged as a file for WhatsApp
+        // sharing without generating the PDF a second time.
+        const { grandTotal, filename, doc: pdfDoc } = generatePdf(meta);
 
         const docRef = await addDoc(collection(db, 'invoices'), {
           ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
@@ -1861,9 +1944,19 @@ async function initApp(user, role) {
         await markOrderInvoiced(order.id, { invoiceId: docRef.id, invoiceNo });
 
         showToast(`Invoice ${invoiceNo} downloaded. Order ${order.orderNo} marked as Invoiced.`, 'success');
-        closeGenerateInvoiceModal();
         await resetAndLoadOrders();
         if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+
+        // Switch to the post-generate state instead of closing —
+        // offering WhatsApp only when there's a phone number that
+        // actually resolves to a valid Malawi WhatsApp number.
+        lastGeneratedInvoice = { pdfDoc, filename, phone: custPhone, customerName, invoiceNo, grandTotal };
+        const hasValidPhone = !!toWhatsAppNumber(custPhone);
+        giSendWhatsAppBtn.style.display = hasValidPhone ? 'block' : 'none';
+        giNoPhoneNote.style.display = hasValidPhone ? 'none' : 'block';
+        giMainActions.style.display = 'none';
+        giMainHint.style.display = 'none';
+        giPostGenerateActions.style.display = 'block';
       } catch (err) {
         console.error(err);
         if (err.alreadyInvoiced) {

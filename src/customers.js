@@ -62,6 +62,30 @@ export function formatPhoneForDisplay(stored) {
   return `+265 ${local9.slice(0, 2)} ${local9.slice(2, 5)} ${local9.slice(5)}`;
 }
 
+// ---- WhatsApp number conversion ----
+// wa.me links need the number as country-code + subscriber number,
+// digits only, no +, no spaces, no leading 0 (e.g. 265991234567).
+// This is deliberately more lenient than normalizePhone() above: it
+// accepts whatever format a phone number ended up stored in —
+// customers created through this app (+265XXXXXXXXX), invoices with
+// raw hand-typed numbers, numbers with spaces/dashes/brackets, a
+// stray double country-code typo — and returns null instead of an
+// error when it can't confidently identify a 9-digit Malawi
+// subscriber number, so callers can just hide the WhatsApp button
+// rather than show a broken link.
+export function toWhatsAppNumber(raw) {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  let local9 = null;
+  if (digits.length === 9) local9 = digits;
+  else if (digits.length === 10 && digits.startsWith('0')) local9 = digits.slice(1);
+  else if (digits.length === 12 && digits.startsWith('265')) local9 = digits.slice(3);
+  else if (digits.length === 13 && digits.startsWith('0265')) local9 = digits.slice(4); // e.g. "0" + "+265..." typed together
+  if (!local9 || local9.length !== 9 || !/^\d{9}$/.test(local9)) return null;
+  return `265${local9}`;
+}
+
 // ---- Duplicate detection ----
 // Checks a candidate {name, phone, location} against everyone already
 // in customersCache, on three independent signals: exact normalized

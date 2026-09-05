@@ -125,5 +125,5 @@ export function generatePdf({ invoiceNo, date, customer, phone, location, terms,
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
 
-  return { grandTotal, filename };
+  return { grandTotal, filename, doc };
 }
