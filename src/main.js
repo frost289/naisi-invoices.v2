@@ -2253,12 +2253,42 @@ async function initApp(user, role) {
   const selectedOrderIds = new Set();
   const bulkApproveBar = document.getElementById('bulkApproveBar');
   const bulkApproveBtn = document.getElementById('bulkApproveBtn');
+  const bulkApproveHint = document.getElementById('bulkApproveHint');
+  let bulkMode = null; // 'approve' | 'generate' | 'mixed' | null
 
   function updateBulkApproveBar() {
     if (!isManager) return;
     bulkApproveBar.style.display = 'flex';
-    bulkApproveBtn.textContent = `Approve Selected (${selectedOrderIds.size})`;
-    bulkApproveBtn.disabled = selectedOrderIds.size === 0;
+
+    if (selectedOrderIds.size === 0) {
+      bulkMode = null;
+      bulkApproveBtn.textContent = 'Approve Selected (0)';
+      bulkApproveBtn.disabled = true;
+      bulkApproveHint.textContent = 'Tick orders (Submitted or Approved) to process them all at once.';
+      return;
+    }
+
+    const statuses = new Set([...selectedOrderIds].map(id => {
+      const o = loadedOrders.find(oo => oo.id === id);
+      return o ? o.status : null;
+    }));
+
+    if (statuses.size === 1 && statuses.has('Submitted')) {
+      bulkMode = 'approve';
+      bulkApproveBtn.textContent = `Approve Selected (${selectedOrderIds.size})`;
+      bulkApproveBtn.disabled = false;
+      bulkApproveHint.textContent = 'Approves every selected order — any short on stock are skipped and reported.';
+    } else if (statuses.size === 1 && statuses.has('Approved')) {
+      bulkMode = 'generate';
+      bulkApproveBtn.textContent = `Generate Invoices for Selected (${selectedOrderIds.size})`;
+      bulkApproveBtn.disabled = false;
+      bulkApproveHint.textContent = 'Generates and downloads an invoice for each selected order exactly as submitted — no per-invoice editing.';
+    } else {
+      bulkMode = 'mixed';
+      bulkApproveBtn.textContent = `Approve Selected (${selectedOrderIds.size})`;
+      bulkApproveBtn.disabled = true;
+      bulkApproveHint.textContent = 'Select orders that are all Submitted (to approve) or all Approved (to generate invoices) — not a mix of both.';
+    }
   }
 
   // ---- Order Preview modal (manager reviews an order before approving) ----
@@ -2453,7 +2483,7 @@ async function initApp(user, role) {
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
       const checkboxCell = isManager
-        ? `<td>${o.status === 'Submitted' ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
+        ? `<td>${(o.status === 'Submitted' || o.status === 'Approved') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
         : '';
       const baseCells = `
         ${checkboxCell}
@@ -2543,24 +2573,21 @@ async function initApp(user, role) {
     // Orders short on stock are skipped (not force-approved) and
     // reported at the end; use the single-order Approve flow with its
     // manager override if one of those genuinely needs pushing through.
-    bulkApproveBtn.addEventListener('click', async () => {
-      const ids = [...selectedOrderIds];
-      if (!ids.length) return;
+    async function runBulkApprove(ids) {
       const confirmed = confirm(`Approve ${ids.length} selected order(s)?\n\nAny that are short on stock will be skipped and reported, not forced through.`);
       if (!confirmed) return;
 
       setButtonLoading(bulkApproveBtn, `Approving 0 / ${ids.length}…`);
-      let approved = 0;
+      let succeeded = 0;
       const failures = [];
       for (let i = 0; i < ids.length; i++) {
         const order = loadedOrders.find(o => o.id === ids[i]);
-        bulkApproveBtn.querySelector('span:last-child')
-          ? (bulkApproveBtn.querySelector('span:last-child').textContent = `Approving ${i + 1} / ${ids.length}…`)
-          : null;
+        const labelSpan = bulkApproveBtn.querySelector('span:last-child');
+        if (labelSpan) labelSpan.textContent = `Approving ${i + 1} / ${ids.length}…`;
         if (!order) { failures.push({ orderNo: ids[i], reason: 'No longer in this list' }); continue; }
         try {
           await approveOrderWithStock(order, { uid: user.uid, email: user.email });
-          approved++;
+          succeeded++;
         } catch (err) {
           failures.push({ orderNo: order.orderNo, reason: err.isStockShortage ? 'Insufficient stock' : err.message });
         }
@@ -2568,16 +2595,97 @@ async function initApp(user, role) {
       clearButtonLoading(bulkApproveBtn);
 
       if (failures.length === 0) {
-        showToast(`Approved all ${approved} selected order(s).`, 'success');
+        showToast(`Approved all ${succeeded} selected order(s).`, 'success');
       } else {
         showToast(
-          `Approved ${approved} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
+          `Approved ${succeeded} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
           'error'
         );
       }
       selectedOrderIds.clear();
       await resetAndLoadOrders();
       await loadProductsCache();
+    }
+
+    // Generates and downloads an invoice for each selected Approved
+    // order exactly as submitted — no per-invoice editing popup, by
+    // design (the manager chose speed over review for this path; the
+    // single-order Generate Invoice modal still offers full editing
+    // for anything that needs it). Each one still goes through the
+    // same beginInvoiceGeneration lock as every other invoice path, so
+    // an order that's somehow already mid-invoicing elsewhere is
+    // skipped safely rather than double-invoiced.
+    async function runBulkGenerate(ids) {
+      const confirmed = confirm(
+        `Generate and download invoices for ${ids.length} selected order(s)?\n\n` +
+        `Each one downloads as its own PDF — your browser may ask permission to download multiple files, please allow it to continue.`
+      );
+      if (!confirmed) return;
+
+      setButtonLoading(bulkApproveBtn, `Generating 0 / ${ids.length}…`);
+      let succeeded = 0;
+      const failures = [];
+      const today = new Date().toISOString().slice(0, 10);
+
+      for (let i = 0; i < ids.length; i++) {
+        const order = loadedOrders.find(o => o.id === ids[i]);
+        const labelSpan = bulkApproveBtn.querySelector('span:last-child');
+        if (labelSpan) labelSpan.textContent = `Generating ${i + 1} / ${ids.length}…`;
+        if (!order) { failures.push({ orderNo: ids[i], reason: 'No longer in this list' }); continue; }
+
+        let lockAcquired = false;
+        try {
+          await beginInvoiceGeneration(order.id);
+          lockAcquired = true;
+
+          const reservation = await incrementCounterAtomically();
+          const invoiceNo = reservation.usedNo;
+          const meta = {
+            invoiceNo,
+            date: today,
+            customer: order.customerName || '-',
+            customerId: order.customerId || null,
+            phone: order.customerPhone === '-' ? '-' : (order.customerPhone || '-'),
+            location: order.customerLocation === '-' ? '-' : (order.customerLocation || '-'),
+            terms: 'CASH ON DELIVERY (COD)',
+            providerPhone: '',
+            notes: order.notes || '',
+            items: order.items || [],
+          };
+          const { grandTotal } = generatePdf(meta);
+
+          const docRef = await addDoc(collection(db, 'invoices'), {
+            ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
+          });
+          await markOrderInvoiced(order.id, { invoiceId: docRef.id, invoiceNo });
+          succeeded++;
+        } catch (err) {
+          failures.push({ orderNo: order.orderNo, reason: err.alreadyInvoiced ? 'Already invoiced' : err.message });
+          if (lockAcquired) {
+            try { await revertInvoiceGeneration(order.id); } catch (revertErr) { console.error(revertErr); }
+          }
+        }
+      }
+      clearButtonLoading(bulkApproveBtn);
+
+      if (failures.length === 0) {
+        showToast(`Generated and downloaded ${succeeded} invoice(s).`, 'success');
+      } else {
+        showToast(
+          `Generated ${succeeded} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
+          'error'
+        );
+      }
+      selectedOrderIds.clear();
+      await resetAndLoadOrders();
+      if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+    }
+
+    bulkApproveBtn.addEventListener('click', async () => {
+      const ids = [...selectedOrderIds];
+      if (!ids.length || !bulkMode || bulkMode === 'mixed') return;
+      if (bulkMode === 'approve') await runBulkApprove(ids);
+      else if (bulkMode === 'generate') await runBulkGenerate(ids);
     });
   }
 
