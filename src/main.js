@@ -2584,12 +2584,12 @@ async function initApp(user, role) {
         const order = loadedOrders.find(o => o.id === ids[i]);
         const labelSpan = bulkApproveBtn.querySelector('span:last-child');
         if (labelSpan) labelSpan.textContent = `Approving ${i + 1} / ${ids.length}…`;
-        if (!order) { failures.push({ orderNo: ids[i], reason: 'No longer in this list' }); continue; }
+        if (!order) { failures.push({ id: ids[i], orderNo: ids[i], reason: 'No longer in this list', isStockShortage: false }); continue; }
         try {
           await approveOrderWithStock(order, { uid: user.uid, email: user.email });
           succeeded++;
         } catch (err) {
-          failures.push({ orderNo: order.orderNo, reason: err.isStockShortage ? 'Insufficient stock' : err.message });
+          failures.push({ id: order.id, orderNo: order.orderNo, reason: err.isStockShortage ? 'Insufficient stock' : err.message, isStockShortage: !!err.isStockShortage });
         }
       }
       clearButtonLoading(bulkApproveBtn);
@@ -2602,6 +2602,37 @@ async function initApp(user, role) {
           'error'
         );
       }
+
+      // If everything that failed was a stock shortage (not some other
+      // error), offer a one-time bulk override — mainly for unblocking
+      // a backlog when stock levels haven't been set up yet, so the
+      // manager isn't forced to override each one individually.
+      const shortageFailures = failures.filter(f => f.isStockShortage);
+      if (shortageFailures.length > 0) {
+        const forceConfirm = confirm(
+          `${shortageFailures.length} order(s) were skipped for insufficient stock:\n\n${shortageFailures.map(f => f.orderNo).join(', ')}\n\n` +
+          `Force-approve these anyway? Stock will go negative for the short items — you'll need to set correct starting stock afterward (Products → Adjust Stock) to reconcile it.`
+        );
+        if (forceConfirm) {
+          setButtonLoading(bulkApproveBtn, `Force-approving 0 / ${shortageFailures.length}…`);
+          let forced = 0;
+          for (let i = 0; i < shortageFailures.length; i++) {
+            const order = loadedOrders.find(o => o.id === shortageFailures[i].id);
+            const labelSpan = bulkApproveBtn.querySelector('span:last-child');
+            if (labelSpan) labelSpan.textContent = `Force-approving ${i + 1} / ${shortageFailures.length}…`;
+            if (!order) continue;
+            try {
+              await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock: true });
+              forced++;
+            } catch (err) {
+              console.error(err);
+            }
+          }
+          clearButtonLoading(bulkApproveBtn);
+          showToast(`Force-approved ${forced} of ${shortageFailures.length} skipped order(s).`, forced === shortageFailures.length ? 'success' : 'error');
+        }
+      }
+
       selectedOrderIds.clear();
       await resetAndLoadOrders();
       await loadProductsCache();
