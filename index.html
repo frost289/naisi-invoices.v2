@@ -193,8 +193,12 @@
 <div id="invoicesView" class="list-section" style="display:none;">
   <div class="card" id="pendingInvoiceOrdersCard">
     <h2><span class="dot"></span>Orders Ready to Invoice</h2>
+    <div id="pendingBulkGenerateBar" style="display:none; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+      <button type="button" class="generate-btn" id="pendingBulkGenerateBtn" style="width:auto;" disabled>Generate Invoices for Selected (0)</button>
+      <span style="font-size:0.78rem; color:var(--muted);">Downloads and marks each one Invoiced exactly as submitted — no per-invoice editing.</span>
+    </div>
     <table class="items-table" id="pendingInvoiceOrdersTable" style="width:100%;">
-      <thead><tr><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th></th></tr></thead>
+      <thead><tr><th></th><th>Order No.</th><th>Customer</th><th>Items</th><th>Total</th><th></th></tr></thead>
       <tbody id="pendingInvoiceOrdersBody"></tbody>
     </table>
     <p id="pendingInvoiceOrdersEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No approved orders waiting to be invoiced.</p>

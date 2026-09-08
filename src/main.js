@@ -1979,16 +1979,30 @@ async function initApp(user, role) {
     // ---- Orders Ready to Invoice (Approved orders, shown in the Invoices tab) ----
     const pendingInvoiceOrdersBody = document.getElementById('pendingInvoiceOrdersBody');
     const pendingInvoiceOrdersEmpty = document.getElementById('pendingInvoiceOrdersEmpty');
+    const pendingBulkGenerateBar = document.getElementById('pendingBulkGenerateBar');
+    const pendingBulkGenerateBtn = document.getElementById('pendingBulkGenerateBtn');
+    let loadedPendingInvoiceOrders = [];
+    const pendingSelectedIds = new Set();
+
+    function updatePendingBulkBar() {
+      pendingBulkGenerateBar.style.display = 'flex';
+      pendingBulkGenerateBtn.textContent = `Generate Invoices for Selected (${pendingSelectedIds.size})`;
+      pendingBulkGenerateBtn.disabled = pendingSelectedIds.size === 0;
+    }
 
     window.loadPendingInvoiceOrders = async function loadPendingInvoiceOrders() {
       try {
         const result = await fetchOrdersByStatusPage('Approved', null);
-        const list = result.items;
+        loadedPendingInvoiceOrders = result.items;
+        pendingSelectedIds.clear();
+        updatePendingBulkBar();
+        const list = loadedPendingInvoiceOrders;
         pendingInvoiceOrdersEmpty.style.display = list.length === 0 ? 'block' : 'none';
         pendingInvoiceOrdersBody.innerHTML = list.map(o => {
           const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
           return `
             <tr>
+              <td><input type="checkbox" class="pending-bulk-checkbox" data-id="${o.id}"></td>
               <td>${o.orderNo}</td>
               <td>${o.customerName}</td>
               <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
@@ -2001,6 +2015,20 @@ async function initApp(user, role) {
         showToast('Could not load approved orders: ' + err.message, 'error');
       }
     };
+
+    pendingInvoiceOrdersBody.addEventListener('change', (e) => {
+      const cb = e.target.closest('.pending-bulk-checkbox');
+      if (!cb) return;
+      if (cb.checked) pendingSelectedIds.add(cb.dataset.id);
+      else pendingSelectedIds.delete(cb.dataset.id);
+      updatePendingBulkBar();
+    });
+
+    pendingBulkGenerateBtn.addEventListener('click', async () => {
+      const orders = [...pendingSelectedIds].map(id => loadedPendingInvoiceOrders.find(o => o.id === id)).filter(Boolean);
+      if (!orders.length || !window.__generateInvoicesForOrders) return;
+      await window.__generateInvoicesForOrders(orders, pendingBulkGenerateBtn);
+    });
 
     pendingInvoiceOrdersBody.addEventListener('click', async (e) => {
       const btn = e.target.closest('button[data-action="generate-invoice"]');
@@ -2640,29 +2668,28 @@ async function initApp(user, role) {
 
     // Generates and downloads an invoice for each selected Approved
     // order exactly as submitted — no per-invoice editing popup, by
-    // design (the manager chose speed over review for this path; the
-    // single-order Generate Invoice modal still offers full editing
-    // for anything that needs it). Each one still goes through the
-    // same beginInvoiceGeneration lock as every other invoice path, so
-    // an order that's somehow already mid-invoicing elsewhere is
-    // skipped safely rather than double-invoiced.
-    async function runBulkGenerate(ids) {
+    // Shared by both the Orders tab (bulk-generate for selected
+    // Approved orders) and the Invoices tab's "Orders Ready to
+    // Invoice" list (its own separate selection) — takes actual order
+    // objects rather than ids, so each caller resolves them from
+    // whichever list it's tracking. progressBtn is whichever bulk
+    // button triggered this, purely for the "N / total" label.
+    async function generateInvoicesForOrders(orders, progressBtn) {
       const confirmed = confirm(
-        `Generate and download invoices for ${ids.length} selected order(s)?\n\n` +
+        `Generate and download invoices for ${orders.length} selected order(s)?\n\n` +
         `Each one downloads as its own PDF — your browser may ask permission to download multiple files, please allow it to continue.`
       );
       if (!confirmed) return;
 
-      setButtonLoading(bulkApproveBtn, `Generating 0 / ${ids.length}…`);
+      setButtonLoading(progressBtn, `Generating 0 / ${orders.length}…`);
       let succeeded = 0;
       const failures = [];
       const today = new Date().toISOString().slice(0, 10);
 
-      for (let i = 0; i < ids.length; i++) {
-        const order = loadedOrders.find(o => o.id === ids[i]);
-        const labelSpan = bulkApproveBtn.querySelector('span:last-child');
-        if (labelSpan) labelSpan.textContent = `Generating ${i + 1} / ${ids.length}…`;
-        if (!order) { failures.push({ orderNo: ids[i], reason: 'No longer in this list' }); continue; }
+      for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        const labelSpan = progressBtn.querySelector('span:last-child');
+        if (labelSpan) labelSpan.textContent = `Generating ${i + 1} / ${orders.length}…`;
 
         let lockAcquired = false;
         try {
@@ -2697,26 +2724,32 @@ async function initApp(user, role) {
           }
         }
       }
-      clearButtonLoading(bulkApproveBtn);
+      clearButtonLoading(progressBtn);
 
       if (failures.length === 0) {
         showToast(`Generated and downloaded ${succeeded} invoice(s).`, 'success');
       } else {
         showToast(
-          `Generated ${succeeded} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
+          `Generated ${succeeded} of ${orders.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
           'error'
         );
       }
-      selectedOrderIds.clear();
+
       await resetAndLoadOrders();
       if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
     }
+    window.__generateInvoicesForOrders = generateInvoicesForOrders;
 
     bulkApproveBtn.addEventListener('click', async () => {
       const ids = [...selectedOrderIds];
       if (!ids.length || !bulkMode || bulkMode === 'mixed') return;
-      if (bulkMode === 'approve') await runBulkApprove(ids);
-      else if (bulkMode === 'generate') await runBulkGenerate(ids);
+      if (bulkMode === 'approve') {
+        await runBulkApprove(ids);
+      } else if (bulkMode === 'generate') {
+        const orders = ids.map(id => loadedOrders.find(o => o.id === id)).filter(Boolean);
+        selectedOrderIds.clear();
+        await generateInvoicesForOrders(orders, bulkApproveBtn);
+      }
     });
   }
 
