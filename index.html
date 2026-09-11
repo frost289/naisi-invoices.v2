@@ -365,6 +365,16 @@
     <button type="button" class="generate-btn" id="addExpenseBtn">Log Expense</button>
   </div>
 
+  <div class="card" id="expensePeriodSummaryCard" style="display:none;">
+    <h2><span class="dot"></span>Expense Summary</h2>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+      <button type="button" class="list-action-btn" id="expPeriodTodayBtn">Today</button>
+      <button type="button" class="list-action-btn" id="expPeriodWeekBtn">This Week</button>
+      <button type="button" class="list-action-btn" id="expPeriodMonthBtn">This Month</button>
+    </div>
+    <div id="expPeriodSummaryBody"></div>
+  </div>
+
   <div class="card">
     <h2><span class="dot"></span>Summary <span style="font-size:0.7rem; font-weight:400; color:var(--muted);">(loaded records)</span></h2>
     <div id="expenseSummary"></div>

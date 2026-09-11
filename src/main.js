@@ -2159,6 +2159,76 @@ async function initApp(user, role) {
     loadedExpenses = []; expensesCursor = null; expensesHasMore = true;
     expenseSearchInput.value = '';
     await loadNextExpensePage();
+    if (window.__refreshExpensePeriodSummary) await window.__refreshExpensePeriodSummary();
+  }
+
+  // ============= EXPENSE PERIOD SUMMARY (manager only) =============
+  // A quick Today / This Week / This Month breakdown, same idea as the
+  // Business Summary tab's shortcuts but scoped to expenses only and
+  // right here on the Expenses page — no need to jump to the other tab
+  // just to see how much has gone out this week. Manager-only because
+  // fetchExpensesInRange() queries the full collection with no
+  // createdBy filter, same reasoning as the existing Export card.
+  if (isManager) {
+    document.getElementById('expensePeriodSummaryCard').style.display = 'block';
+    const expPeriodSummaryBody = document.getElementById('expPeriodSummaryBody');
+    let currentPeriod = { from: null, to: null, label: 'Today' };
+
+    function isoDateLocal(d) { return d.toISOString().slice(0, 10); }
+
+    async function renderExpensePeriodSummary() {
+      const { from, to, label } = currentPeriod;
+      expPeriodSummaryBody.innerHTML = '<p style="color:var(--muted); font-size:0.82rem;">Loading…</p>';
+      try {
+        const expenses = await fetchExpensesInRange(from, to);
+        const totals = { Transport: 0, Meals: 0, Other: 0 };
+        expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
+        const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+        expPeriodSummaryBody.innerHTML = `
+          <p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${label} — ${expenses.length} record${expenses.length === 1 ? '' : 's'}</p>
+          <div class="exp-summary-tiles">
+            <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
+            <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
+            <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
+          </div>
+          <div class="exp-grand-total">
+            <span>Total</span>
+            <span class="exp-grand-amount">${mwk(grand)}</span>
+          </div>
+        `;
+      } catch (err) {
+        expPeriodSummaryBody.innerHTML = `<p style="color:#b3261e; font-size:0.82rem;">Could not load: ${err.message}</p>`;
+      }
+    }
+
+    function setPeriodAndRender(from, to, label) {
+      currentPeriod = { from, to, label };
+      renderExpensePeriodSummary();
+    }
+
+    document.getElementById('expPeriodTodayBtn').addEventListener('click', () => {
+      const t = isoDateLocal(new Date());
+      setPeriodAndRender(t, t, 'Today');
+    });
+    document.getElementById('expPeriodWeekBtn').addEventListener('click', () => {
+      const now = new Date();
+      const day = now.getDay(); // 0 = Sunday
+      const diffToMonday = (day === 0 ? 6 : day - 1);
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - diffToMonday);
+      setPeriodAndRender(isoDateLocal(monday), isoDateLocal(now), 'This Week');
+    });
+    document.getElementById('expPeriodMonthBtn').addEventListener('click', () => {
+      const now = new Date();
+      const first = new Date(now.getFullYear(), now.getMonth(), 1);
+      setPeriodAndRender(isoDateLocal(first), isoDateLocal(now), 'This Month');
+    });
+
+    // Default to Today, and re-fetch fresh numbers every time the
+    // Expenses tab is opened (called from resetAndLoadExpenses above).
+    const today = isoDateLocal(new Date());
+    currentPeriod = { from: today, to: today, label: 'Today' };
+    window.__refreshExpensePeriodSummary = renderExpensePeriodSummary;
   }
 
   async function loadNextExpensePage() {

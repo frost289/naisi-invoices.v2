@@ -98,11 +98,21 @@ export function findPossibleDuplicates(customersCache, { name, phone, location }
   const matches = [];
   customersCache.forEach(c => {
     if (excludeId && c.id === excludeId) return;
+    const nameMatches = !!(normName && (c.name || '').toLowerCase() === normName);
+    const phoneMatches = !!(phone && c.phone && c.phone === phone);
+    // Location alone is NOT a sign of duplication — with standardized
+    // locations, lots of genuinely different customers legitimately
+    // share the same one (e.g. everyone in "Area 25"). Flagging on
+    // location alone was blocking reps from adding real new customers
+    // any time they picked a busy, commonly-used location. Only a name
+    // or phone match actually suggests the same person; location just
+    // rides along as extra context once one of those has already hit.
+    if (!nameMatches && !phoneMatches) return;
     const reasons = [];
-    if (normName && (c.name || '').toLowerCase() === normName) reasons.push('name');
-    if (phone && c.phone && c.phone === phone) reasons.push('phone number');
+    if (nameMatches) reasons.push('name');
+    if (phoneMatches) reasons.push('phone number');
     if (normLocation && (c.location || '').toLowerCase() === normLocation) reasons.push('location');
-    if (reasons.length > 0) matches.push({ customer: c, reasons });
+    matches.push({ customer: c, reasons });
   });
   return matches;
 }
