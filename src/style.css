@@ -255,6 +255,8 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 .suggestion-item .sug-meta { font-size: 0.72rem; color: var(--muted); display: block; }
 .customer-edit-input { padding: 8px; font-size: 16px; min-height: var(--touch-min); width: 100%; border: 1.5px solid var(--line); border-radius: 6px; }
 
+input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-color: var(--leaf); vertical-align: middle; }
+
 .inv-products-cell { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.78rem; color: var(--muted); }
 
 /* ===== Toasts ===== */
@@ -300,7 +302,7 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
 .modal-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
 .modal-close-btn { background: none; border: none; font-size: 1.6rem; line-height: 1; color: var(--muted); cursor: pointer; padding: 0 4px; min-height: var(--touch-min); }
 .modal-close-btn:hover { color: var(--ink); }
-.modal-actions { display: flex; gap: var(--space-2); }
+.modal-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
 /* ===== Expenses ===== */
 .exp-summary-tiles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
@@ -334,6 +336,10 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
   .inv-meta .value.right { text-align: left; }
   .bill-grid { grid-template-columns: 1fr; }
   .items-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .inv-products-cell {
+    max-width: none; white-space: normal; overflow: visible; text-overflow: clip;
+    min-width: 160px;
+  }
 }
 
 @media (max-width: 600px) {
@@ -349,6 +355,10 @@ table.pv-items tbody td.num { text-align: right; font-family: 'JetBrains Mono', 
   .sig { padding: 32px 20px 0; }
   .list-section { padding: var(--space-5) 15px 0; }
   .list-action-btn { display: block; width: 100%; margin-right: 0; }
+  .modal-actions .list-action-btn,
+  .modal-actions .generate-btn,
+  .modal-actions .exp-delete-btn { display: inline-flex; align-items: center; justify-content: center; flex: 1 1 130px; width: auto; margin-right: 0; }
+  #lpMap { height: 240px !important; }
 }
 
 @media (max-width: 400px) {
