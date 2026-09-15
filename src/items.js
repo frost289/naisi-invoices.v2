@@ -4,31 +4,33 @@ export function mwk(n) {
 
 let itemCounter = 0;
 
-export function addItemRow(itemsBody, onChange, qty, desc, price, productName = null, packLabel = null, packQuantity = null, productId = null) {
+export function addItemRow(itemsBody, onChange, qty, desc, price, productName = null, packLabel = null, packQuantity = null, productId = null, locked = false) {
   itemCounter++;
   const tr = document.createElement('tr');
   tr.dataset.id = itemCounter;
   tr.innerHTML = `
     <td class="qty-col"><input type="number" min="0" step="1" class="qty-input" value="${qty ?? 1}"></td>
     <td>
-      <input type="text" class="desc-input" placeholder="e.g. Angel Yeast 10g" value="${desc ?? ''}">
+      <input type="text" class="desc-input" placeholder="e.g. Angel Yeast 10g" value="${desc ?? ''}" ${locked ? 'readonly' : ''}>
       <input type="hidden" class="product-name-input" value="${productName ?? ''}">
       <input type="hidden" class="pack-label-input" value="${packLabel ?? ''}">
       <input type="hidden" class="pack-quantity-input" value="${packQuantity ?? ''}">
       <input type="hidden" class="product-id-input" value="${productId ?? ''}">
     </td>
-    <td class="price-col"><input type="number" min="0" step="0.01" class="price-input" value="${price ?? ''}" placeholder="0.00"></td>
-    <td class="del-col"><button type="button" class="del-btn" title="Remove item">&times;</button></td>
+    <td class="price-col"><input type="number" min="0" step="0.01" class="price-input" value="${price ?? ''}" placeholder="0.00" ${locked ? 'readonly' : ''}></td>
+    <td class="del-col">${locked ? '' : '<button type="button" class="del-btn" title="Remove item">&times;</button>'}</td>
   `;
   itemsBody.appendChild(tr);
   tr.querySelectorAll('.qty-input, .desc-input, .price-input').forEach(inp => inp.addEventListener('input', onChange));
-  tr.querySelector('.del-btn').addEventListener('click', () => {
-    tr.remove();
-    onChange();
-  });
+  if (!locked) {
+    tr.querySelector('.del-btn').addEventListener('click', () => {
+      tr.remove();
+      onChange();
+    });
+  }
 }
 
-export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products) {
+export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products, locked = false) {
   quickAddGrid.innerHTML = '';
 
   if (!products || products.length === 0) {
@@ -63,7 +65,7 @@ export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products) {
         <span class="qa-price">${mwk(p.price)}</span>
       `;
       btn.addEventListener('click', () => {
-        addItemRow(itemsBody, onChange, 1, `${p.productName} — ${p.packLabel}`, p.price, p.productName, p.packLabel, p.quantity, p.id);
+        addItemRow(itemsBody, onChange, 1, `${p.productName} — ${p.packLabel}`, p.price, p.productName, p.packLabel, p.quantity, p.id, locked);
         onChange();
       });
       groupWrap.appendChild(btn);

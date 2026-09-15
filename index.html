@@ -32,6 +32,39 @@
   </p>
 </div>
 
+<!-- ===================== DELIVERY MODE (separate, minimal interface) ===================== -->
+<div id="deliveryRoot" style="display:none;">
+
+  <div class="topbar" style="justify-content:center;">
+    <img id="deliveryTopbarLogo" src="" alt="Naisi Foods">
+    <div class="titles">
+      <h1 style="font-size:1.3rem;">🚚 Deliveries</h1>
+    </div>
+    <button type="button" id="deliveryLogoutBtn" class="logout-btn" style="margin-left:auto;">Log Out</button>
+  </div>
+
+  <div style="max-width:600px; margin:0 auto; padding:20px 16px 80px;">
+
+    <div style="background:#eef6ea; border-radius:14px; padding:20px; text-align:center; margin-bottom:20px;">
+      <div id="deliveryReadyCount" style="font-size:2.4rem; font-weight:800; color:var(--forest-2); line-height:1;">0</div>
+      <div style="font-size:1rem; color:var(--muted); margin-top:4px;">Orders to deliver</div>
+    </div>
+
+    <div id="deliveryDoneBanner" style="display:none; background:#f7f6f2; border-radius:14px; padding:14px 20px; text-align:center; margin-bottom:20px; font-size:1rem; color:var(--forest-2); font-weight:700;"></div>
+
+    <div id="deliveryListEmpty" style="display:none; text-align:center; padding:50px 20px; color:var(--muted);">
+      <div style="font-size:3.5rem; margin-bottom:12px;">✅</div>
+      <p style="font-size:1.2rem; font-weight:600;">All done!</p>
+      <p style="font-size:1rem;">No deliveries waiting right now.</p>
+    </div>
+
+    <div id="deliveryList"></div>
+
+    <button type="button" id="deliveryLoadMoreBtn" class="list-action-btn" style="display:none; width:100%; margin-top:16px; padding:18px; font-size:1.1rem;">⬇ Load More</button>
+
+  </div>
+</div>
+
 <div id="appRoot" style="display:none;">
 
 <div class="topbar">
@@ -64,6 +97,12 @@
 <div id="logvisitView" style="display:none;">
 <div class="layout">
   <div class="panel" style="grid-column:1/-1; max-width:700px; margin:0 auto;">
+
+    <div class="card" id="todaysRouteCard" style="display:none;">
+      <h2><span class="dot"></span>Today's Route — <span id="todaysRouteDayLabel"></span></h2>
+      <div id="todaysRouteList"></div>
+      <p id="todaysRouteEmpty" style="display:none; color:var(--muted); font-size:0.85rem;">No customers scheduled for today. Use search below for anyone else.</p>
+    </div>
 
     <div class="card">
       <h2><span class="dot"></span>Customer</h2>
@@ -266,6 +305,13 @@
     <div id="locationsList" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;"></div>
   </div>
 
+  <div class="card" id="weeklyScheduleCard" style="display:none;">
+    <h2><span class="dot"></span>Weekly Visit Schedule</h2>
+    <p class="numbering-hint">Manager-only. Each active customer gets one day a week — a predictable routine so reps know who to see, and customers learn when to expect a visit.</p>
+    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;" id="scheduleDayTabs"></div>
+    <div id="scheduleDayList"></div>
+  </div>
+
   <div class="card">
     <h2><span class="dot"></span>Manage Customers</h2>
     <div class="field list-search">
@@ -273,9 +319,12 @@
       <input type="text" id="customerSearchInput" placeholder="Customer name...">
       <p class="search-hint" id="customerSearchHint"></p>
     </div>
+    <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; margin-bottom:10px; cursor:pointer;">
+      <input type="checkbox" id="showInactiveCustomersToggle"> Show inactive (closed) customers too
+    </label>
     <button type="button" class="list-action-btn" id="exportCustomersBtn" style="margin-bottom:10px;">Export All Customers to Excel</button>
     <table class="items-table" id="customerListTable" style="width:100%;">
-      <thead><tr><th>Name</th><th>Phone</th><th>Location</th><th>Map</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Phone</th><th>Location</th><th>Day</th><th>Map</th><th>Status</th><th></th></tr></thead>
       <tbody id="customerListBody"></tbody>
     </table>
     <p id="customerListEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No customers saved yet.</p>

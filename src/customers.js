@@ -117,14 +117,43 @@ export function findPossibleDuplicates(customersCache, { name, phone, location }
   return matches;
 }
 
+export async function fetchCustomerById(id) {
+  const snap = await getDoc(doc(db, 'customers', id));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
 export async function addCustomer({ name, phone, location, lat, lng, uid }) {
   const docRef = await addDoc(collection(db, 'customers'), {
     name: normalizeText(name), phone: phone || '', location: normalizeText(location),
     lat: (typeof lat === 'number' && !isNaN(lat)) ? lat : null,
     lng: (typeof lng === 'number' && !isNaN(lng)) ? lng : null,
+    active: true, assignedDay: null,
     createdBy: uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
   return docRef.id;
+}
+
+// ---- Archiving (shop closed for good) ----
+// Soft delete only — the customer record, and every order/invoice/
+// visit that references it, stays intact. An inactive customer just
+// disappears from active pickers (new order, weekly visit schedule)
+// so nobody keeps trying to visit or sell to a shop that's gone.
+// Reactivating (e.g. the shop reopens under the same owner) is just
+// as easy, in case that was a mistake or temporary.
+export async function deactivateCustomer(id) {
+  await updateDoc(doc(db, 'customers', id), { active: false, assignedDay: null, updatedAt: serverTimestamp() });
+}
+
+export async function reactivateCustomer(id) {
+  await updateDoc(doc(db, 'customers', id), { active: true, updatedAt: serverTimestamp() });
+}
+
+// ---- Weekly visit schedule ----
+// day is one of 'Mon'..'Sat', or null for unassigned. One customer,
+// one day — keeps the rep's weekly routine predictable (same day,
+// every week) so customers themselves learn the rhythm too.
+export async function setCustomerVisitDay(id, day) {
+  await updateDoc(doc(db, 'customers', id), { assignedDay: day || null, updatedAt: serverTimestamp() });
 }
 
 export async function updateCustomer(id, { name, phone, location, lat, lng }) {

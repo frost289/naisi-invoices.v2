@@ -7,5 +7,6 @@ export async function getUserRole(email) {
   const data = snap.data();
   if ((data.managers || []).includes(email)) return 'manager';
   if ((data.submitters || []).includes(email)) return 'submitter';
+  if ((data.deliverers || []).includes(email)) return 'delivery';
   return null;
 }

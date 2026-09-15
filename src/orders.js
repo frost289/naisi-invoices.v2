@@ -7,7 +7,7 @@ import { incrementOrderCounterAtomically } from './orderNumbering.js';
 
 const PAGE_SIZE = 25;
 
-export const ORDER_STATUSES = ['Draft', 'Submitted', 'Approved', 'Invoicing', 'Invoiced', 'Dispatched', 'Rejected', 'Cancelled'];
+export const ORDER_STATUSES = ['Draft', 'Submitted', 'Approved', 'Invoicing', 'Invoiced', 'Dispatched', 'Delivered', 'Rejected', 'Cancelled'];
 
 export async function submitOrder({ customerId, customerName, customerPhone, customerLocation, items, notes, uid, email }) {
   const { usedNo } = await incrementOrderCounterAtomically();
@@ -125,5 +125,37 @@ export async function revertInvoiceGeneration(id) {
     if (!orderSnap.exists()) return;
     if (orderSnap.data().status !== 'Invoicing') return; // already resolved some other way — leave it alone
     tx.update(orderRef, { status: 'Approved', updatedAt: serverTimestamp() });
+  });
+}
+
+// ---- Delivery ----
+// Shared pool for now: every delivery person sees every Invoiced
+// order, no per-person assignment. Fine for one delivery guy; once
+// there are several, this is the spot to introduce a fair-assignment
+// scheme (round-robin by area, load-balancing by count, etc.) —
+// flagged here deliberately as a future improvement, not built yet.
+export async function fetchOrdersReadyToDeliverPage(cursor = null) {
+  const constraints = [where('status', '==', 'Invoiced'), orderBy('createdAt', 'desc'), limit(PAGE_SIZE)];
+  if (cursor) constraints.push(startAfter(cursor));
+  const snap = await getDocs(query(collection(db, 'orders'), ...constraints));
+  return {
+    items: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    lastDoc: snap.docs.at(-1) || null,
+    hasMore: snap.docs.length === PAGE_SIZE,
+  };
+}
+
+export async function markOrderDelivered(id, { uid, email }) {
+  await runTransaction(db, async (tx) => {
+    const orderRef = doc(db, 'orders', id);
+    const orderSnap = await tx.get(orderRef);
+    if (!orderSnap.exists()) throw new Error('Order no longer exists.');
+    if (orderSnap.data().status !== 'Invoiced') {
+      throw new Error('This order is no longer marked Invoiced — someone else may have already delivered it.');
+    }
+    tx.update(orderRef, {
+      status: 'Delivered', deliveredBy: uid, deliveredByEmail: email,
+      deliveredAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    });
   });
 }

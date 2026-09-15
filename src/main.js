@@ -17,6 +17,7 @@ import {
 import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndDownloadCustomerReport } from './export.js';
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation,
+  fetchCustomerById, deactivateCustomer, reactivateCustomer, setCustomerVisitDay,
   normalizeText, normalizePhone, formatPhoneForDisplay, toWhatsAppNumber, findPossibleDuplicates, countCustomerActivity, mergeCustomers
 } from './customers.js';
 import {
@@ -35,7 +36,8 @@ import {
 import {
   submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
   fetchOrderById, setOrderStatus, markOrderInvoiced, updateOrderDetails,
-  beginInvoiceGeneration, revertInvoiceGeneration
+  beginInvoiceGeneration, revertInvoiceGeneration,
+  fetchOrdersReadyToDeliverPage, markOrderDelivered
 } from './orders.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
@@ -61,9 +63,14 @@ function formatItemsSummary(items) {
   return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
 }
 
+function googleMapsUrl(lat, lng) {
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+}
+
 const loginScreen = document.getElementById('loginScreen');
 const noAccessScreen = document.getElementById('noAccessScreen');
 const appRoot = document.getElementById('appRoot');
+const deliveryRoot = document.getElementById('deliveryRoot');
 
 watchAuth(
   async (user) => {
@@ -73,8 +80,13 @@ watchAuth(
       noAccessScreen.style.display = 'none';
       appRoot.style.display = 'block';
       await initApp(user, role);
+    } else if (role === 'delivery') {
+      noAccessScreen.style.display = 'none';
+      deliveryRoot.style.display = 'block';
+      await initDeliveryApp(user);
     } else {
       appRoot.style.display = 'none';
+      deliveryRoot.style.display = 'none';
       noAccessScreen.style.display = 'block';
       hideAppOverlay();
     }
@@ -82,6 +94,7 @@ watchAuth(
   () => {
     loginScreen.style.display = 'block';
     appRoot.style.display = 'none';
+    deliveryRoot.style.display = 'none';
     noAccessScreen.style.display = 'none';
     hideAppOverlay();
   }
@@ -103,7 +116,7 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('logoutBtn').addEventListener('click', async () => {
+async function handleLogoutClick() {
   const confirmed = confirm('Log out of Naisi Foods?');
   if (!confirmed) return;
   try {
@@ -112,13 +125,15 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
     showToast('Could not log out: ' + e.message, 'error');
     return;
   }
-  // initApp() only ever wires up its role-based UI and event listeners
-  // ONCE per page load (see appInitialized below) — a full reload is the
-  // simplest way to guarantee whoever logs in next (possibly a different
-  // role entirely) gets a completely clean app instead of stale listeners
-  // still pointed at the previous user.
+  // initApp()/initDeliveryApp() only ever wire up their event listeners
+  // ONCE per page load — a full reload is the simplest way to guarantee
+  // whoever logs in next (possibly a different role entirely) gets a
+  // completely clean app instead of stale listeners still pointed at
+  // the previous user.
   window.location.reload();
-});
+}
+document.getElementById('logoutBtn').addEventListener('click', handleLogoutClick);
+document.getElementById('deliveryLogoutBtn').addEventListener('click', handleLogoutClick);
 
 let appInitialized = false;
 
@@ -283,7 +298,7 @@ async function initApp(user, role) {
   async function loadProductsCache() {
     productsCache = await fetchAllProducts();
     if (isManager) buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
-    buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache);
+    buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache, true);
   }
 
   // Live sync: stock changes made on ANY device (a manager adjusting
@@ -297,7 +312,7 @@ async function initApp(user, role) {
     watchAllProducts((products) => {
       productsCache = products;
       if (isManager) buildQuickAddGrid(quickAddGrid, itemsBody, refreshPreview, productsCache);
-      buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache);
+      buildQuickAddGrid(lvQuickAddGrid, lvOrderItemsBody, () => {}, productsCache, true);
     });
   }
 
@@ -347,10 +362,6 @@ async function initApp(user, role) {
   const lpCancelBtn = document.getElementById('lpCancelBtn');
   const lpSaveBtn = document.getElementById('lpSaveBtn');
   const lpUseMyLocationBtn = document.getElementById('lpUseMyLocationBtn');
-
-  function googleMapsUrl(lat, lng) {
-    return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-  }
 
   function lpUpdateCoordsLabel() {
     lpCoordsLabel.textContent = lpCurrentLatLng
@@ -854,6 +865,21 @@ async function initApp(user, role) {
   const customerSearchHint = document.getElementById('customerSearchHint');
   let loadedCustomers = [], customersCursor = null, customersHasMore = true;
 
+  const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  function customerDayCellHtml(c) {
+    const options = ['<option value="">—</option>'].concat(
+      VISIT_DAYS.map(d => `<option value="${d}" ${c.assignedDay === d ? 'selected' : ''}>${d}</option>`)
+    ).join('');
+    return `<select class="customer-day-select" data-id="${c.id}" style="min-width:68px; padding:4px; font-size:0.78rem; border:1.5px solid var(--line); border-radius:6px;">${options}</select>`;
+  }
+
+  function customerStatusCellHtml(c) {
+    return (c.active !== false)
+      ? `<span class="order-status-badge order-status-Approved">Active</span>`
+      : `<span class="order-status-badge" style="background:#eee; color:var(--muted);">Inactive</span>`;
+  }
+
   function customerMapCellHtml(c) {
     const hasPin = typeof c.lat === 'number' && typeof c.lng === 'number';
     if (hasPin) {
@@ -874,12 +900,18 @@ async function initApp(user, role) {
     customerListBody.innerHTML = '';
     customerListEmpty.style.display = list.length === 0 ? 'block' : 'none';
     list.forEach(c => {
+      const isActive = c.active !== false;
       const tr = document.createElement('tr');
       tr.dataset.id = c.id;
       tr.innerHTML = `
         <td>${c.name}</td><td>${c.phone ? formatPhoneForDisplay(c.phone) : ''}</td><td>${c.location || ''}</td>
+        <td>${customerDayCellHtml(c)}</td>
         <td>${customerMapCellHtml(c)}</td>
-        <td><button type="button" class="list-action-btn" data-action="edit">Edit</button></td>
+        <td>${customerStatusCellHtml(c)}</td>
+        <td>
+          <button type="button" class="list-action-btn" data-action="edit">Edit</button>
+          <button type="button" class="list-action-btn ${isActive ? 'exp-delete-btn' : ''}" data-action="${isActive ? 'deactivate' : 'reactivate'}">${isActive ? 'Deactivate' : 'Reactivate'}</button>
+        </td>
       `;
       customerListBody.appendChild(tr);
     });
@@ -887,10 +919,14 @@ async function initApp(user, role) {
 
   function applyCustomerSearchAndRender() {
     const term = customerSearchInput.value.trim().toLowerCase();
-    const filtered = term ? loadedCustomers.filter(c => (c.name || '').toLowerCase().includes(term)) : loadedCustomers;
+    const showInactive = document.getElementById('showInactiveCustomersToggle').checked;
+    let filtered = showInactive ? loadedCustomers : loadedCustomers.filter(c => c.active !== false);
+    if (term) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(term));
     renderCustomerRows(filtered);
     customerSearchHint.textContent = term ? `Searching ${loadedCustomers.length} loaded customer${loadedCustomers.length === 1 ? '' : 's'}.` : '';
   }
+
+  document.getElementById('showInactiveCustomersToggle').addEventListener('change', applyCustomerSearchAndRender);
 
   async function resetAndLoadCustomers() {
     loadedCustomers = []; customersCursor = null; customersHasMore = true;
@@ -936,7 +972,9 @@ async function initApp(user, role) {
           <input class="customer-edit-input customer-edit-location" data-field="location" value="${c.location || ''}" autocomplete="off">
           <div class="suggestions-dropdown customer-edit-location-suggestions" style="display:none;"></div>
         </td>
+        <td>${customerDayCellHtml(c)}</td>
         <td>${customerMapCellHtml(c)}</td>
+        <td>${customerStatusCellHtml(c)}</td>
         <td>
           <button type="button" class="list-action-btn" data-action="save">Save</button>
           <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
@@ -946,6 +984,36 @@ async function initApp(user, role) {
       initLocationSearchSelect(locInput, locSuggestions);
     } else if (btn.dataset.action === 'cancel') {
       applyCustomerSearchAndRender();
+    } else if (btn.dataset.action === 'deactivate') {
+      const c = loadedCustomers.find(c => c.id === id);
+      const confirmed = confirm(`Mark "${c?.name}" as inactive?\n\nThey'll be hidden from new orders and the weekly visit schedule, but every past order, visit, and invoice stays exactly as it is. You can reactivate any time.`);
+      if (!confirmed) return;
+      setButtonLoading(btn, '…');
+      try {
+        await deactivateCustomer(id);
+        const idx = loadedCustomers.findIndex(cc => cc.id === id);
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], active: false, assignedDay: null };
+        await loadCustomersCache();
+        applyCustomerSearchAndRender();
+        showToast('Customer marked inactive.', 'success');
+        if (window.__refreshWeeklySchedule) window.__refreshWeeklySchedule();
+      } catch (err) {
+        showToast('Could not deactivate: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
+    } else if (btn.dataset.action === 'reactivate') {
+      setButtonLoading(btn, '…');
+      try {
+        await reactivateCustomer(id);
+        const idx = loadedCustomers.findIndex(cc => cc.id === id);
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], active: true };
+        await loadCustomersCache();
+        applyCustomerSearchAndRender();
+        showToast('Customer reactivated.', 'success');
+      } catch (err) {
+        showToast('Could not reactivate: ' + err.message, 'error');
+        clearButtonLoading(btn);
+      }
     } else if (btn.dataset.action === 'set-location') {
       const c = loadedCustomers.find(c => c.id === id);
       if (!c) return;
@@ -1002,6 +1070,68 @@ async function initApp(user, role) {
       }
     }
   });
+
+  customerListBody.addEventListener('change', async (e) => {
+    const select = e.target.closest('.customer-day-select');
+    if (!select) return;
+    const id = select.dataset.id;
+    const day = select.value || null;
+    select.disabled = true;
+    try {
+      await setCustomerVisitDay(id, day);
+      const idx = loadedCustomers.findIndex(c => c.id === id);
+      if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
+      await loadCustomersCache();
+      showToast('Visit day updated.', 'success');
+      if (window.__refreshWeeklySchedule) window.__refreshWeeklySchedule();
+    } catch (err) {
+      showToast('Could not update visit day: ' + err.message, 'error');
+    } finally {
+      select.disabled = false;
+    }
+  });
+
+  // ============= WEEKLY VISIT SCHEDULE (manager only) =============
+  if (isManager) {
+    document.getElementById('weeklyScheduleCard').style.display = 'block';
+    const scheduleDayTabs = document.getElementById('scheduleDayTabs');
+    const scheduleDayList = document.getElementById('scheduleDayList');
+    const scheduleDayLabels = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+    let currentScheduleDay = VISIT_DAYS[new Date().getDay() === 0 ? 0 : new Date().getDay() - 1] || 'Mon';
+
+    function renderScheduleDayTabs() {
+      scheduleDayTabs.innerHTML = VISIT_DAYS.map(d => `
+        <button type="button" class="list-action-btn schedule-day-tab" data-day="${d}" style="${d === currentScheduleDay ? 'background:var(--leaf); color:#fff; border-color:var(--leaf);' : ''}">${scheduleDayLabels[d]}</button>
+      `).join('');
+    }
+
+    function renderScheduleDayList() {
+      const customersForDay = customersCache.filter(c => c.active !== false && c.assignedDay === currentScheduleDay);
+      scheduleDayList.innerHTML = customersForDay.length
+        ? `<p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${customersForDay.length} customer${customersForDay.length === 1 ? '' : 's'} on ${scheduleDayLabels[currentScheduleDay]}</p>` +
+          customersForDay.map(c => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line);">
+              <span>${c.name}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${c.location}</span>` : ''}</span>
+            </div>
+          `).join('')
+        : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${scheduleDayLabels[currentScheduleDay]} yet — set a day per customer in the Manage Customers table above.</p>`;
+    }
+
+    function refreshWeeklySchedule() {
+      renderScheduleDayTabs();
+      renderScheduleDayList();
+    }
+
+    scheduleDayTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('.schedule-day-tab');
+      if (!btn) return;
+      currentScheduleDay = btn.dataset.day;
+      refreshWeeklySchedule();
+    });
+
+    refreshWeeklySchedule();
+    window.__refreshWeeklySchedule = refreshWeeklySchedule;
+  }
 
   // ============= MANAGE LOCATIONS (manager only) =============
   if (isManager) {
@@ -3054,10 +3184,60 @@ async function initApp(user, role) {
     // button since those are already manager-only screens).
     document.getElementById('lvOrderAddItemBtn').style.display = 'none';
 
+    function selectCustomerForVisit(c) {
+      lvSelected = c;
+      lvCustName.textContent = c.name;
+      lvCustPhone.textContent = c.phone || '';
+      lvCustLocation.textContent = c.location || '';
+      lvSelectedCustomer.style.display = 'block';
+      lvCustSearch.style.display = 'none';
+      lvCustSuggestions.style.display = 'none';
+      lvOutcomeCard.style.display = 'block';
+    }
+
+    // ---- Today's Route ----
+    // A predictable weekly routine: whatever day it is, show exactly
+    // the active customers assigned to that day (set by the manager
+    // in Manage Customers), so the rep always knows who to see without
+    // having to remember or search — and so customers themselves can
+    // learn "the Naisi guys come on Wednesdays".
+    const todaysRouteCard = document.getElementById('todaysRouteCard');
+    const todaysRouteDayLabel = document.getElementById('todaysRouteDayLabel');
+    const todaysRouteList = document.getElementById('todaysRouteList');
+    const todaysRouteEmpty = document.getElementById('todaysRouteEmpty');
+    const dayFullNames = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+    const dayAbbrevByJsDay = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']; // JS getDay(): 0=Sun..6=Sat
+
+    function renderTodaysRoute() {
+      const todayAbbrev = dayAbbrevByJsDay[new Date().getDay()];
+      if (!todayAbbrev) { todaysRouteCard.style.display = 'none'; return; } // Sunday — no route
+      todaysRouteCard.style.display = 'block';
+      todaysRouteDayLabel.textContent = dayFullNames[todayAbbrev];
+
+      const todaysCustomers = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
+      todaysRouteEmpty.style.display = todaysCustomers.length === 0 ? 'block' : 'none';
+      todaysRouteList.innerHTML = todaysCustomers.map(c => `
+        <button type="button" class="todays-route-item" data-id="${c.id}">
+          <span class="todays-route-name">${c.name}</span>
+          ${c.location ? `<span class="todays-route-location">${c.location}</span>` : ''}
+        </button>
+      `).join('');
+    }
+
+    todaysRouteList.addEventListener('click', (e) => {
+      const item = e.target.closest('.todays-route-item');
+      if (!item) return;
+      const c = customersCache.find(cc => cc.id === item.dataset.id);
+      if (!c) return;
+      selectCustomerForVisit(c);
+    });
+
+    renderTodaysRoute();
+
     lvCustSearch.addEventListener('input', () => {
       const q = lvCustSearch.value.trim().toLowerCase();
       if (!q) { lvCustSuggestions.style.display = 'none'; return; }
-      const matches = customersCache.filter(c => (c.name || '').toLowerCase().includes(q));
+      const matches = customersCache.filter(c => c.active !== false && (c.name || '').toLowerCase().includes(q));
       if (!matches.length) { lvCustSuggestions.style.display = 'none'; return; }
       lvCustSuggestions.innerHTML = matches.slice(0, 8).map(c => `
         <div class="suggestion-item" data-id="${c.id}">
@@ -3073,14 +3253,7 @@ async function initApp(user, role) {
       if (!item) return;
       const c = customersCache.find(c => c.id === item.dataset.id);
       if (!c) return;
-      lvSelected = c;
-      lvCustName.textContent = c.name;
-      lvCustPhone.textContent = c.phone || '';
-      lvCustLocation.textContent = c.location || '';
-      lvSelectedCustomer.style.display = 'block';
-      lvCustSearch.style.display = 'none';
-      lvCustSuggestions.style.display = 'none';
-      lvOutcomeCard.style.display = 'block';
+      selectCustomerForVisit(c);
     });
 
     lvClearCustomer.addEventListener('click', (e) => {
@@ -3373,5 +3546,139 @@ async function initApp(user, role) {
   // need to exist before showView() can safely trigger their loaders).
   await showView(isManager ? 'orders' : 'logvisit');
 
+  hideAppOverlay();
+}
+
+// ============================================================
+// DELIVERY MODE — a completely separate, minimal interface.
+// Deliberately NOT reusing initApp's nav/views/modals: the delivery
+// person's entire job is one thing (deliver invoiced orders), and
+// keeping this isolated means it can stay as simple as possible
+// (big text, few words, icons) without inheriting any complexity
+// from the manager/rep app. Built for one delivery person today but
+// designed for several: every delivery person sees the same shared
+// pool of Invoiced orders (see fetchOrdersReadyToDeliverPage in
+// orders.js for the note on fair-assignment being a future step).
+// ============================================================
+let deliveryAppInitialized = false;
+
+async function initDeliveryApp(user) {
+  if (deliveryAppInitialized) { hideAppOverlay(); return; }
+  deliveryAppInitialized = true;
+
+  document.getElementById('deliveryTopbarLogo').src = LOGO_DATA_URI;
+
+  const deliveryReadyCount = document.getElementById('deliveryReadyCount');
+  const deliveryDoneBanner = document.getElementById('deliveryDoneBanner');
+  const deliveryListEmpty = document.getElementById('deliveryListEmpty');
+  const deliveryList = document.getElementById('deliveryList');
+  const deliveryLoadMoreBtn = document.getElementById('deliveryLoadMoreBtn');
+
+  let loadedDeliveries = [], deliveriesCursor = null, deliveriesHasMore = true;
+  let deliveredThisSession = 0;
+
+  // Per-order, best-effort accurate map link: look up the actual
+  // customer record for a real GPS pin if one's been saved; otherwise
+  // fall back to a text search on the location name (same idea as a
+  // WhatsApp text-location share — still opens Maps roughly in the
+  // right place). Never blocks rendering the card if this fails.
+  async function resolveMapUrlForOrder(order) {
+    if (order.customerId) {
+      try {
+        const customer = await fetchCustomerById(order.customerId);
+        if (customer && typeof customer.lat === 'number' && typeof customer.lng === 'number') {
+          return googleMapsUrl(customer.lat, customer.lng);
+        }
+      } catch (err) { /* fall through to text-search fallback below */ }
+    }
+    return googleMapsSearchUrlForLocation(order.customerLocation && order.customerLocation !== '-' ? order.customerLocation : null);
+  }
+
+  function renderDeliveryEmpty() {
+    deliveryListEmpty.style.display = loadedDeliveries.length === 0 ? 'block' : 'none';
+  }
+
+  async function renderDeliveryCard(order) {
+    const itemsHtml = (order.items || [])
+      .map(it => `<div class="delivery-item-row">${it.qty}× ${it.desc || '—'}</div>`)
+      .join('') || `<div class="delivery-item-row">—</div>`;
+    const hasLocation = order.customerLocation && order.customerLocation !== '-';
+    const mapUrl = await resolveMapUrlForOrder(order);
+
+    const card = document.createElement('div');
+    card.className = 'delivery-card';
+    card.dataset.id = order.id;
+    card.innerHTML = `
+      <div class="delivery-card-name">${order.customerName || '—'}</div>
+      ${hasLocation ? `<div class="delivery-card-location">📍 ${order.customerLocation}</div>` : ''}
+      ${mapUrl ? `<a href="${mapUrl}" target="_blank" rel="noopener" class="delivery-map-btn">🗺️ Open Map</a>` : ''}
+      <div class="delivery-items">${itemsHtml}</div>
+      <div class="delivery-total">${mwk(order.grandTotal || 0)}</div>
+      ${order.invoiceNo ? `<div class="delivery-invoice">Invoice ${order.invoiceNo}</div>` : ''}
+      <button type="button" class="delivery-deliver-btn" data-action="deliver" data-id="${order.id}">✓ DELIVERED</button>
+    `;
+    return card;
+  }
+
+  async function loadNextDeliveryPage() {
+    if (!deliveriesHasMore) return;
+    setButtonLoading(deliveryLoadMoreBtn, 'Loading…');
+    try {
+      const result = await fetchOrdersReadyToDeliverPage(deliveriesCursor);
+      loadedDeliveries = loadedDeliveries.concat(result.items);
+      deliveriesCursor = result.lastDoc;
+      deliveriesHasMore = result.hasMore;
+      deliveryReadyCount.textContent = loadedDeliveries.length;
+      renderDeliveryEmpty();
+      for (const order of result.items) {
+        const card = await renderDeliveryCard(order);
+        deliveryList.appendChild(card);
+      }
+      deliveryLoadMoreBtn.style.display = deliveriesHasMore ? 'block' : 'none';
+    } catch (err) {
+      showToast('Could not load deliveries: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(deliveryLoadMoreBtn);
+    }
+  }
+
+  async function resetAndLoadDeliveries() {
+    loadedDeliveries = []; deliveriesCursor = null; deliveriesHasMore = true;
+    deliveryList.innerHTML = '';
+    await loadNextDeliveryPage();
+  }
+
+  deliveryLoadMoreBtn.addEventListener('click', loadNextDeliveryPage);
+
+  deliveryList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action="deliver"]');
+    if (!btn) return;
+    const card = btn.closest('.delivery-card');
+    const order = loadedDeliveries.find(o => o.id === btn.dataset.id);
+    if (!order) return;
+
+    const confirmed = confirm(`Mark ${order.customerName || 'this order'} as DELIVERED?`);
+    if (!confirmed) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      await markOrderDelivered(order.id, { uid: user.uid, email: user.email });
+      deliveredThisSession++;
+      deliveryDoneBanner.textContent = `✓ ${deliveredThisSession} delivered today`;
+      deliveryDoneBanner.style.display = 'block';
+      card.remove();
+      loadedDeliveries = loadedDeliveries.filter(o => o.id !== order.id);
+      deliveryReadyCount.textContent = loadedDeliveries.length;
+      renderDeliveryEmpty();
+      showToast('Marked as delivered.', 'success');
+    } catch (err) {
+      showToast('Could not mark as delivered: ' + err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = '✓ DELIVERED';
+    }
+  });
+
+  await resetAndLoadDeliveries();
   hideAppOverlay();
 }
