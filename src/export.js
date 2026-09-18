@@ -172,7 +172,7 @@ export async function buildAndDownloadExpenseReport(expenses, fromDate, toDate) 
   dataSheet.getColumn('notes').alignment = { wrapText: true };
 
   const summarySheet = workbook.addWorksheet('Summary by Category');
-  const totals = { Transport: 0, Meals: 0, Other: 0 };
+  const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
   expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
   const grand = Object.values(totals).reduce((a, b) => a + b, 0);
 

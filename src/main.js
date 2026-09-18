@@ -2234,13 +2234,15 @@ async function initApp(user, role) {
   function renderExpenseSummary() {
     const el = document.getElementById('expenseSummary');
     if (!el) return;
-    const totals = { Transport: 0, Meals: 0, Other: 0 };
+    const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
     loadedExpenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
     const grand = Object.values(totals).reduce((a, b) => a + b, 0);
     el.innerHTML = `
       <div class="exp-summary-tiles">
         <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
         <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
+        <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${mwk(totals.Fuel)}</span></div>
+        <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${mwk(totals.Stock)}</span></div>
         <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
       </div>
       <div class="exp-grand-total">
@@ -2311,7 +2313,7 @@ async function initApp(user, role) {
       expPeriodSummaryBody.innerHTML = '<p style="color:var(--muted); font-size:0.82rem;">Loading…</p>';
       try {
         const expenses = await fetchExpensesInRange(from, to);
-        const totals = { Transport: 0, Meals: 0, Other: 0 };
+        const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
         expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
         const grand = Object.values(totals).reduce((a, b) => a + b, 0);
         expPeriodSummaryBody.innerHTML = `
@@ -2319,6 +2321,8 @@ async function initApp(user, role) {
           <div class="exp-summary-tiles">
             <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
             <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
+            <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${mwk(totals.Fuel)}</span></div>
+            <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${mwk(totals.Stock)}</span></div>
             <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
           </div>
           <div class="exp-grand-total">
@@ -2420,6 +2424,8 @@ async function initApp(user, role) {
           <select class="customer-edit-input" data-field="category">
             <option ${exp.category === 'Transport' ? 'selected' : ''}>Transport</option>
             <option ${exp.category === 'Meals' ? 'selected' : ''}>Meals</option>
+            <option value="Fuel" ${exp.category === 'Fuel' ? 'selected' : ''}>Fuel</option>
+            <option value="Stock" ${exp.category === 'Stock' ? 'selected' : ''}>Stock Purchase</option>
             <option ${exp.category === 'Other' ? 'selected' : ''}>Other</option>
           </select>
         </td>
@@ -3576,6 +3582,69 @@ async function initDeliveryApp(user) {
 
   let loadedDeliveries = [], deliveriesCursor = null, deliveriesHasMore = true;
   let deliveredThisSession = 0;
+
+  // ---- Simple expense logging (fuel, transport, meals, other) ----
+  // Kept to the bare minimum a delivery person needs: pick a category
+  // by icon, type an amount, save. No notes field, no date picker
+  // (always today) — anything that adds reading or typing is left out
+  // on purpose.
+  const deliveryExpenseToggleBtn = document.getElementById('deliveryExpenseToggleBtn');
+  const deliveryExpenseForm = document.getElementById('deliveryExpenseForm');
+  const deliveryExpenseAmount = document.getElementById('deliveryExpenseAmount');
+  const deliveryExpenseSaveBtn = document.getElementById('deliveryExpenseSaveBtn');
+  const deliveryExpenseCancelBtn = document.getElementById('deliveryExpenseCancelBtn');
+  let selectedExpenseCategory = null;
+
+  function resetDeliveryExpenseForm() {
+    selectedExpenseCategory = null;
+    deliveryExpenseAmount.value = '';
+    deliveryExpenseSaveBtn.disabled = true;
+    deliveryExpenseForm.querySelectorAll('.delivery-expense-cat-btn').forEach(b => b.classList.remove('active'));
+  }
+
+  deliveryExpenseToggleBtn.addEventListener('click', () => {
+    const opening = deliveryExpenseForm.style.display === 'none';
+    deliveryExpenseForm.style.display = opening ? 'block' : 'none';
+    if (opening) resetDeliveryExpenseForm();
+  });
+  deliveryExpenseCancelBtn.addEventListener('click', () => {
+    deliveryExpenseForm.style.display = 'none';
+    resetDeliveryExpenseForm();
+  });
+
+  deliveryExpenseForm.querySelectorAll('.delivery-expense-cat-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      selectedExpenseCategory = btn.dataset.category;
+      deliveryExpenseForm.querySelectorAll('.delivery-expense-cat-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      deliveryExpenseSaveBtn.disabled = !(selectedExpenseCategory && parseFloat(deliveryExpenseAmount.value) > 0);
+    });
+  });
+  deliveryExpenseAmount.addEventListener('input', () => {
+    deliveryExpenseSaveBtn.disabled = !(selectedExpenseCategory && parseFloat(deliveryExpenseAmount.value) > 0);
+  });
+
+  deliveryExpenseSaveBtn.addEventListener('click', async () => {
+    if (!selectedExpenseCategory) return;
+    const amount = parseFloat(deliveryExpenseAmount.value);
+    if (!amount || amount <= 0) return;
+    deliveryExpenseSaveBtn.disabled = true;
+    deliveryExpenseSaveBtn.textContent = 'Saving…';
+    try {
+      await addExpense({
+        date: new Date().toISOString().slice(0, 10),
+        category: selectedExpenseCategory, amount, notes: '',
+        uid: user.uid, email: user.email,
+      });
+      showToast('Expense saved.', 'success');
+      deliveryExpenseForm.style.display = 'none';
+      resetDeliveryExpenseForm();
+    } catch (err) {
+      showToast('Could not save: ' + err.message, 'error');
+    } finally {
+      deliveryExpenseSaveBtn.textContent = '✓ SAVE';
+    }
+  });
 
   // Per-order, best-effort accurate map link: look up the actual
   // customer record for a real GPS pin if one's been saved; otherwise

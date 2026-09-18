@@ -305,18 +305,22 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .modal-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
 /* ===== Expenses ===== */
-.exp-summary-tiles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+.exp-summary-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-3); }
 .exp-tile { border-radius: 10px; padding: 12px 14px; text-align: center; }
 .exp-tile-label { display: block; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
 .exp-tile-amount { display: block; font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; font-weight: 700; }
 .exp-tile-transport { background: #e8f0fe; color: #1a56a0; }
 .exp-tile-meals { background: #fff4e0; color: #7a5210; }
+.exp-tile-fuel { background: #fde8e8; color: #b23b3b; }
+.exp-tile-stock { background: #f0e8fe; color: #6a3fa0; }
 .exp-tile-other { background: #eef6ea; color: var(--forest-2); }
 .exp-grand-total { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--cream); border-radius: 8px; font-size: 0.82rem; color: var(--muted); }
 .exp-grand-amount { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--forest); font-size: 1rem; }
 .exp-badge { display: inline-block; padding: 3px 8px; border-radius: 5px; font-size: 0.7rem; font-weight: 700; white-space: nowrap; }
 .exp-badge-Transport { background: #e8f0fe; color: #1a56a0; }
 .exp-badge-Meals { background: #fff4e0; color: #7a5210; }
+.exp-badge-Fuel { background: #fde8e8; color: #b23b3b; }
+.exp-badge-Stock { background: #f0e8fe; color: #6a3fa0; }
 .exp-badge-Other { background: #eef6ea; color: var(--forest-2); }
 .exp-delete-btn { border-color: #b23b3b; color: #b23b3b; }
 .exp-delete-btn:hover { background: rgba(178,59,59,0.08); }
@@ -449,3 +453,14 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .todays-route-item:hover { border-color: var(--leaf); background: #eef6ea; }
 .todays-route-name { font-weight: 700; font-size: 0.95rem; color: var(--ink); }
 .todays-route-location { font-size: 0.8rem; color: var(--muted); }
+
+/* ---- Delivery mode expense logging ---- */
+.delivery-expense-cat-btn {
+  background: #f7f6f2; border: 2px solid var(--line); border-radius: 12px;
+  padding: 14px 8px; text-align: center; cursor: pointer;
+  min-height: 76px; font-family: 'Inter', sans-serif;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.delivery-expense-cat-btn .dxcat-icon { font-size: 1.8rem; line-height: 1; }
+.delivery-expense-cat-btn .dxcat-label { font-size: 0.85rem; font-weight: 700; color: var(--ink); }
+.delivery-expense-cat-btn.active { border-color: var(--leaf); background: #eef6ea; }

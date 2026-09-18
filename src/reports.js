@@ -57,7 +57,7 @@ export function buildIntervalSummary({ orders, invoices, expenses, visits }) {
   const summary = {
     orders: { total: orders.length, byStatus: {} },
     invoices: { count: invoices.length, revenue: 0 },
-    expenses: { count: expenses.length, total: 0, byCategory: { Transport: 0, Meals: 0, Other: 0 } },
+    expenses: { count: expenses.length, total: 0, byCategory: { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 } },
     visits: { total: visits.length, ordersPlaced: 0, noOrder: 0, successRate: 0 },
     topProducts: [],
     netCashflow: 0,
