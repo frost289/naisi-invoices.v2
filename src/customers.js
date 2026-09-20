@@ -122,12 +122,12 @@ export async function fetchCustomerById(id) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
-export async function addCustomer({ name, phone, location, lat, lng, uid }) {
+export async function addCustomer({ name, phone, location, lat, lng, uid, assignedDay = null }) {
   const docRef = await addDoc(collection(db, 'customers'), {
     name: normalizeText(name), phone: phone || '', location: normalizeText(location),
     lat: (typeof lat === 'number' && !isNaN(lat)) ? lat : null,
     lng: (typeof lng === 'number' && !isNaN(lng)) ? lng : null,
-    active: true, assignedDay: null,
+    active: true, assignedDay: assignedDay || null,
     createdBy: uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
   return docRef.id;

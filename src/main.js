@@ -328,6 +328,23 @@ async function initApp(user, role) {
   async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
   await loadCustomersCache();
 
+  // Auto-balances new customers across Mon-Fri (never Sat — that stays
+  // manual-only) so each rep visit day ends up with roughly the same
+  // number of stops over time, without a manager having to think about
+  // it for every single new customer. Counts against the already-
+  // loaded customersCache rather than firing a fresh Firestore query
+  // per customer — cheap, and customersCache is always current since
+  // every customer-creating flow reloads it right after saving.
+  const AUTO_ASSIGN_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+  const VISIT_DAY_FULL_NAMES = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+  function pickBalancedVisitDay() {
+    const counts = Object.fromEntries(AUTO_ASSIGN_DAYS.map(d => [d, 0]));
+    customersCache.forEach(c => {
+      if (c.active !== false && AUTO_ASSIGN_DAYS.includes(c.assignedDay)) counts[c.assignedDay]++;
+    });
+    return AUTO_ASSIGN_DAYS.reduce((best, d) => (counts[d] < counts[best] ? d : best), AUTO_ASSIGN_DAYS[0]);
+  }
+
   // ============= LOCATIONS: approved list cache (shared) =============
   let locationsCache = [];
   async function loadLocationsCache() { locationsCache = await fetchAllLocations(); }
@@ -757,10 +774,11 @@ async function initApp(user, role) {
       try {
         const lat = custLatInput.value ? parseFloat(custLatInput.value) : null;
         const lng = custLngInput.value ? parseFloat(custLngInput.value) : null;
-        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
+        const assignedDay = pickBalancedVisitDay();
+        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, assignedDay });
         custCustomerIdInput.value = newId;
-        customerSaveNote.textContent = 'Saved to customer list.';
-        showToast('Customer saved.', 'success');
+        customerSaveNote.textContent = `Saved to customer list. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`;
+        showToast(`Customer saved. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`, 'success');
         custLatInput.value = ''; custLngInput.value = ''; custPinNote.textContent = '';
         await loadCustomersCache();
       } catch (err) {
@@ -827,11 +845,12 @@ async function initApp(user, role) {
     try {
       const lat = newCustLat.value ? parseFloat(newCustLat.value) : null;
       const lng = newCustLng.value ? parseFloat(newCustLng.value) : null;
-      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
+      const assignedDay = pickBalancedVisitDay();
+      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, assignedDay });
       newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
       newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
-      addCustomerNote.textContent = 'Customer added.';
-      showToast('Customer added.', 'success');
+      addCustomerNote.textContent = `Customer added. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`;
+      showToast(`Customer added. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`, 'success');
       await loadCustomersCache();
       await resetAndLoadCustomers();
     } catch (err) {
