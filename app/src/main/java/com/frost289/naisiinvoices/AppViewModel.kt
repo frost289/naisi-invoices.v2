@@ -30,6 +30,8 @@ class AppViewModel:ViewModel(){
  fun submitOrder(o:Order,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.submitOrder(o,_state.value.uid,_state.value.userEmail);onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
  fun addVisit(v:Visit,customerId:String,onDone:()->Unit={})=viewModelScope.launch{try{repo.addVisit(v,_state.value.uid,_state.value.userEmail,customerId);onDone();loadAll()}catch(e:Exception){error(e.message)}}
  fun addInvoice(i:Invoice,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.addInvoice(i,_state.value.uid);onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
+ fun approveOrder(o:Order)=viewModelScope.launch{try{repo.approveOrderWithStock(o,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
+ fun deliverOrder(id:String)=viewModelScope.launch{try{repo.markDelivered(id,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
  fun changeOrder(id:String,status:String)=viewModelScope.launch{try{repo.setOrderStatus(id,status);loadAll()}catch(e:Exception){error(e.message)}}
  fun adjustStock(p:Product,delta:Double,reason:String)=viewModelScope.launch{try{repo.adjustStock(p.id,delta,_state.value.uid,_state.value.userEmail,reason);loadAll()}catch(e:Exception){error(e.message)}}
  private fun error(m:String?){_state.value=_state.value.copy(loading=false,error=m?: "Unknown error")}
