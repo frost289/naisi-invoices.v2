@@ -6,6 +6,8 @@ import com.google.firebase.firestore.Query
 import kotlinx.coroutines.tasks.await
 
 class NaisiRepository(private val db: FirebaseFirestore) {
+    private fun number(value: Any?): Double = (value as? Number)?.toDouble() ?: 0.0
+
     private fun line(data: Map<String, Any?>): LineItem = LineItem(
         qty = (data["qty"] as? Number)?.toDouble() ?: 0.0,
         desc = (data["desc"] as? String) ?: "",
@@ -28,12 +30,12 @@ class NaisiRepository(private val db: FirebaseFirestore) {
 
     suspend fun products() = db.collection("products").orderBy("productName").get().await().documents.map { d ->
         Product(d.id, d.getString("productName").orEmpty(), d.getString("packLabel").orEmpty(),
-            d.getDouble("quantity") ?: 0.0, d.getDouble("price") ?: 0.0, d.getDouble("stockOnHand") ?: 0.0)
+            number(d.get("quantity")), number(d.get("price")), number(d.get("stockOnHand")))
     }
 
     suspend fun customers() = db.collection("customers").orderBy("name").get().await().documents.map { d ->
         Customer(d.id, d.getString("name").orEmpty(), d.getString("phone").orEmpty(),
-            d.getString("location").orEmpty(), d.getDouble("lat"), d.getDouble("lng"),
+            d.getString("location").orEmpty(), d.get("lat")?.let(::number), d.get("lng")?.let(::number),
             d.getBoolean("active") ?: true, d.getString("assignedDay"))
     }
 
@@ -45,7 +47,7 @@ class NaisiRepository(private val db: FirebaseFirestore) {
                 d.getString("terms").orEmpty(), d.getString("providerPhone").orEmpty(),
                 d.getString("notes").orEmpty(),
                 (d.get("items") as? List<Map<String, Any?>>)?.map(::line) ?: emptyList(),
-                d.getDouble("grandTotal") ?: 0.0)
+                number(d.get("grandTotal")))
         }
 
     suspend fun orders(role: String, uid: String): List<Order> {
@@ -59,7 +61,7 @@ class NaisiRepository(private val db: FirebaseFirestore) {
                 d.getString("customerId"), d.getString("customerName").orEmpty(),
                 d.getString("customerPhone").orEmpty(), d.getString("customerLocation").orEmpty(),
                 (d.get("items") as? List<Map<String, Any?>>)?.map(::line) ?: emptyList(),
-                d.getString("notes").orEmpty(), d.getDouble("grandTotal") ?: 0.0,
+                d.getString("notes").orEmpty(), number(d.get("grandTotal")),
                 d.getString("createdBy").orEmpty(), d.getString("createdByEmail").orEmpty())
         }
     }
@@ -69,7 +71,7 @@ class NaisiRepository(private val db: FirebaseFirestore) {
         else db.collection("expenses").whereEqualTo("createdBy", uid)
         return query.orderBy("date", Query.Direction.DESCENDING).limit(25).get().await().documents.map { d ->
             Expense(d.id, d.getString("date").orEmpty(), d.getString("category").orEmpty(),
-                d.getDouble("amount") ?: 0.0, d.getString("notes").orEmpty(),
+                number(d.get("amount")), d.getString("notes").orEmpty(),
                 d.getString("createdBy").orEmpty(), d.getString("createdByEmail").orEmpty())
         }
     }
@@ -160,7 +162,7 @@ class NaisiRepository(private val db: FirebaseFirestore) {
             tracked.forEachIndexed { i, item ->
                 val snap = snaps[i]
                 if (!snap.exists()) throw IllegalStateException("Product ${item.desc} was not found.")
-                val have = snap.getDouble("stockOnHand") ?: 0.0
+                val have = number(snap.get("stockOnHand"))
                 if (item.qty > have)
                     throw IllegalStateException("Insufficient stock for ${item.desc}: need ${item.qty}, have ${have}")
             }
@@ -173,7 +175,7 @@ class NaisiRepository(private val db: FirebaseFirestore) {
             tracked.forEachIndexed { i, item ->
                 val snap = snaps[i]
                 val productRef = db.collection("products").document(item.productId!!)
-                val old = snap.getDouble("stockOnHand") ?: 0.0
+                val old = number(snap.get("stockOnHand"))
                 val next = old - item.qty
                 tx.update(productRef, mapOf("stockOnHand" to next, "updatedAt" to Timestamp.now()))
                 tx.set(db.collection("stockMovements").document(), mapOf(
