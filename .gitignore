@@ -1,25 +1,22 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+captures/
 
-node_modules
-dist
-dist-ssr
-*.local
+# Release signing material — NEVER commit these
+*.jks
+*.keystore
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# Firebase local configuration (optional)
+google-services.json
+
+# OS/editor
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-firestore.rules
+Thumbs.db
+.vscode/
+
+# Logs
+*.log
