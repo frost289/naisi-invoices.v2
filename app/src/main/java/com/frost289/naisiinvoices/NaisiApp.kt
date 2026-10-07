@@ -41,6 +41,7 @@ private val Forest=Color(0xFF14401F);private val Forest2=Color(0xFF1F5C30);priva
   Button({vm.signIn(email,pass)},enabled=!s.loading&&email.isNotBlank()&&pass.isNotBlank(),modifier=Modifier.fillMaxWidth().height(50.dp)){Text(if(s.loading)"Signing in…" else "Sign In")}
  }}}
 }
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun Workspace(s:UiState,vm:AppViewModel){
  val manager=s.role=="manager";val delivery=s.role=="delivery"
  val tabs=when{s.role=="manager"->listOf("Home","Orders","Invoices","Customers","Products","Expenses","Summary");delivery->listOf("Home","Deliveries","Expenses");else->listOf("Home","My Orders","Customers","Log Visit","My Visits","Expenses")}
@@ -79,9 +80,176 @@ private fun icon(t:String)=when(t){"Home"->"⌂";"Orders"->"□";"Deliveries"->"
 @Composable private fun Invoices(s:UiState){val ctx=LocalContext.current;LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Text("Invoices",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest)};items(s.invoices){i->Card{Column(Modifier.padding(13.dp)){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(i.invoiceNo,fontWeight=FontWeight.Bold);Text(mwk(i.grandTotal),fontWeight=FontWeight.Bold,color=Forest)};Text(i.customer);Text("${i.date} • ${i.location}",fontSize=12.sp,color=Muted);Button({sharePdf(ctx,i)}){Text("Share PDF")}}}}}}
 @Composable private fun Customers(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)CustomerForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Customers",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Add")}}};items(s.customers.filter{it.active}){c->Card{Column(Modifier.padding(13.dp)){Text(c.name,fontWeight=FontWeight.Bold);Text(c.phone);Text(c.location,color=Muted)}}}}}
 @Composable private fun CustomerForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var p by remember{mutableStateOf("")};var l by remember{mutableStateOf("")};Form("Add Customer",done){Field("Customer Name",n){n=it};Field("Phone",p){p=it};Field("Location",l){l=it};Button({vm.addCustomer(Customer(name=n,phone=normalizePhone(p),location=l,assignedDay="Mon"));done()}){Text("Save Customer")}}}
-@Composable private fun Products(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)ProductForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Products",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);if(s.role=="manager")Button({add=true}){Text("Add")}}};items(s.products){p->Card{Column(Modifier.padding(13.dp)){Text(p.productName,fontWeight=FontWeight.Bold);Text("${p.packLabel} • Qty ${p.quantity}",fontSize=12.sp);Text("Price ${mwk(p.price)}");Text("Stock ${p.stockOnHand}",fontWeight=FontWeight.Bold,color=if(p.stockOnHand<=0)MaterialTheme.colorScheme.error else Forest2)}}}}}}
+@Composable
+private fun Products(
+    s: UiState,
+    vm: AppViewModel
+) {
+    var add by remember { mutableStateOf(false) }
+
+    if (add) {
+        ProductForm(vm) {
+            add = false
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Products",
+                        fontSize = 23.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Forest
+                    )
+
+                    if (s.role == "manager") {
+                        Button(onClick = { add = true }) {
+                            Text("Add")
+                        }
+                    }
+                }
+            }
+
+            items(s.products) { product ->
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(13.dp)
+                    ) {
+                        Text(
+                            text = product.productName,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${product.packLabel} • Qty ${product.quantity}",
+                            fontSize = 12.sp
+                        )
+                        Text(text = "Price ${mwk(product.price)}")
+                        Text(
+                            text = "Stock ${product.stockOnHand}",
+                            fontWeight = FontWeight.Bold,
+                            color = if (product.stockOnHand <= 0) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                Forest2
+                            }
+                        )
+                    }
+                }
+            }
+
+            if (s.products.isEmpty()) {
+                item {
+                    Text(
+                        text = "No products yet.",
+                        modifier = Modifier.padding(24.dp),
+                        color = Muted
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable private fun ProductForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var pack by remember{mutableStateOf("")};var q by remember{mutableStateOf("")};var price by remember{mutableStateOf("")};Form("Add Product",done){Field("Product Name",n){n=it};Field("Pack",pack){pack=it};Field("Pack Quantity",q){q=it};Field("Price",price){price=it};Button({vm.addProduct(Product(productName=n,packLabel=pack,quantity=q.toDoubleOrNull()?:1.0,price=price.toDoubleOrNull()?:0.0));done()}){Text("Add to Catalog")}}}
-@Composable private fun Expenses(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)ExpenseForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Expenses",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Log Expense")}}};item{Text("Loaded total: ${mwk(s.expenses.sumOf{it.amount})}",fontWeight=FontWeight.Bold,color=Forest)};items(s.expenses){e->Card{Column(Modifier.padding(13.dp)){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(e.category,fontWeight=FontWeight.Bold);Text(mwk(e.amount),fontWeight=FontWeight.Bold)};Text("${e.date} • ${e.notes}",fontSize=12.sp,color=Muted)}}}}}}
+@Composable
+private fun Expenses(
+    s: UiState,
+    vm: AppViewModel
+) {
+    var add by remember { mutableStateOf(false) }
+
+    if (add) {
+        ExpenseForm(vm) {
+            add = false
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Expenses",
+                        fontSize = 23.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Forest
+                    )
+
+                    Button(onClick = { add = true }) {
+                        Text("Log Expense")
+                    }
+                }
+            }
+
+            item {
+                Text(
+                    text = "Loaded total: ${mwk(s.expenses.sumOf { it.amount })}",
+                    fontWeight = FontWeight.Bold,
+                    color = Forest
+                )
+            }
+
+            items(s.expenses) { expense ->
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(13.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = expense.category,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = mwk(expense.amount),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Text(
+                            text = "${expense.date} • ${expense.notes}",
+                            fontSize = 12.sp,
+                            color = Muted
+                        )
+                    }
+                }
+            }
+
+            if (s.expenses.isEmpty()) {
+                item {
+                    Text(
+                        text = "No expenses yet.",
+                        modifier = Modifier.padding(24.dp),
+                        color = Muted
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable private fun ExpenseForm(vm:AppViewModel,done:()->Unit){var a by remember{mutableStateOf("")};var n by remember{mutableStateOf("")};var c by remember{mutableStateOf("Transport")};Form("Log New Expense",done){Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Transport","Meals","Fuel","Stock Purchase","Other").forEach{x->FilterChip(c==x,{c=x},label={Text(x)},modifier=Modifier.padding(end=4.dp))}};Field("Amount (MWK)",a){a=it};Field("Notes",n){n=it};Button({vm.addExpense(Expense(date=nowDate(),category=c,amount=a.toDoubleOrNull()?:0.0,notes=n));done()}){Text("Log Expense")}}}
 @Composable
 private fun VisitLog(s: UiState, vm: AppViewModel) {
