@@ -17,6 +17,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,7 +36,8 @@ private val Forest=Color(0xFF14401F);private val Forest2=Color(0xFF1F5C30);priva
 @Composable private fun Login(s:UiState,vm:AppViewModel){
  var email by remember{mutableStateOf("")};var pass by remember{mutableStateOf("")}
  Box(Modifier.fillMaxSize().background(Cream),contentAlignment=Alignment.Center){Card(Modifier.padding(22.dp).fillMaxWidth(),shape=RoundedCornerShape(16.dp)){Column(Modifier.padding(22.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
-  Text("Naisi Foods",fontSize=30.sp,fontWeight=FontWeight.Bold,color=Forest);Text("Invoice & Sales Management",color=Muted)
+  Image(painterResource(R.drawable.naisi_logo),contentDescription="Naisi Foods",modifier=Modifier.fillMaxWidth().height(110.dp),contentScale=ContentScale.Fit)
+  Text("Invoice & Sales Management",color=Muted)
   OutlinedTextField(email,{email=it},label={Text("Email")},modifier=Modifier.fillMaxWidth())
   OutlinedTextField(pass,{pass=it},label={Text("Password")},modifier=Modifier.fillMaxWidth())
   s.error?.let{Text(it,color=MaterialTheme.colorScheme.error,fontSize=12.sp)}
@@ -45,7 +48,7 @@ private val Forest=Color(0xFF14401F);private val Forest2=Color(0xFF1F5C30);priva
 @Composable private fun Workspace(s:UiState,vm:AppViewModel){
  val manager=s.role=="manager";val delivery=s.role=="delivery"
  val tabs=when{s.role=="manager"->listOf("Home","Orders","Invoices","Customers","Products","Expenses","Summary");delivery->listOf("Home","Deliveries","Expenses");else->listOf("Home","My Orders","Customers","Log Visit","My Visits","Expenses")}
- Scaffold(topBar={TopAppBar(title={Column{Text("Naisi Foods",fontWeight=FontWeight.Bold);Text(if(manager)"Management" else if(delivery)"Delivery" else "Sales Rep",fontSize=11.sp,color=Leaf)}},actions={TextButton(vm::signOut){Text("Log Out",color=Color.White)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=Forest,titleContentColor=Color.White))},
+ Scaffold(topBar={TopAppBar(title={Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)){Image(painterResource(R.drawable.naisi_logo),contentDescription="Naisi Foods",modifier=Modifier.height(42.dp).width(88.dp),contentScale=ContentScale.Fit);Column{Text(if(manager)"Management" else if(delivery)"Delivery" else "Sales Rep",fontSize=11.sp,color=Leaf)}}},actions={TextButton(vm::signOut){Text("Log Out",color=Color.White)}},colors=TopAppBarDefaults.topAppBarColors(containerColor=Forest,titleContentColor=Color.White))},
  bottomBar={NavigationBar{tabs.take(5).forEach{t->NavigationBarItem(selected=s.tab==t,onClick={vm.select(t)},icon={Text(icon(t))},label={Text(t)})}}},containerColor=Cream){pad->Column(Modifier.padding(pad).fillMaxSize()){
   if(tabs.size>5)Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Color(0xFFEAE5D7)).padding(4.dp)){tabs.forEach{t->FilterChip(s.tab==t,{vm.select(t)},label={Text(t)},modifier=Modifier.padding(3.dp))}}
   s.error?.let{Text(it,Modifier.fillMaxWidth().background(Color(0xFFFFE4E0)).padding(8.dp),color=Color(0xFFB3261E),fontSize=12.sp)}
