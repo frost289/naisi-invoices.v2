@@ -7,17 +7,18 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 
 /*
- * Uses the existing Naisi Firebase project so the native app can share
- * the same Auth/Firestore data as the original application.
+ * Uses the registered Android app in the existing Naisi Firebase project.
  *
- * For a production Android registration, replace applicationId below
- * with the Android app's mobilesdk_app_id from Firebase Console, or
- * move to google-services.json as described in README.md.
+ * These values come from the Android app's google-services.json. The JSON file
+ * itself is intentionally kept out of the repository; the required client
+ * configuration is embedded here so GitHub Actions and fresh checkouts can
+ * build without a private CI configuration file.
  */
 object Firebase {
-    private const val API_KEY = "AIzaSyACgsYqYfrZVZ2qL_UvtQXu6bPpY48qeZw"
+    private const val API_KEY = "AIzaSyChcP-S9O_O46Oy2bRSGWwavnzhX6drp_4"
     private const val PROJECT_ID = "naisi-invoices"
-    private const val EXISTING_CLIENT_APP_ID = "1:555183502792:web:a9e1d1329e45eedc43bcfd"
+    private const val ANDROID_APP_ID = "1:555183502792:android:e818d480dac74ec443bcfd"
+    private const val STORAGE_BUCKET = "naisi-invoices.firebasestorage.app"
 
     lateinit var auth: FirebaseAuth
     lateinit var db: FirebaseFirestore
@@ -27,8 +28,8 @@ object Firebase {
             val options = FirebaseOptions.Builder()
                 .setApiKey(API_KEY)
                 .setProjectId(PROJECT_ID)
-                .setApplicationId(EXISTING_CLIENT_APP_ID)
-                .setStorageBucket("naisi-invoices.firebasestorage.app")
+                .setApplicationId(ANDROID_APP_ID)
+                .setStorageBucket(STORAGE_BUCKET)
                 .build()
             FirebaseApp.initializeApp(context, options)
         }
