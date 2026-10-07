@@ -88,7 +88,7 @@ In Firebase Console:
    `app/google-services.json`
 6. For the long-term production configuration, replace the programmatic Firebase client app ID in `Firebase.kt` with the Android app's `mobilesdk_app_id`, or migrate the project to the standard Google Services Gradle plugin setup using the downloaded JSON.
 
-Firebase's documentation recommends registering the Android package and adding `google-services.json`; the package name is case-sensitive and is tied to the registered app. citeturn724081search1turn724081search0
+Firebase's documentation recommends registering the Android package and adding `google-services.json`; the package name is case-sensitive and is tied to the registered app.
 
 ### Authentication
 
@@ -114,7 +114,7 @@ Then:
 6. Connect an Android phone with USB debugging enabled, or start an emulator.
 7. Press **Run**.
 
-The project uses Java/JDK 17. The Android Gradle Plugin version used here is 9.1.1, which supports Android API 37; Gradle 9.3.1 is used by the build workflow. citeturn529833search0
+The project uses Java/JDK 17. The Android Gradle Plugin version used here is 9.1.1, which supports Android API 37; Gradle 9.3.1 is used by the build workflow.
 
 ---
 
@@ -154,7 +154,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Do **not** use the debug APK as the public production build.
 
-Android requires distributable APKs to be digitally signed. Keep the release keystore and private key somewhere safe; losing the signing key can prevent you from shipping updates to the same application ID. citeturn181636search0turn181636search6
+Android requires distributable APKs to be digitally signed. Keep the release keystore and private key somewhere safe; losing the signing key can prevent you from shipping updates to the same application ID.
 
 ### Android Studio release workflow
 
@@ -171,7 +171,7 @@ The resulting file will normally be under:
 
 `app/build/outputs/apk/release/app-release.apk`
 
-Android Studio's official release flow supports both signed APKs and signed App Bundles. citeturn181636search1
+Android Studio's official release flow supports both signed APKs and signed App Bundles.
 
 ### Important signing rule
 
@@ -188,7 +188,7 @@ Also keep the same **application ID** forever once the app is distributed:
 
 `com.frost289.naisiinvoices`
 
-Changing the application ID creates a different Android application and is not an upgrade of the existing one. citeturn181636search0
+Changing the application ID creates a different Android application and is not an upgrade of the existing one.
 
 ---
 
@@ -196,7 +196,7 @@ Changing the application ID creates a different Android application and is not a
 
 Use a **signed APK** when you want to give the installation file directly to a small set of users or distribute it through your own website/file-sharing system.
 
-Use an **Android App Bundle (`.aab`)** when publishing through Google Play. Google Play uses App Bundles to generate optimized APKs for users' devices, and Play App Signing is part of the normal Play publishing flow. citeturn181636search1turn181636search8
+Use an **Android App Bundle (`.aab`)** when publishing through Google Play. Google Play uses App Bundles to generate optimized APKs for users' devices, and Play App Signing is part of the normal Play publishing flow.
 
 For a Play build:
 
@@ -219,7 +219,7 @@ A simple first distribution flow is:
 5. Users install the APK.
 6. When you publish an update, increase `versionCode` in `app/build.gradle.kts` and build a new signed release using the **same signing key**.
 
-Android supports distribution outside Google Play. Android's developer-verification rollout is now active in selected regions and is scheduled to expand globally during 2027, so registering the developer identity and package name is a good long-term distribution step. Developers distributing exclusively outside Google Play can use the Android Developer Console, which currently offers a special account type for students/hobbyists with fewer verification requirements and no fee. citeturn977542search0turn977542search1turn977542search5
+Android supports distribution outside Google Play. Android's developer-verification rollout is now active in selected regions and is scheduled to expand globally during 2027, so registering the developer identity and package name is a good long-term distribution step. Developers distributing exclusively outside Google Play can use the Android Developer Console, which currently offers a special account type for students/hobbyists with fewer verification requirements and no fee.
 
 ---
 
@@ -324,7 +324,7 @@ Check that:
 - Firestore is enabled
 - your Firebase security rules allow the signed-in role to perform the operation
 
-Firebase requires valid API key, Project ID and Application ID values for initialization. For a proper Android registration, use the Android app's `google-services.json` / `mobilesdk_app_id`. citeturn674441search0
+Firebase requires valid API key, Project ID and Application ID values for initialization. For a proper Android registration, use the Android app's `google-services.json` / `mobilesdk_app_id`.
 
 ### Users cannot update an older APK
 
