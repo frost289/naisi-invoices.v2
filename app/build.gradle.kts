@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.frost289.naisiinvoices"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.frost289.naisiinvoices"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
     }
@@ -50,5 +50,4 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
-    implementation("com.google.android.gms:play-services-location:21.3.0")
 }
