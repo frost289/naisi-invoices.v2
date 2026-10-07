@@ -32,8 +32,6 @@ class AppViewModel:ViewModel(){
  fun addInvoice(i:Invoice,orderId:String?=null,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.addInvoice(i,_state.value.uid);if(orderId!=null){val inv=repo.invoices().firstOrNull{it.invoiceNo==n};if(inv!=null)repo.markOrderInvoiced(orderId,inv.id,n)};onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
  fun approveOrder(o:Order)=viewModelScope.launch{try{repo.approveOrderWithStock(o,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
  fun deliverOrder(id:String)=viewModelScope.launch{try{repo.markDelivered(id,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
- fun changeOrder(id:String,status:String)=viewModelScope.launch{try{repo.setOrderStatus(id,status);loadAll()}catch(e:Exception){error(e.message)}}
- fun adjustStock(p:Product,delta:Double,reason:String)=viewModelScope.launch{try{repo.adjustStock(p.id,delta,_state.value.uid,_state.value.userEmail,reason);loadAll()}catch(e:Exception){error(e.message)}}
  private fun error(m:String?){_state.value=_state.value.copy(loading=false,error=m?: "Unknown error")}
  fun clearError(){_state.value=_state.value.copy(error=null)}
 }
