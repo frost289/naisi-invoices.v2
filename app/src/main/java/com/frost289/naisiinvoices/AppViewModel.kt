@@ -29,7 +29,7 @@ class AppViewModel:ViewModel(){
  fun addExpense(e:Expense)=viewModelScope.launch{try{repo.addExpense(e,_state.value.uid,_state.value.userEmail);loadAll()}catch(x:Exception){error(x.message)}}
  fun submitOrder(o:Order,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.submitOrder(o,_state.value.uid,_state.value.userEmail);onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
  fun addVisit(v:Visit,customerId:String,onDone:()->Unit={})=viewModelScope.launch{try{repo.addVisit(v,_state.value.uid,_state.value.userEmail,customerId);onDone();loadAll()}catch(e:Exception){error(e.message)}}
- fun addInvoice(i:Invoice,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.addInvoice(i,_state.value.uid);onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
+ fun addInvoice(i:Invoice,orderId:String?=null,onDone:(String)->Unit={})=viewModelScope.launch{try{val n=repo.addInvoice(i,_state.value.uid);if(orderId!=null){val inv=repo.invoices().firstOrNull{it.invoiceNo==n};if(inv!=null)repo.markOrderInvoiced(orderId,inv.id,n)};onDone(n);loadAll()}catch(e:Exception){error(e.message)}}
  fun approveOrder(o:Order)=viewModelScope.launch{try{repo.approveOrderWithStock(o,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
  fun deliverOrder(id:String)=viewModelScope.launch{try{repo.markDelivered(id,_state.value.uid,_state.value.userEmail);loadAll()}catch(e:Exception){error(e.message)}}
  fun changeOrder(id:String,status:String)=viewModelScope.launch{try{repo.setOrderStatus(id,status);loadAll()}catch(e:Exception){error(e.message)}}
