@@ -24,7 +24,7 @@ class NaisiRepository(private val db:FirebaseFirestore){
    if(!os.exists()||os.getString("status")!="Submitted") throw IllegalStateException("This order is no longer Submitted.")
    val tracked=(o.items).filter{it.productId!=null}
    val snaps=tracked.map{tx.get(db.collection("products").document(it.productId!!))}
-   if(!allowNegative){tracked.forEachIndexed{i,it->{val have=snaps[i].getDouble("stockOnHand")?:0.0;if(it.qty>have)throw IllegalStateException("Insufficient stock for ${it.desc}: need ${it.qty}, have $have")}}
+   tracked.forEachIndexed{i,it->{val have=snaps[i].getDouble("stockOnHand")?:0.0;if(it.qty>have)throw IllegalStateException("Insufficient stock for ${it.desc}: need ${it.qty}, have $have")}}
    tx.update(orderRef,mapOf("status" to "Approved","stockApplied" to true,"approvedAt" to Timestamp.now(),"updatedAt" to Timestamp.now()))
    tracked.forEachIndexed{i,it->{val snap=snaps[i];if(!snap.exists())return@forEachIndexed;val ref=db.collection("products").document(it.productId!!);val old=snap.getDouble("stockOnHand")?:0.0;val next=old-it.qty;tx.update(ref,mapOf("stockOnHand" to next,"updatedAt" to Timestamp.now()));tx.set(db.collection("stockMovements").document(),mapOf("productId" to it.productId,"productName" to (snap.getString("productName")?:""),"packLabel" to (snap.getString("packLabel")?:""),"type" to "order-approved","delta" to -it.qty,"previousStock" to old,"newStock" to next,"reason" to "","orderId" to o.id,"orderNo" to o.orderNo,"createdBy" to uid,"createdByEmail" to email,"createdAt" to Timestamp.now()))}
   }.await()
