@@ -83,25 +83,170 @@ private fun icon(t:String)=when(t){"Home"->"⌂";"Orders"->"□";"Deliveries"->"
 @Composable private fun ProductForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var pack by remember{mutableStateOf("")};var q by remember{mutableStateOf("")};var price by remember{mutableStateOf("")};Form("Add Product",done){Field("Product Name",n){n=it};Field("Pack",pack){pack=it};Field("Pack Quantity",q){q=it};Field("Price",price){price=it};Button({vm.addProduct(Product(productName=n,packLabel=pack,quantity=q.toDoubleOrNull()?:1.0,price=price.toDoubleOrNull()?:0.0));done()}){Text("Add to Catalog")}}}
 @Composable private fun Expenses(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)ExpenseForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Expenses",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Log Expense")}}};item{Text("Loaded total: ${mwk(s.expenses.sumOf{it.amount})}",fontWeight=FontWeight.Bold,color=Forest)};items(s.expenses){e->Card{Column(Modifier.padding(13.dp)){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(e.category,fontWeight=FontWeight.Bold);Text(mwk(e.amount),fontWeight=FontWeight.Bold)};Text("${e.date} • ${e.notes}",fontSize=12.sp,color=Muted)}}}}}}
 @Composable private fun ExpenseForm(vm:AppViewModel,done:()->Unit){var a by remember{mutableStateOf("")};var n by remember{mutableStateOf("")};var c by remember{mutableStateOf("Transport")};Form("Log New Expense",done){Row(Modifier.horizontalScroll(rememberScrollState())){listOf("Transport","Meals","Fuel","Stock Purchase","Other").forEach{x->FilterChip(c==x,{c=x},label={Text(x)},modifier=Modifier.padding(end=4.dp))}};Field("Amount (MWK)",a){a=it};Field("Notes",n){n=it};Button({vm.addExpense(Expense(date=nowDate(),category=c,amount=a.toDoubleOrNull()?:0.0,notes=n));done()}){Text("Log Expense")}}}
-@Composable private fun VisitLog(s:UiState,vm:AppViewModel){
- var customer by remember{mutableStateOf<Customer?>(null)};var outcome by remember{mutableStateOf("Order Placed")};var reason by remember{mutableStateOf("")};var notes by remember{mutableStateOf("")};var qty by remember{mutableStateOf("1")};val cart=remember{mutableStateListOf<LineItem>()}
- LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-  item{Text("Log Visit",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest)}
-  items(s.customers.filter{it.active}){cst->Card(Modifier.fillMaxWidth().clickable{customer=cst}){Row(Modifier.padding(13.dp),horizontalArrangement=Arrangement.SpaceBetween){Text(cst.name);if(customer?.id==cst.id)Text("Selected",color=Forest2)}}}
-  customer?.let{cst->item{Card{Column(Modifier.padding(13.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-   Row{FilterChip(outcome=="Order Placed",{outcome="Order Placed"},label={Text("Order Placed")});Spacer(Modifier.width(8.dp));FilterChip(outcome=="No Order",{outcome="No Order"},label={Text("No Order")})}
-   if(outcome=="No Order"){Field("Reason",reason){reason=it};Field("Notes",notes){notes=it}} else {
-    Text("Quick add products",fontWeight=FontWeight.Bold,color=Forest)
-    s.products.forEach{p->Button({cart.add(LineItem(qty.toDoubleOrNull()?:1.0,"${p.productName} — ${p.packLabel}",p.price,p.productName,p.packLabel,p.quantity,p.id))},modifier=Modifier.fillMaxWidth()){Text("${p.productName} • ${p.packLabel} — ${mwk(p.price)}")}}
-    Field("Quantity",qty){qty=it}
-    cart.forEachIndexed{index,it->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("${it.qty} × ${it.desc}");Text(mwk(it.total));TextButton({cart.removeAt(index)}){Text("Remove")}}}
-    Field("Notes",notes){notes=it}
-   }
-   Button({if(outcome=="Order Placed"&&cart.isNotEmpty()){val order=Order(customerId=cst.id,customerName=cst.name,customerPhone=cst.phone,customerLocation=cst.location,items=cart.toList(),notes=notes);vm.submitOrder(order){vm.addVisit(Visit(customerName=cst.name,outcome="Order Placed"),cst.id){customer=null;cart.clear()}}}else if(outcome=="No Order"){vm.addVisit(Visit(customerName=cst.name,outcome="No Order",reason=reason,notes=notes),cst.id){customer=null}}},modifier=Modifier.fillMaxWidth()){Text(if(outcome=="Order Placed")"Submit Order & Log Visit" else "Save Visit")}
-  }}}
-  }}
- }
+@Composable
+private fun VisitLog(s: UiState, vm: AppViewModel) {
+    var customer by remember { mutableStateOf<Customer?>(null) }
+    var outcome by remember { mutableStateOf("Order Placed") }
+    var reason by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+    var qty by remember { mutableStateOf("1") }
+    val cart = remember { mutableStateListOf<LineItem>() }
+
+    LazyColumn(
+        Modifier.fillMaxSize().padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Text(
+                "Log Visit",
+                fontSize = 23.sp,
+                fontWeight = FontWeight.Bold,
+                color = Forest
+            )
+        }
+
+        items(s.customers.filter { it.active }) { cst ->
+            Card(
+                Modifier.fillMaxWidth().clickable { customer = cst }
+            ) {
+                Row(
+                    Modifier.padding(13.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(cst.name)
+                    if (customer?.id == cst.id) {
+                        Text("Selected", color = Forest2)
+                    }
+                }
+            }
+        }
+
+        customer?.let { cst ->
+            item {
+                Card {
+                    Column(
+                        Modifier.padding(13.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row {
+                            FilterChip(
+                                selected = outcome == "Order Placed",
+                                onClick = { outcome = "Order Placed" },
+                                label = { Text("Order Placed") }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            FilterChip(
+                                selected = outcome == "No Order",
+                                onClick = { outcome = "No Order" },
+                                label = { Text("No Order") }
+                            )
+                        }
+
+                        if (outcome == "No Order") {
+                            Field("Reason", reason) { reason = it }
+                            Field("Notes", notes) { notes = it }
+                        } else {
+                            Text(
+                                "Quick add products",
+                                fontWeight = FontWeight.Bold,
+                                color = Forest
+                            )
+
+                            s.products.forEach { product ->
+                                Button(
+                                    onClick = {
+                                        cart.add(
+                                            LineItem(
+                                                qty = qty.toDoubleOrNull() ?: 1.0,
+                                                desc = "${product.productName} — ${product.packLabel}",
+                                                price = product.price,
+                                                productName = product.productName,
+                                                packLabel = product.packLabel,
+                                                packQuantity = product.quantity,
+                                                productId = product.id
+                                            )
+                                        )
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        "${product.productName} • ${product.packLabel} — ${mwk(product.price)}"
+                                    )
+                                }
+                            }
+
+                            Field("Quantity", qty) { qty = it }
+
+                            cart.forEachIndexed { index, item ->
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("${item.qty} × ${item.desc}")
+                                    Text(mwk(item.total))
+                                    TextButton(onClick = { cart.removeAt(index) }) {
+                                        Text("Remove")
+                                    }
+                                }
+                            }
+
+                            Field("Notes", notes) { notes = it }
+                        }
+
+                        Button(
+                            onClick = {
+                                if (outcome == "Order Placed" && cart.isNotEmpty()) {
+                                    val order = Order(
+                                        customerId = cst.id,
+                                        customerName = cst.name,
+                                        customerPhone = cst.phone,
+                                        customerLocation = cst.location,
+                                        items = cart.toList(),
+                                        notes = notes
+                                    )
+                                    vm.submitOrder(order) {
+                                        vm.addVisit(
+                                            Visit(
+                                                customerName = cst.name,
+                                                outcome = "Order Placed"
+                                            ),
+                                            cst.id
+                                        ) {
+                                            customer = null
+                                            cart.clear()
+                                        }
+                                    }
+                                } else if (outcome == "No Order") {
+                                    vm.addVisit(
+                                        Visit(
+                                            customerName = cst.name,
+                                            outcome = "No Order",
+                                            reason = reason,
+                                            notes = notes
+                                        ),
+                                        cst.id
+                                    ) {
+                                        customer = null
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                if (outcome == "Order Placed") {
+                                    "Submit Order & Log Visit"
+                                } else {
+                                    "Save Visit"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
+
 @Composable private fun Summary(s:UiState){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text("Business Summary",fontSize=24.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Info("Invoice Revenue",mwk(s.invoices.sumOf{it.grandTotal}))};item{Info("Expenses",mwk(s.expenses.sumOf{it.amount}))};item{Info("Net Cashflow",mwk(s.invoices.sumOf{it.grandTotal}-s.expenses.sumOf{it.amount}))};item{Info("Orders","${s.orders.count{it.status=="Submitted"}} submitted • ${s.orders.count{it.status=="Approved"}} approved • ${s.orders.count{it.status=="Delivered"}} delivered")}}}
 @Composable private fun Form(title:String,done:()->Unit,content:@Composable ColumnScope.()->Unit){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){item{Text(title,fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Column(verticalArrangement=Arrangement.spacedBy(9.dp),content=content)};item{Button(done){Text("Cancel")}}}}
 @Composable private fun Field(label:String,value:String,onValue:(String)->Unit){OutlinedTextField(value,onValue,label={Text(label)},modifier=Modifier.fillMaxWidth())}
