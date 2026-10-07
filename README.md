@@ -72,23 +72,11 @@ Do not rename these collections without changing the Android repository and the 
 
 ## 3. Firebase setup before distributing the app
 
-The current Android branch contains Firebase client configuration for the existing Naisi Firebase project so the project can be developed and built without copying the web application's source tree.
+The Android package `com.frost289.naisiinvoices` is now registered in the existing **naisi-invoices** Firebase project.
 
-For a proper production Android registration, register this package in the Firebase project:
+The downloaded `google-services.json` was used to configure the native app. The Android client values are currently embedded in `Firebase.kt`, while the JSON file remains excluded from Git so it is not committed to the repository.
 
-`com.frost289.naisiinvoices`
-
-In Firebase Console:
-
-1. Open the existing **naisi-invoices** project.
-2. Add an **Android app**.
-3. Enter package name `com.frost289.naisiinvoices`.
-4. Download the generated `google-services.json`.
-5. Put the file in the Android module:
-   `app/google-services.json`
-6. For the long-term production configuration, replace the programmatic Firebase client app ID in `Firebase.kt` with the Android app's `mobilesdk_app_id`, or migrate the project to the standard Google Services Gradle plugin setup using the downloaded JSON.
-
-Firebase's documentation recommends registering the Android package and adding `google-services.json`; the package name is case-sensitive and is tied to the registered app.
+If you register the app again or download a replacement configuration file, update `Firebase.kt` with the new Android app's `mobilesdk_app_id` and client values.
 
 ### Authentication
 
@@ -340,8 +328,8 @@ Make sure you are:
 
 Before sending the APK to real users:
 
-- [ ] Firebase Android app registered
-- [ ] Production Firebase configuration installed
+- [x] Firebase Android app registered
+- [x] Android Firebase client configuration applied
 - [ ] Email/password authentication tested
 - [ ] Firestore rules tested
 - [ ] Real phone tested
