@@ -97,6 +97,22 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    fun updateCustomerPinnedLocation(
+        customerId: String,
+        location: String,
+        lat: Double,
+        lng: Double,
+        onDone: () -> Unit = {}
+    ) = viewModelScope.launch {
+        try {
+            repo.updateCustomerPinnedLocation(customerId, location, lat, lng)
+            onDone()
+            loadAll()
+        } catch (e: Exception) {
+            error(e.message)
+        }
+    }
+
     fun addProduct(product: Product) = viewModelScope.launch {
         try {
             repo.addProduct(product, _state.value.uid)

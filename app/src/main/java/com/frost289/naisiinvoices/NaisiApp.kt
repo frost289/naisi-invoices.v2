@@ -52,6 +52,7 @@ private val Forest=Color(0xFF14401F);private val Forest2=Color(0xFF1F5C30);priva
  }}
 }
 private fun icon(t:String)=when(t){"Home"->"⌂";"Orders"->"□";"Deliveries"->"↗";"Invoices"->"▤";"Customers"->"♙";"Products"->"▦";"Expenses"->"₵";"Log Visit"->"✓";"My Visits"->"☷";else->"•"}
+private fun customerPinnedLocation(c:Customer)=pinnedLocationText(c.lat,c.lng).ifBlank { c.location.ifBlank { "No pinned location" } }
 
 @Composable private fun Home(s:UiState){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){item{Text("Welcome back",fontSize=24.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Metric("Products",s.products.size.toString(),Modifier.weight(1f));Metric("Customers",s.customers.count{it.active}.toString(),Modifier.weight(1f));Metric("Orders",s.orders.size.toString(),Modifier.weight(1f))}};item{Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Metric("Invoices",s.invoices.size.toString(),Modifier.weight(1f));Metric("Submitted",s.orders.count{it.status=="Submitted"}.toString(),Modifier.weight(1f));Metric("Approved",s.orders.count{it.status=="Approved"}.toString(),Modifier.weight(1f))}};item{Info("Workflow",if(s.role=="submitter")"Log visits, create orders, then track My Orders." else "Review orders, manage stock, generate invoices, and review reports.")}}}
 @Composable private fun Metric(a:String,b:String,modifier:Modifier=Modifier){Card(modifier){Column(Modifier.padding(12.dp)){Text(a,fontSize=11.sp,color=Muted);Text(b,fontSize=22.sp,fontWeight=FontWeight.Bold,color=Forest)}}}
@@ -77,8 +78,8 @@ private fun icon(t:String)=when(t){"Home"->"⌂";"Orders"->"□";"Deliveries"->"
  Column(verticalArrangement=Arrangement.spacedBy(8.dp)){Text("Invoice details",fontSize=19.sp,fontWeight=FontWeight.Bold,color=Forest);OutlinedTextField(date,{date=it},label={Text("Date")},modifier=Modifier.fillMaxWidth());OutlinedTextField(phone,{phone=it},label={Text("Provider Phone")},modifier=Modifier.fillMaxWidth());Row(Modifier.horizontalScroll(rememberScrollState())){listOf("CASH ON DELIVERY (COD)","CASH","BANK TRANSFER","MOBILE MONEY","NET 7","NET 30").forEach{x->FilterChip(terms==x,{terms=x},label={Text(x)},modifier=Modifier.padding(end=4.dp))}};Button({vm.addInvoice(Invoice(date=date,customer=o.customerName,customerId=o.customerId,phone=o.customerPhone,location=o.customerLocation,terms=terms,providerPhone=phone,items=o.items),o.id){done()}},modifier=Modifier.fillMaxWidth()){Text("Generate & Save Invoice")}}
 }
 @Composable private fun Invoices(s:UiState){val ctx=LocalContext.current;LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Text("Invoices",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest)};items(s.invoices){i->Card{Column(Modifier.padding(13.dp)){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(i.invoiceNo,fontWeight=FontWeight.Bold);Text(mwk(i.grandTotal),fontWeight=FontWeight.Bold,color=Forest)};Text(i.customer);Text("${i.date} • ${i.location}",fontSize=12.sp,color=Muted);Button({sharePdf(ctx,i)}){Text("Share PDF")}}}}}}
-@Composable private fun Customers(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)CustomerForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Customers",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Add")}}};items(s.customers.filter{it.active}){c->Card{Column(Modifier.padding(13.dp)){Text(c.name,fontWeight=FontWeight.Bold);Text(c.phone);Text(c.location,color=Muted)}}}}}
-@Composable private fun CustomerForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var p by remember{mutableStateOf("")};var l by remember{mutableStateOf("")};Form("Add Customer",done){Field("Customer Name",n){n=it};Field("Phone",p){p=it};Field("Location",l){l=it};Button({vm.addCustomer(Customer(name=n,phone=normalizePhone(p),location=l,assignedDay="Mon"));done()}){Text("Save Customer")}}}
+@Composable private fun Customers(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)CustomerForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Customers",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Add")}}};items(s.customers.filter{it.active}){c->Card{Column(Modifier.padding(13.dp)){Text(c.name,fontWeight=FontWeight.Bold);Text(c.phone);Text(customerPinnedLocation(c),color=Muted)}}}}}
+@Composable private fun CustomerForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var p by remember{mutableStateOf("")};var l by remember{mutableStateOf("")};var lat by remember{mutableStateOf("")};var lng by remember{mutableStateOf("")};val latValue=lat.toDoubleOrNull();val lngValue=lng.toDoubleOrNull();val canSave=n.isNotBlank()&&normalizePhone(p).isNotBlank()&&l.isNotBlank()&&latValue!=null&&lngValue!=null;Form("Add Customer",done){Field("Customer Name",n){n=it};Field("Phone",p){p=it};Field("Location Label",l){l=it};Field("Pinned Latitude",lat){lat=it};Field("Pinned Longitude",lng){lng=it};Button({if(latValue!=null&&lngValue!=null){vm.addCustomer(Customer(name=n,phone=normalizePhone(p),location=l,lat=latValue,lng=lngValue,assignedDay="Mon"));done()}},enabled=canSave){Text("Save Customer")}}}
 @Composable private fun Products(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)ProductForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Products",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);if(s.role=="manager")Button({add=true}){Text("Add")}}};items(s.products){p->Card{Column(Modifier.padding(13.dp)){Text(p.productName,fontWeight=FontWeight.Bold);Text("${p.packLabel} • Qty ${p.quantity}",fontSize=12.sp);Text("Price ${mwk(p.price)}");Text("Stock ${p.stockOnHand}",fontWeight=FontWeight.Bold,color=if(p.stockOnHand<=0)MaterialTheme.colorScheme.error else Forest2)}}}}}}
 @Composable private fun ProductForm(vm:AppViewModel,done:()->Unit){var n by remember{mutableStateOf("")};var pack by remember{mutableStateOf("")};var q by remember{mutableStateOf("")};var price by remember{mutableStateOf("")};Form("Add Product",done){Field("Product Name",n){n=it};Field("Pack",pack){pack=it};Field("Pack Quantity",q){q=it};Field("Price",price){price=it};Button({vm.addProduct(Product(productName=n,packLabel=pack,quantity=q.toDoubleOrNull()?:1.0,price=price.toDoubleOrNull()?:0.0));done()}){Text("Add to Catalog")}}}
 @Composable private fun Expenses(s:UiState,vm:AppViewModel){var add by remember{mutableStateOf(false)};if(add)ExpenseForm(vm){add=false}else LazyColumn(Modifier.fillMaxSize().padding(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text("Expenses",fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest);Button({add=true}){Text("Log Expense")}}};item{Text("Loaded total: ${mwk(s.expenses.sumOf{it.amount})}",fontWeight=FontWeight.Bold,color=Forest)};items(s.expenses){e->Card{Column(Modifier.padding(13.dp)){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(e.category,fontWeight=FontWeight.Bold);Text(mwk(e.amount),fontWeight=FontWeight.Bold)};Text("${e.date} • ${e.notes}",fontSize=12.sp,color=Muted)}}}}}}
@@ -90,6 +91,10 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
     var reason by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var qty by remember { mutableStateOf("1") }
+    var pinLabel by remember { mutableStateOf("") }
+    var pinLat by remember { mutableStateOf("") }
+    var pinLng by remember { mutableStateOf("") }
+    var locationPrompt by remember { mutableStateOf<String?>(null) }
     val cart = remember { mutableStateListOf<LineItem>() }
 
     LazyColumn(
@@ -107,7 +112,13 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
 
         items(s.customers.filter { it.active }) { cst ->
             Card(
-                Modifier.fillMaxWidth().clickable { customer = cst }
+                Modifier.fillMaxWidth().clickable {
+                    customer = cst
+                    pinLabel = cst.location
+                    pinLat = cst.lat?.toString().orEmpty()
+                    pinLng = cst.lng?.toString().orEmpty()
+                    locationPrompt = null
+                }
             ) {
                 Row(
                     Modifier.padding(13.dp),
@@ -122,12 +133,40 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
         }
 
         customer?.let { cst ->
+            val latValue = pinLat.toDoubleOrNull()
+            val lngValue = pinLng.toDoubleOrNull()
+            val hasPin = hasPinnedLocation(cst)
             item {
                 Card {
                     Column(
                         Modifier.padding(13.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Text("Delivery pin: ${customerPinnedLocation(cst)}", color = Muted, fontSize = 12.sp)
+
+                        if (!hasPin) {
+                            Text(
+                                "This customer needs a pinned location before an order can be submitted.",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Field("Location Label", pinLabel) { pinLabel = it }
+                            Field("Pinned Latitude", pinLat) { pinLat = it }
+                            Field("Pinned Longitude", pinLng) { pinLng = it }
+                            Button(
+                                onClick = {
+                                    if (latValue != null && lngValue != null && pinLabel.isNotBlank()) {
+                                        vm.updateCustomerPinnedLocation(cst.id, pinLabel, latValue, lngValue) {
+                                            customer = null
+                                        }
+                                        locationPrompt = null
+                                    } else {
+                                        locationPrompt = "Enter a valid label, latitude and longitude."
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Save Pinned Location") }
+                        }
+
                         Row {
                             FilterChip(
                                 selected = outcome == "Order Placed",
@@ -195,12 +234,14 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
 
                         Button(
                             onClick = {
-                                if (outcome == "Order Placed" && cart.isNotEmpty()) {
+                                if (outcome == "Order Placed" && !hasPin) {
+                                    locationPrompt = "Add and save a pinned location before submitting this order."
+                                } else if (outcome == "Order Placed" && cart.isNotEmpty()) {
                                     val order = Order(
                                         customerId = cst.id,
                                         customerName = cst.name,
                                         customerPhone = cst.phone,
-                                        customerLocation = cst.location,
+                                        customerLocation = pinnedLocationText(cst.lat, cst.lng),
                                         items = cart.toList(),
                                         notes = notes
                                     )
@@ -230,6 +271,7 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
                                     }
                                 }
                             },
+                            enabled = outcome == "No Order" || (hasPin && cart.isNotEmpty()),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
@@ -240,6 +282,9 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
                                 }
                             )
                         }
+                        locationPrompt?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -247,7 +292,13 @@ private fun VisitLog(s: UiState, vm: AppViewModel) {
     }
 }
 
-@Composable private fun Summary(s:UiState){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text("Business Summary",fontSize=24.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Info("Invoice Revenue",mwk(s.invoices.sumOf{it.grandTotal}))};item{Info("Expenses",mwk(s.expenses.sumOf{it.amount}))};item{Info("Net Cashflow",mwk(s.invoices.sumOf{it.grandTotal}-s.expenses.sumOf{it.amount}))};item{Info("Orders","${s.orders.count{it.status=="Submitted"}} submitted • ${s.orders.count{it.status=="Approved"}} approved • ${s.orders.count{it.status=="Delivered"}} delivered")}}}
+@Composable private fun Summary(s:UiState){
+    val delivered = s.orders.filter { it.status == "Delivered" && it.invoicedAtMillis != null && it.deliveredAtMillis != null }
+    val avgHours = if (delivered.isNotEmpty()) delivered.map { (it.deliveredAtMillis!! - it.invoicedAtMillis!!) / 3_600_000.0 }.average() else null
+    val avgDisplay = avgHours?.let { String.format(java.util.Locale.US, "%.1f h", it) } ?: "No deliveries yet"
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){item{Text("Business Summary",fontSize=24.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Info("Invoice Revenue",mwk(s.invoices.sumOf{it.grandTotal}))};item{Info("Expenses",mwk(s.expenses.sumOf{it.amount}))};item{Info("Net Cashflow",mwk(s.invoices.sumOf{it.grandTotal}-s.expenses.sumOf{it.amount}))};item{Info("Orders","${s.orders.count{it.status=="Submitted"}} submitted • ${s.orders.count{it.status=="Approved"}} approved • ${s.orders.count{it.status=="Delivered"}} delivered")};if(s.role=="manager"){item{Info("Delivery Performance","${s.orders.count{it.status=="Delivered"}} delivered • ${s.orders.count{it.status=="Invoiced"}} awaiting delivery • Avg invoiced→delivered: $avgDisplay")}}}
+}
+
 @Composable private fun Form(title:String,done:()->Unit,content:@Composable ColumnScope.()->Unit){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){item{Text(title,fontSize=23.sp,fontWeight=FontWeight.Bold,color=Forest)};item{Column(verticalArrangement=Arrangement.spacedBy(9.dp),content=content)};item{Button(done){Text("Cancel")}}}}
 @Composable private fun Field(label:String,value:String,onValue:(String)->Unit){OutlinedTextField(value,onValue,label={Text(label)},modifier=Modifier.fillMaxWidth())}
 @Composable private fun Status(s:String){Surface(color=when(s){"Approved"->Color(0xFFE2F0DC);"Submitted"->Color(0xFFFFF0D6);"Rejected","Cancelled"->Color(0xFFFFE4E0);else->Color(0xFFEAEAEA)},shape=RoundedCornerShape(18.dp)){Text(s,Modifier.padding(horizontal=8.dp,vertical=4.dp),fontSize=11.sp,fontWeight=FontWeight.Bold)}}

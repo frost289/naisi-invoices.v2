@@ -60,7 +60,11 @@ class NaisiRepository(private val db: FirebaseFirestore) {
                 d.getString("customerPhone").orEmpty(), d.getString("customerLocation").orEmpty(),
                 (d.get("items") as? List<Map<String, Any?>>)?.map(::line) ?: emptyList(),
                 d.getString("notes").orEmpty(), d.getDouble("grandTotal") ?: 0.0,
-                d.getString("createdBy").orEmpty(), d.getString("createdByEmail").orEmpty())
+                d.getString("createdBy").orEmpty(), d.getString("createdByEmail").orEmpty(),
+                d.getTimestamp("submittedAt")?.toDate()?.time,
+                d.getTimestamp("approvedAt")?.toDate()?.time,
+                d.getTimestamp("invoicedAt")?.toDate()?.time,
+                d.getTimestamp("deliveredAt")?.toDate()?.time)
         }
     }
 
@@ -80,6 +84,17 @@ class NaisiRepository(private val db: FirebaseFirestore) {
             "lat" to c.lat, "lng" to c.lng, "active" to true, "assignedDay" to c.assignedDay,
             "createdBy" to uid, "createdAt" to Timestamp.now(), "updatedAt" to Timestamp.now()
         )).await()
+    }
+
+    suspend fun updateCustomerPinnedLocation(customerId: String, location: String, lat: Double, lng: Double) {
+        db.collection("customers").document(customerId).update(
+            mapOf(
+                "location" to normalizeText(location),
+                "lat" to lat,
+                "lng" to lng,
+                "updatedAt" to Timestamp.now()
+            )
+        ).await()
     }
 
     suspend fun addProduct(p: Product, uid: String) {

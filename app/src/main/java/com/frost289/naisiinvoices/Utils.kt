@@ -6,3 +6,5 @@ fun normalizeText(s:String)=s.trim().replace(Regex("\\s+")," ").split(" ").filte
 fun normalizePhone(raw:String):String{val d=raw.filter(Char::isDigit);val l=when{d.length==10&&d.startsWith("0")->d.drop(1);d.length==12&&d.startsWith("265")->d.drop(3);d.length==9->d;else->return ""};return if(l.length==9)"+265$l" else ""}
 fun nowDate()=java.text.SimpleDateFormat("yyyy-MM-dd",Locale.US).format(java.util.Date())
 fun invoiceNo(prefix:String,n:Long)="$prefix-${java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)}-${n.toString().padStart(4,'0')}"
+fun hasPinnedLocation(c:Customer)=c.lat!=null&&c.lng!=null
+fun pinnedLocationText(lat:Double?,lng:Double?)=if(lat!=null&&lng!=null)"${"%.6f".format(Locale.US,lat)}, ${"%.6f".format(Locale.US,lng)}" else ""
