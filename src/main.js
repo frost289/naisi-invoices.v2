@@ -59,6 +59,8 @@ import {
   fetchPendingDeliveries, fetchDeliveredSince, fetchFailedAttemptsSince,
   earliestNeededStart, buildDeliveryStats, toDate, formatAge
 } from './deliveries.js';
+import { orderStops, getStartPoint, startLabel, formatKm } from './routing.js';
+import { fetchDepot, saveDepot } from './depot.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
@@ -3310,17 +3312,56 @@ async function initApp(user, role) {
     const dayFullNames = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
     const dayAbbrevByJsDay = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']; // JS getDay(): 0=Sun..6=Sat
 
+    // Straight-line route ordering for today's customers. Start = phone GPS,
+    // falling back to the warehouse pin. Unpinned customers go last.
+    let todaysRouteInfo = null; // Map(customerId -> { stopNo, legKm })
+    const todaysRouteOptimizeBtn = document.getElementById('todaysRouteOptimizeBtn');
+    const todaysRouteSummary = document.getElementById('todaysRouteSummary');
+
+    todaysRouteOptimizeBtn.addEventListener('click', async () => {
+      const todayAbbrev = dayAbbrevByJsDay[new Date().getDay()];
+      const todays = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
+      const pinned = todays.filter(hasPin);
+      if (pinned.length === 0) { showToast('None of today\'s customers have a pin yet.', 'error'); return; }
+      setButtonLoading(todaysRouteOptimizeBtn, 'Finding your location…');
+      try {
+        let depot = null;
+        try { depot = await fetchDepot(); } catch (err) { /* no depot saved / not readable */ }
+        const start = await getStartPoint(depot);
+        if (!start) {
+          showToast('Allow location access on your phone, or ask the manager to set the warehouse pin.', 'error');
+          return;
+        }
+        const { ordered, totalKm } = orderStops(start, pinned.map(c => ({ id: c.id, lat: c.lat, lng: c.lng })));
+        todaysRouteInfo = new Map(ordered.map(o => [o.id, { stopNo: o.stopNo, legKm: o.legKm }]));
+        todaysRouteSummary.style.display = 'block';
+        todaysRouteSummary.textContent =
+          `Shortest route from ${startLabel(start)}: about ${formatKm(totalKm)} for ${ordered.length} stop${ordered.length === 1 ? '' : 's'} (straight-line).` +
+          (todays.length > pinned.length ? ` ${todays.length - pinned.length} without a pin are listed last.` : '');
+        renderTodaysRoute();
+      } finally {
+        clearButtonLoading(todaysRouteOptimizeBtn);
+      }
+    });
+
     function renderTodaysRoute() {
       const todayAbbrev = dayAbbrevByJsDay[new Date().getDay()];
       if (!todayAbbrev) { todaysRouteCard.style.display = 'none'; return; } // Sunday — no route
       todaysRouteCard.style.display = 'block';
       todaysRouteDayLabel.textContent = dayFullNames[todayAbbrev];
 
-      const todaysCustomers = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
+      let todaysCustomers = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
       todaysRouteEmpty.style.display = todaysCustomers.length === 0 ? 'block' : 'none';
+      todaysRouteOptimizeBtn.style.display = todaysCustomers.length > 1 ? 'block' : 'none';
+      if (todaysRouteInfo) {
+        todaysCustomers = todaysCustomers.slice().sort((a, b) =>
+          (todaysRouteInfo.get(a.id)?.stopNo ?? 9999) - (todaysRouteInfo.get(b.id)?.stopNo ?? 9999));
+      }
       todaysRouteList.innerHTML = todaysCustomers.map(c => `
         <button type="button" class="todays-route-item" data-id="${c.id}">
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="route-stop-badge">${todaysRouteInfo.get(c.id).stopNo}</span>` : ''}
           <span class="todays-route-name">${c.name}</span>
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="todays-route-location">${formatKm(todaysRouteInfo.get(c.id).legKm)} from previous</span>` : ''}
           ${c.location ? `<span class="todays-route-location">${c.location}</span>` : ''}
           ${hasPin(c) ? '' : '<span class="no-pin-tag">📍 needs pin</span>'}
         </button>
@@ -3494,6 +3535,27 @@ async function initApp(user, role) {
   if (isManager) {
     const delPeriod = document.getElementById('delPeriod');
     const delOverdueHours = document.getElementById('delOverdueHours');
+    // Warehouse pin: the route starting point when a phone's GPS isn't available.
+    const depotStatus = document.getElementById('depotStatus');
+    let depotCache = null;
+    async function refreshDepotStatus() {
+      try { depotCache = await fetchDepot(); } catch (err) { depotCache = null; }
+      depotStatus.textContent = depotCache
+        ? `Set ✓ (${depotCache.lat.toFixed(5)}, ${depotCache.lng.toFixed(5)})`
+        : 'Not set yet — routes will rely on each phone\'s GPS only.';
+      depotStatus.style.color = depotCache ? '#3a7d2c' : '#b3261e';
+    }
+    document.getElementById('depotSetBtn').addEventListener('click', () => {
+      openLocationPicker({
+        label: 'Warehouse', lat: depotCache ? depotCache.lat : null, lng: depotCache ? depotCache.lng : null,
+        onSave: async ({ lat, lng }) => {
+          await saveDepot({ lat, lng, uid: user.uid });
+          await refreshDepotStatus();
+          showToast('Warehouse location saved.', 'success');
+        },
+      });
+    });
+
     delOverdueHours.innerHTML = OVERDUE_HOUR_OPTIONS
       .map(h => `<option value="${h}" ${h === DEFAULT_OVERDUE_HOURS ? 'selected' : ''}>${h} hours</option>`).join('');
 
@@ -3563,6 +3625,7 @@ async function initApp(user, role) {
 
     window.loadDeliveriesView = async function loadDeliveriesView() {
       const refreshBtn = document.getElementById('delRefreshBtn');
+      refreshDepotStatus();
       setButtonLoading(refreshBtn, 'Loading…');
       try {
         const since = earliestNeededStart(new Date());
@@ -3781,6 +3844,10 @@ async function initDeliveryApp(user) {
   const deliveryLoadMoreBtn = document.getElementById('deliveryLoadMoreBtn');
 
   let loadedDeliveries = [], deliveriesCursor = null, deliveriesHasMore = true;
+  const deliverySortBtn = document.getElementById('deliverySortBtn');
+  const deliveryRouteSummary = document.getElementById('deliveryRouteSummary');
+  const deliveryPinCache = new Map();     // orderId -> { lat, lng } | null
+  let deliveryStopInfo = null;            // Map(orderId -> { stopNo, legKm }) once sorted
   let deliveredThisSession = 0;
 
   // ---- Simple expense logging (fuel, transport, meals, other) ----
@@ -3852,6 +3919,13 @@ async function initDeliveryApp(user) {
   // when the order was placed. No pin at all = no map button, a clear
   // warning, and the "couldn't find the location" reason is available.
   async function resolveDeliveryPin(order) {
+    if (deliveryPinCache.has(order.id)) return deliveryPinCache.get(order.id);
+    const pin = await lookupDeliveryPin(order);
+    deliveryPinCache.set(order.id, pin);
+    return pin;
+  }
+
+  async function lookupDeliveryPin(order) {
     if (order.customerId) {
       try {
         const customer = await fetchCustomerById(order.customerId);
@@ -3881,7 +3955,9 @@ async function initDeliveryApp(user) {
     const card = document.createElement('div');
     card.className = 'delivery-card';
     card.dataset.id = order.id;
+    const stop = deliveryStopInfo && deliveryStopInfo.get(order.id);
     card.innerHTML = `
+      ${stop ? `<div class="delivery-stop-badge">Stop ${stop.stopNo} · ${esc(formatKm(stop.legKm))} from previous</div>` : ''}
       <div class="delivery-card-name">${esc(order.customerName || '—')}</div>
       ${pin
         ? `<div class="delivery-card-location">📍 Pinned location${areaLabel ? ` · ${esc(areaLabel)}` : ''}</div>
@@ -3927,6 +4003,62 @@ async function initDeliveryApp(user) {
       clearButtonLoading(deliveryLoadMoreBtn);
     }
   }
+
+  async function loadAllDeliveryPages() {
+    let guard = 0;
+    while (deliveriesHasMore && guard++ < 10) await loadNextDeliveryPage();
+  }
+
+  async function rerenderDeliveryList() {
+    deliveryList.innerHTML = '';
+    for (const order of loadedDeliveries) deliveryList.appendChild(await renderDeliveryCard(order));
+    renderDeliveryEmpty();
+  }
+
+  // Orders the whole waiting list into a short route: GPS first, warehouse
+  // pin as backup. Orders without a pin can't be placed on the route, so
+  // they're listed last.
+  deliverySortBtn.addEventListener('click', async () => {
+    setButtonLoading(deliverySortBtn, 'Finding your location…');
+    try {
+      await loadAllDeliveryPages();
+      let depot = null;
+      try { depot = await fetchDepot(); } catch (err) { /* none saved */ }
+      const start = await getStartPoint(depot);
+      if (!start) {
+        showToast('Turn on location on your phone, or ask the manager to set the warehouse.', 'error');
+        return;
+      }
+      const pinned = [];
+      for (const o of loadedDeliveries) {
+        const pin = await resolveDeliveryPin(o);
+        if (pin) pinned.push({ id: o.id, lat: pin.lat, lng: pin.lng });
+      }
+      if (pinned.length === 0) { showToast('None of these orders have a pinned location.', 'error'); return; }
+      const { ordered, totalKm } = orderStops(start, pinned);
+      deliveryStopInfo = new Map(ordered.map(o => [o.id, { stopNo: o.stopNo, legKm: o.legKm }]));
+      const rank = (o) => deliveryStopInfo.get(o.id)?.stopNo ?? 9999;
+      loadedDeliveries = loadedDeliveries.slice().sort((a, b) => rank(a) - rank(b));
+
+      // Google Maps multi-stop link (first 10 stops; Maps limits waypoints).
+      const first = ordered.slice(0, 10);
+      const dest = first[first.length - 1];
+      const waypoints = first.slice(0, -1).map(p => `${p.lat},${p.lng}`).join('|');
+      const mapsUrl = `https://www.google.com/maps/dir/?api=1` +
+        (start.source === 'depot' ? `&origin=${start.lat},${start.lng}` : '') +
+        `&destination=${dest.lat},${dest.lng}` + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=driving`;
+      deliveryRouteSummary.style.display = 'block';
+      deliveryRouteSummary.innerHTML =
+        `Shortest route from ${esc(startLabel(start))}: about <strong>${esc(formatKm(totalKm))}</strong> (straight-line), ${ordered.length} stop${ordered.length === 1 ? '' : 's'}.` +
+        `${loadedDeliveries.length > ordered.length ? ` ${loadedDeliveries.length - ordered.length} without a pin are listed last.` : ''}` +
+        `<br><a href="${mapsUrl}" target="_blank" rel="noopener" class="delivery-map-btn" style="margin-top:10px;">🗺️ Open route in Google Maps${ordered.length > 10 ? ' (first 10 stops)' : ''}</a>`;
+      await rerenderDeliveryList();
+    } catch (err) {
+      showToast('Could not sort the route: ' + err.message, 'error');
+    } finally {
+      clearButtonLoading(deliverySortBtn);
+    }
+  });
 
   async function resetAndLoadDeliveries() {
     loadedDeliveries = []; deliveriesCursor = null; deliveriesHasMore = true;

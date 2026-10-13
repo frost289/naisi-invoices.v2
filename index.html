@@ -66,6 +66,9 @@
       <div style="font-size:1rem; color:var(--muted); margin-top:4px;">Orders to deliver</div>
     </div>
 
+    <button type="button" id="deliverySortBtn" class="delivery-sort-btn">🧭 Sort by shortest route</button>
+    <div id="deliveryRouteSummary" class="delivery-route-summary" style="display:none;"></div>
+
     <div id="deliveryDoneBanner" style="display:none; background:#f7f6f2; border-radius:14px; padding:14px 20px; text-align:center; margin-bottom:20px; font-size:1rem; color:var(--forest-2); font-weight:700;"></div>
 
     <div id="deliveryListEmpty" style="display:none; text-align:center; padding:50px 20px; color:var(--muted);">
@@ -117,6 +120,8 @@
 
     <div class="card" id="todaysRouteCard" style="display:none;">
       <h2><span class="dot"></span>Today's Route — <span id="todaysRouteDayLabel"></span></h2>
+      <button type="button" class="generate-btn" id="todaysRouteOptimizeBtn" style="margin:0 0 10px;">🧭 Order by shortest route</button>
+      <p id="todaysRouteSummary" class="numbering-hint" style="display:none; margin:0 0 10px;"></p>
       <div id="todaysRouteList"></div>
       <p id="todaysRouteEmpty" style="display:none; color:var(--muted); font-size:0.85rem;">No customers scheduled for today. Use search below for anyone else.</p>
     </div>
@@ -208,6 +213,13 @@
 <!-- ===================== SUMMARY VIEW (manager) ===================== -->
 <!-- ===================== DELIVERIES VIEW (manager) ===================== -->
 <div id="deliveriesView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Warehouse Location</h2>
+    <p class="numbering-hint">The starting point for routes when a phone's GPS isn't available. Set it once.</p>
+    <p id="depotStatus" style="font-size:0.85rem; margin:6px 0 10px;"></p>
+    <button type="button" class="add-item-btn" id="depotSetBtn">📍 Set warehouse pin</button>
+  </div>
+
   <div class="card">
     <h2><span class="dot"></span>Delivery Overview</h2>
     <div class="row3" style="align-items:end;">
