@@ -4,18 +4,24 @@ import {
   serverTimestamp, query, where, orderBy, limit, startAfter, runTransaction
 } from 'firebase/firestore';
 import { incrementOrderCounterAtomically } from './orderNumbering.js';
+import { isValidPin } from './customers.js';
 
 const PAGE_SIZE = 25;
 
 export const ORDER_STATUSES = ['Draft', 'Submitted', 'Approved', 'Invoicing', 'Invoiced', 'Dispatched', 'Delivered', 'Rejected', 'Cancelled'];
 
-export async function submitOrder({ customerId, customerName, customerPhone, customerLocation, items, notes, uid, email }) {
+export async function submitOrder({ customerId, customerName, customerPhone, customerLocation, customerLat, customerLng, items, notes, uid, email }) {
+  // The delivery point is the customer's pinned coordinates, snapshotted
+  // onto the order. customerLocation stays as the human-readable area label.
+  if (!isValidPin(customerLat, customerLng)) {
+    throw new Error('This customer has no pinned location. Pin it before placing an order.');
+  }
   const { usedNo } = await incrementOrderCounterAtomically();
   const grandTotal = items.reduce((sum, it) => sum + (it.total || 0), 0);
   const docRef = await addDoc(collection(db, 'orders'), {
     orderNo: usedNo,
     status: 'Submitted',
-    customerId, customerName, customerPhone, customerLocation,
+    customerId, customerName, customerPhone, customerLocation, customerLat, customerLng,
     items, notes: notes || '', grandTotal,
     createdBy: uid, createdByEmail: email,
     createdAt: serverTimestamp(), updatedAt: serverTimestamp(),

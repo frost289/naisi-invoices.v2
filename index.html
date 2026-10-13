@@ -99,6 +99,7 @@
   <button type="button" class="nav-tab" data-view="orders" id="navOrdersBtn">Orders</button>
   <button type="button" class="nav-tab" data-view="invoices" id="navInvoicesBtn">Invoices</button>
   <button type="button" class="nav-tab" data-view="performance" id="navPerformanceBtn">Rep Performance</button>
+  <button type="button" class="nav-tab" data-view="deliveries" id="navDeliveriesBtn">Deliveries</button>
   <button type="button" class="nav-tab" data-view="summary" id="navSummaryBtn">Summary</button>
   <button type="button" class="nav-tab" data-view="products" id="navProductsBtn">Products</button>
   <!-- Shared -->
@@ -129,7 +130,7 @@
       </div>
       <div id="lvSelectedCustomer" style="display:none; background:#eef6ea; border-radius:8px; padding:10px 14px; font-size:0.85rem;">
         <strong id="lvCustName"></strong><br>
-        <span id="lvCustPhone" style="color:var(--muted);"></span> · <span id="lvCustLocation" style="color:var(--muted);"></span>
+        <span id="lvCustPhone" style="color:var(--muted);"></span> · <span id="lvCustLocation" style="color:var(--muted);"></span> · <strong id="lvCustPinStatus" style="font-size:0.8rem;"></strong>
         <a href="#" id="lvClearCustomer" style="float:right; color:#b23b3b;">Change</a>
       </div>
     </div>
@@ -139,6 +140,12 @@
       <div class="outcome-toggle">
         <button type="button" class="outcome-btn" data-outcome="Order Placed" id="lvOutcomeYes">✓ Order Placed</button>
         <button type="button" class="outcome-btn" data-outcome="No Order" id="lvOutcomeNo">✕ No Order</button>
+      </div>
+
+      <div id="lvPinRequired" class="pin-required-box" style="display:none;">
+        <strong>📍 Pin this customer's location first</strong>
+        <p>Every customer needs a pinned location so deliveries go to the right place. Pin it now, then you can take the order.</p>
+        <button type="button" class="generate-btn" id="lvPinNowBtn">📍 Pin customer location</button>
       </div>
 
       <div id="lvNoOrderFields" style="display:none; margin-top:14px;">
@@ -199,6 +206,62 @@
 </div>
 
 <!-- ===================== SUMMARY VIEW (manager) ===================== -->
+<!-- ===================== DELIVERIES VIEW (manager) ===================== -->
+<div id="deliveriesView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Delivery Overview</h2>
+    <div class="row3" style="align-items:end;">
+      <div class="field"><label>Period</label>
+        <select id="delPeriod">
+          <option value="today">Today</option>
+          <option value="week">This week</option>
+          <option value="month" selected>This month</option>
+        </select>
+      </div>
+      <div class="field"><label>Overdue after</label><select id="delOverdueHours"></select></div>
+      <div class="field"><button type="button" class="list-action-btn" id="delRefreshBtn">Refresh</button></div>
+    </div>
+    <div id="delTiles" class="exp-summary-tiles"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>Deliveries per Deliverer</h2>
+    <table class="items-table" style="width:100%;">
+      <thead><tr><th>Deliverer</th><th>Today</th><th>This week</th><th>This month</th><th>Failed (period)</th><th>Avg invoice → delivery</th></tr></thead>
+      <tbody id="delPersonBody"></tbody>
+    </table>
+    <p id="delPersonEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No deliveries recorded yet.</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>Pending Deliveries</h2>
+    <p class="numbering-hint">Invoiced orders not yet delivered, oldest first. Red rows are past the overdue limit.</p>
+    <table class="items-table" style="width:100%;">
+      <thead><tr><th>Order</th><th>Customer</th><th>Area</th><th>Pin</th><th>Waiting</th><th>Last failed attempt</th></tr></thead>
+      <tbody id="delPendingBody"></tbody>
+    </table>
+    <p id="delPendingEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">Nothing waiting for delivery.</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>Deliveries by Area <span style="font-size:0.7rem; font-weight:400; color:var(--muted);">(selected period)</span></h2>
+    <table class="items-table" style="width:100%;">
+      <thead><tr><th>Area</th><th>Delivered</th><th>Failed attempts</th><th>Pending now</th></tr></thead>
+      <tbody id="delAreaBody"></tbody>
+    </table>
+    <p id="delAreaEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No delivery activity in this period.</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>Failed Delivery Attempts <span style="font-size:0.7rem; font-weight:400; color:var(--muted);">(selected period)</span></h2>
+    <table class="items-table" style="width:100%;">
+      <thead><tr><th>When</th><th>Order</th><th>Customer</th><th>Area</th><th>Deliverer</th><th>Reason</th></tr></thead>
+      <tbody id="delFailBody"></tbody>
+    </table>
+    <p id="delFailEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No failed attempts in this period.</p>
+  </div>
+</div>
+
 <div id="summaryView" class="list-section" style="display:none;">
   <div class="card">
     <h2><span class="dot"></span>Business Summary</h2>
@@ -304,7 +367,7 @@
       <div id="newCustLocationSuggestions" class="suggestions-dropdown" style="display:none;"></div>
       <input type="hidden" id="newCustLat">
       <input type="hidden" id="newCustLng">
-      <button type="button" class="add-item-btn" id="newCustPinBtn" style="margin-top:6px;">📍 Pin Location on Map</button>
+      <button type="button" class="add-item-btn" id="newCustPinBtn" style="margin-top:6px;">📍 Pin Location on Map (required)</button>
       <p id="newCustPinNote" style="font-size:0.72rem; color:var(--muted); margin-top:4px;"></p>
     </div>
     <button type="button" class="generate-btn" id="addCustomerBtn">Add Customer</button>
@@ -337,6 +400,10 @@
     </div>
     <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; margin-bottom:10px; cursor:pointer;">
       <input type="checkbox" id="showInactiveCustomersToggle"> Show inactive (closed) customers too
+    </label>
+    <div id="customersNoPinBanner" class="pin-required-box" style="display:none; margin-bottom:10px;"></div>
+    <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; margin-bottom:10px; cursor:pointer;">
+      <input type="checkbox" id="showNoPinOnlyToggle"> Show only customers without a pinned location
     </label>
     <button type="button" class="list-action-btn" id="exportCustomersBtn" style="margin-bottom:10px;">Export All Customers to Excel</button>
     <table class="items-table" id="customerListTable" style="width:100%;">
@@ -572,7 +639,7 @@
       </div>
       <input type="hidden" id="custLat">
       <input type="hidden" id="custLng">
-      <button type="button" class="add-item-btn" id="custPinBtn">📍 Pin Location on Map</button>
+      <button type="button" class="add-item-btn" id="custPinBtn">📍 Pin Location on Map (required)</button>
       <p id="custPinNote" style="font-size:0.72rem; color:var(--muted); margin-top:4px;"></p>
       <button type="button" class="add-item-btn" id="saveCustomerBtn">+ Save as new customer</button>
       <p id="customerSaveNote" style="font-size:0.72rem; color:var(--muted); margin-top:4px;"></p>

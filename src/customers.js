@@ -122,7 +122,20 @@ export async function fetchCustomerById(id) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
+// A "pinned location" means real coordinates — the delivery point. The
+// location NAME (e.g. "Area 25") is only an area label; it is never
+// enough on its own to deliver to a customer.
+export function isValidPin(lat, lng) {
+  return typeof lat === 'number' && typeof lng === 'number'
+    && isFinite(lat) && isFinite(lng)
+    && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+export function hasPin(customer) {
+  return !!customer && isValidPin(customer.lat, customer.lng);
+}
+
 export async function addCustomer({ name, phone, location, lat, lng, uid, assignedDay = null }) {
+  if (!isValidPin(lat, lng)) throw new Error('A pinned location is required to add a customer.');
   const docRef = await addDoc(collection(db, 'customers'), {
     name: normalizeText(name), phone: phone || '', location: normalizeText(location),
     lat: (typeof lat === 'number' && !isNaN(lat)) ? lat : null,

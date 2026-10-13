@@ -464,3 +464,43 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .delivery-expense-cat-btn .dxcat-icon { font-size: 1.8rem; line-height: 1; }
 .delivery-expense-cat-btn .dxcat-label { font-size: 0.85rem; font-weight: 700; color: var(--ink); }
 .delivery-expense-cat-btn.active { border-color: var(--leaf); background: #eef6ea; }
+
+/* ===== Pinned location + delivery tracking ===== */
+.no-pin-tag {
+  display: inline-block; background: #fdecea; color: #b3261e; border-radius: 999px;
+  padding: 2px 8px; font-size: 0.68rem; font-weight: 700; white-space: nowrap;
+}
+.todays-route-item .no-pin-tag { margin-left: 6px; }
+.pin-required-box {
+  background: #fff4e0; border: 1.5px solid var(--amber); border-radius: 10px;
+  padding: 12px 14px; margin-top: 14px; font-size: 0.85rem; color: #7a5210;
+}
+.pin-required-box p { margin: 6px 0 10px; line-height: 1.45; }
+.pin-required-box .generate-btn { margin-top: 0; }
+
+.delivery-card-nopin {
+  background: #fdecea; color: #b3261e; border-radius: 10px; padding: 12px 14px;
+  font-size: 1rem; font-weight: 700; margin-bottom: 12px; line-height: 1.4;
+}
+.delivery-card-failed {
+  background: #fff4e0; color: #7a5210; border-radius: 10px; padding: 10px 14px;
+  font-size: 0.95rem; font-weight: 600; margin-bottom: 12px;
+}
+.delivery-fail-btn {
+  width: 100%; margin-top: 10px; padding: 16px; font-size: 1.05rem; font-weight: 800;
+  border-radius: 14px; border: 2px solid #b3261e; background: #fff; color: #b3261e; cursor: pointer;
+}
+.delivery-fail-btn:active { transform: scale(0.98); }
+.delivery-fail-panel { margin-top: 12px; border-top: 2px dashed var(--line); padding-top: 12px; }
+.delivery-fail-title { font-size: 1.1rem; font-weight: 800; margin-bottom: 10px; }
+.delivery-reason-btn {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 16px; margin-bottom: 8px; font-size: 1.05rem; font-weight: 700;
+  border-radius: 12px; border: 2px solid var(--line); background: #fff; cursor: pointer;
+}
+.delivery-reason-btn span { font-size: 1.4rem; }
+.delivery-reason-btn:active { background: #f7f6f2; }
+.delivery-fail-note { width: 100%; min-height: 80px; font-size: 1rem; padding: 12px; margin: 8px 0; box-sizing: border-box; }
+
+.del-overdue td { background: #fdecea; }
+.del-tile-overdue { background: #fdecea; color: #b3261e; }

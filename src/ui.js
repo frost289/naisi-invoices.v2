@@ -75,3 +75,10 @@ export function initOfflineBanner() {
   });
   update();
 }
+
+// Escapes text before it is placed into innerHTML, so names/notes typed
+// by one user can never run as HTML/JS in another user's browser.
+export function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}

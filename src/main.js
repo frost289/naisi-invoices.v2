@@ -17,7 +17,7 @@ import {
 import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndDownloadCustomerReport } from './export.js';
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation,
-  fetchCustomerById, deactivateCustomer, reactivateCustomer, setCustomerVisitDay,
+  fetchCustomerById, deactivateCustomer, reactivateCustomer, setCustomerVisitDay, hasPin, isValidPin,
   normalizeText, normalizePhone, formatPhoneForDisplay, toWhatsAppNumber, findPossibleDuplicates, countCustomerActivity, mergeCustomers
 } from './customers.js';
 import {
@@ -52,8 +52,13 @@ import {
 } from './visits.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
-  initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView
+  initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc
 } from './ui.js';
+import {
+  FAIL_REASONS, OVERDUE_HOUR_OPTIONS, DEFAULT_OVERDUE_HOURS, markOrderDeliveryFailed,
+  fetchPendingDeliveries, fetchDeliveredSince, fetchFailedAttemptsSince,
+  earliestNeededStart, buildDeliveryStats, toDate, formatAge
+} from './deliveries.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
@@ -202,6 +207,7 @@ async function initApp(user, role) {
     orders: document.getElementById('ordersView'),
     performance: document.getElementById('performanceView'),
     summary: document.getElementById('summaryView'),
+    deliveries: document.getElementById('deliveriesView'),
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
   };
@@ -214,11 +220,12 @@ async function initApp(user, role) {
     orders: document.getElementById('navOrdersBtn'),
     performance: document.getElementById('navPerformanceBtn'),
     summary: document.getElementById('navSummaryBtn'),
+    deliveries: document.getElementById('navDeliveriesBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
   };
 
-  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary'];
+  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries'];
   const submitterOnlyNav = ['logvisit', 'myvisits'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
@@ -244,6 +251,7 @@ async function initApp(user, role) {
     orders: resetAndLoadOrders,
     performance: loadPerformanceView,
     summary: loadSummaryView,
+    deliveries: loadDeliveriesView,
     myvisits: resetAndLoadMyVisits,
   };
 
@@ -703,6 +711,7 @@ async function initApp(user, role) {
         lat: existingLat, lng: existingLng,
         onSave: async ({ lat, lng }) => {
           custLatInput.value = lat; custLngInput.value = lng;
+          custPinNote.style.color = '';
           custPinNote.textContent = `Location pinned ✓ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
         },
       });
@@ -743,6 +752,15 @@ async function initApp(user, role) {
     saveCustomerBtn.addEventListener('click', async () => {
       const name = els.custName.value.trim();
       if (!name) { showToast('Enter a customer name first.', 'error'); return; }
+
+      const pinLatValue = custLatInput.value ? parseFloat(custLatInput.value) : null;
+      const pinLngValue = custLngInput.value ? parseFloat(custLngInput.value) : null;
+      if (!isValidPin(pinLatValue, pinLngValue)) {
+        custPinNote.textContent = '📍 A pinned location is required — tap "Pin Location on Map".';
+        custPinNote.style.color = '#b3261e';
+        showToast('Pin the customer\'s location on the map first.', 'error');
+        return;
+      }
 
       custPhoneError.style.display = 'none';
       const phoneResult = normalizePhone(els.custPhone.value);
@@ -811,6 +829,7 @@ async function initApp(user, role) {
       lat: existingLat, lng: existingLng,
       onSave: async ({ lat, lng }) => {
         newCustLat.value = lat; newCustLng.value = lng;
+        newCustPinNote.style.color = '';
         newCustPinNote.textContent = `Location pinned ✓ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
       },
     });
@@ -819,6 +838,15 @@ async function initApp(user, role) {
   addCustomerBtn.addEventListener('click', async () => {
     const name = newCustName.value.trim();
     if (!name) { showToast('Enter a customer name.', 'error'); return; }
+
+    const pinLatValue = newCustLat.value ? parseFloat(newCustLat.value) : null;
+    const pinLngValue = newCustLng.value ? parseFloat(newCustLng.value) : null;
+    if (!isValidPin(pinLatValue, pinLngValue)) {
+      newCustPinNote.textContent = '📍 A pinned location is required — tap "Pin Location on Map".';
+      newCustPinNote.style.color = '#b3261e';
+      showToast('Pin the customer\'s location on the map first.', 'error');
+      return;
+    }
 
     newCustPhoneError.style.display = 'none';
     const phoneResult = normalizePhone(newCustPhone.value);
@@ -905,14 +933,10 @@ async function initApp(user, role) {
       return `<a href="${googleMapsUrl(c.lat, c.lng)}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
          <button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍</button>`;
     }
-    // No exact pin yet — fall back to a Google Maps text search on the
-    // location name, same idea as a WhatsApp text-location share: it
-    // still opens Google Maps and centers roughly on the right place.
-    const fallbackUrl = googleMapsSearchUrlForLocation(c.location);
-    const fallbackLink = fallbackUrl
-      ? `<a href="${fallbackUrl}" target="_blank" rel="noopener" class="map-link-btn">Search on Map</a>`
-      : '';
-    return `${fallbackLink}<button type="button" class="map-pin-btn-small" data-action="set-location" style="${fallbackLink ? 'margin-left:6px;' : ''}">📍 Set Location</button>`;
+    // No pin yet. A location NAME is not a delivery point, so there is
+    // deliberately no "search by name" fallback any more — the only
+    // action offered is to pin the customer.
+    return `<span class="no-pin-tag">⚠ No pin</span><button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍 Set Location</button>`;
   }
 
   function renderCustomerRows(list) {
@@ -939,13 +963,26 @@ async function initApp(user, role) {
   function applyCustomerSearchAndRender() {
     const term = customerSearchInput.value.trim().toLowerCase();
     const showInactive = document.getElementById('showInactiveCustomersToggle').checked;
-    let filtered = showInactive ? loadedCustomers : loadedCustomers.filter(c => c.active !== false);
+    const noPinOnly = document.getElementById('showNoPinOnlyToggle').checked;
+    // "No pin" filter works on the FULL customer list (not just the pages
+    // loaded so far) so nobody is missed.
+    const source = noPinOnly ? customersCache : loadedCustomers;
+    let filtered = showInactive ? source : source.filter(c => c.active !== false);
+    if (noPinOnly) filtered = filtered.filter(c => !hasPin(c));
     if (term) filtered = filtered.filter(c => (c.name || '').toLowerCase().includes(term));
     renderCustomerRows(filtered);
+    loadMoreCustomersBtn.style.display = (customersHasMore && !noPinOnly) ? 'block' : 'none';
+    const missing = customersCache.filter(c => c.active !== false && !hasPin(c)).length;
+    const banner = document.getElementById('customersNoPinBanner');
+    banner.style.display = missing > 0 ? 'block' : 'none';
+    banner.innerHTML = missing > 0
+      ? `<strong>📍 ${missing} active customer${missing === 1 ? '' : 's'} still ${missing === 1 ? 'has' : 'have'} no pinned location.</strong><p>Deliveries need a pin. Tick the box below to list them, then tap "Set Location" on each.</p>`
+      : '';
     customerSearchHint.textContent = term ? `Searching ${loadedCustomers.length} loaded customer${loadedCustomers.length === 1 ? '' : 's'}.` : '';
   }
 
   document.getElementById('showInactiveCustomersToggle').addEventListener('change', applyCustomerSearchAndRender);
+  document.getElementById('showNoPinOnlyToggle').addEventListener('change', applyCustomerSearchAndRender);
 
   async function resetAndLoadCustomers() {
     loadedCustomers = []; customersCursor = null; customersHasMore = true;
@@ -3179,13 +3216,52 @@ async function initApp(user, role) {
     const lvOrderFormWrap = document.getElementById('lvOrderFormWrap');
     const lvOrderNotes = document.getElementById('lvOrderNotes');
     const lvSubmitOrderBtn = document.getElementById('lvSubmitOrderBtn');
+    const lvCustPinStatus = document.getElementById('lvCustPinStatus');
+    const lvPinRequired = document.getElementById('lvPinRequired');
+    const lvPinNowBtn = document.getElementById('lvPinNowBtn');
 
     let lvSelected = null;
+
+    // ---- Pinned-location gate ----
+    // A rep can log a "No Order" visit for any customer, but cannot place
+    // an order for a customer without a pin: they are prompted to pin the
+    // location first, and the order form only appears once it is saved.
+    function lvRefreshPinStatus() {
+      const ok = !!lvSelected && hasPin(lvSelected);
+      lvCustPinStatus.textContent = lvSelected ? (ok ? '📍 Pinned ✓' : '⚠ No pinned location') : '';
+      lvCustPinStatus.style.color = ok ? '#3a7d2c' : '#b3261e';
+    }
+
+    function lvApplyPinGate() {
+      lvRefreshPinStatus();
+      const wantsOrder = lvOutcomeYes.classList.contains('active');
+      const ok = !!lvSelected && hasPin(lvSelected);
+      lvPinRequired.style.display = (wantsOrder && !ok) ? 'block' : 'none';
+      lvOrderFormWrap.style.display = (wantsOrder && ok) ? 'block' : 'none';
+    }
+
+    function lvPromptForPin() {
+      if (!lvSelected) return;
+      const target = lvSelected;
+      openLocationPicker({
+        label: target.name, lat: null, lng: null,
+        onSave: async ({ lat, lng }) => {
+          await updateCustomerLocation(target.id, { lat, lng });
+          target.lat = lat; target.lng = lng;      // same object the customer cache holds
+          if (lvSelected && lvSelected.id === target.id) lvApplyPinGate();
+          renderTodaysRoute();
+          showToast('Location pinned. You can place the order now.', 'success');
+        },
+      });
+    }
+
+    lvPinNowBtn.addEventListener('click', lvPromptForPin);
 
     function lvResetOutcome() {
       lvOutcomeCard.style.display = 'none';
       lvNoOrderFields.style.display = 'none';
       lvOrderFormWrap.style.display = 'none';
+      lvPinRequired.style.display = 'none';
       lvOutcomeYes.classList.remove('active');
       lvOutcomeNo.classList.remove('active');
       lvOrderItemsBody.innerHTML = '';
@@ -3214,6 +3290,7 @@ async function initApp(user, role) {
       lvCustName.textContent = c.name;
       lvCustPhone.textContent = c.phone || '';
       lvCustLocation.textContent = c.location || '';
+      lvRefreshPinStatus();
       lvSelectedCustomer.style.display = 'block';
       lvCustSearch.style.display = 'none';
       lvCustSuggestions.style.display = 'none';
@@ -3245,6 +3322,7 @@ async function initApp(user, role) {
         <button type="button" class="todays-route-item" data-id="${c.id}">
           <span class="todays-route-name">${c.name}</span>
           ${c.location ? `<span class="todays-route-location">${c.location}</span>` : ''}
+          ${hasPin(c) ? '' : '<span class="no-pin-tag">📍 needs pin</span>'}
         </button>
       `).join('');
     }
@@ -3267,7 +3345,7 @@ async function initApp(user, role) {
       lvCustSuggestions.innerHTML = matches.slice(0, 8).map(c => `
         <div class="suggestion-item" data-id="${c.id}">
           <span class="sug-name">${c.name}</span>
-          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}${hasPin(c) ? '' : ' · ⚠ no pin'}</span>
         </div>
       `).join('');
       lvCustSuggestions.style.display = 'block';
@@ -3290,13 +3368,15 @@ async function initApp(user, role) {
       lvOutcomeYes.classList.add('active');
       lvOutcomeNo.classList.remove('active');
       lvNoOrderFields.style.display = 'none';
-      lvOrderFormWrap.style.display = 'block';
+      lvApplyPinGate();
+      if (lvSelected && !hasPin(lvSelected)) lvPromptForPin();   // prompt straight away
     });
 
     lvOutcomeNo.addEventListener('click', () => {
       lvOutcomeNo.classList.add('active');
       lvOutcomeYes.classList.remove('active');
       lvOrderFormWrap.style.display = 'none';
+      lvPinRequired.style.display = 'none';
       lvNoOrderFields.style.display = 'block';
     });
 
@@ -3323,6 +3403,11 @@ async function initApp(user, role) {
 
     lvSubmitOrderBtn.addEventListener('click', async () => {
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
+      if (!hasPin(lvSelected)) {
+        showToast('Pin this customer\'s location before placing an order.', 'error');
+        lvApplyPinGate();
+        return;
+      }
       const items = getItems(lvOrderItemsBody);
       if (items.length === 0) { showToast('Add at least one item.', 'error'); return; }
 
@@ -3333,6 +3418,8 @@ async function initApp(user, role) {
           customerName: lvSelected.name,
           customerPhone: lvSelected.phone || '-',
           customerLocation: lvSelected.location || '-',
+          customerLat: lvSelected.lat,
+          customerLng: lvSelected.lng,
           items,
           notes: lvOrderNotes.value.trim(),
           uid: user.uid,
@@ -3402,6 +3489,100 @@ async function initApp(user, role) {
     loadMoreMyVisitsBtn.addEventListener('click', loadNextMyVisitsPage);
   }
   async function resetAndLoadMyVisits() { if (window.resetAndLoadMyVisits) await window.resetAndLoadMyVisits(); }
+
+  // ============= DELIVERIES ANALYTICS (manager) =============
+  if (isManager) {
+    const delPeriod = document.getElementById('delPeriod');
+    const delOverdueHours = document.getElementById('delOverdueHours');
+    delOverdueHours.innerHTML = OVERDUE_HOUR_OPTIONS
+      .map(h => `<option value="${h}" ${h === DEFAULT_OVERDUE_HOURS ? 'selected' : ''}>${h} hours</option>`).join('');
+
+    let delData = null; // { delivered, failures, pending }
+
+    const fmtWhen = (v) => {
+      const d = toDate(v);
+      return d ? d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    };
+    const orderHasPin = (o) => {
+      const c = customersCache.find(cc => cc.id === o.customerId);
+      return hasPin(c) || isValidPin(o.customerLat, o.customerLng);
+    };
+
+    function renderDeliveries() {
+      if (!delData) return;
+      const stats = buildDeliveryStats({
+        ...delData, now: new Date(),
+        period: delPeriod.value, overdueHours: parseInt(delOverdueHours.value, 10),
+      });
+
+      document.getElementById('delTiles').innerHTML = `
+        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Delivered</span><span class="exp-tile-amount">${stats.totals.delivered}</span></div>
+        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Failed attempts</span><span class="exp-tile-amount">${stats.totals.failed}</span></div>
+        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Pending</span><span class="exp-tile-amount">${stats.totals.pending}</span></div>
+        <div class="exp-tile del-tile-overdue"><span class="exp-tile-label">Overdue</span><span class="exp-tile-amount">${stats.totals.overdue}</span></div>`;
+
+      document.getElementById('delPersonEmpty').style.display = stats.perDeliverer.length === 0 ? 'block' : 'none';
+      document.getElementById('delPersonBody').innerHTML = stats.perDeliverer.map(p => `
+        <tr>
+          <td>${esc(displayNameForEmail(p.email))}</td>
+          <td>${p.today}</td><td>${p.week}</td><td><strong>${p.month}</strong></td>
+          <td>${p.failedPeriod}</td>
+          <td>${p.avgHours === null ? '—' : formatAge(p.avgHours)}</td>
+        </tr>`).join('');
+
+      document.getElementById('delPendingEmpty').style.display = stats.pendingRows.length === 0 ? 'block' : 'none';
+      document.getElementById('delPendingBody').innerHTML = stats.pendingRows.map(o => {
+        const f = o.lastDeliveryFailure;
+        const failText = f ? `${esc(f.reason || '')}${f.note ? ` — ${esc(f.note)}` : ''}${o.deliveryAttemptCount > 1 ? ` (${esc(o.deliveryAttemptCount)} tries)` : ''}` : '—';
+        return `
+        <tr class="${o.overdue ? 'del-overdue' : ''}">
+          <td>${esc(o.orderNo)}</td>
+          <td>${esc(o.customerName)}</td>
+          <td>${esc((o.customerLocation && o.customerLocation !== '-') ? o.customerLocation : '—')}</td>
+          <td>${orderHasPin(o) ? '📍 ✓' : '<span class="no-pin-tag">⚠ No pin</span>'}</td>
+          <td>${formatAge(o.ageHours)}${o.overdue ? ' ⚠' : ''}</td>
+          <td>${failText}</td>
+        </tr>`;
+      }).join('');
+
+      document.getElementById('delAreaEmpty').style.display = stats.perArea.length === 0 ? 'block' : 'none';
+      document.getElementById('delAreaBody').innerHTML = stats.perArea.map(a => `
+        <tr><td>${esc(a.area)}</td><td>${a.delivered}</td><td>${a.failed}</td><td>${a.pending}</td></tr>`).join('');
+
+      document.getElementById('delFailEmpty').style.display = stats.failuresInPeriod.length === 0 ? 'block' : 'none';
+      document.getElementById('delFailBody').innerHTML = stats.failuresInPeriod.map(f => `
+        <tr>
+          <td>${fmtWhen(f.at)}</td>
+          <td>${esc(f.orderNo)}</td>
+          <td>${esc(f.customerName)}</td>
+          <td>${esc(f.area)}</td>
+          <td>${esc(displayNameForEmail(f.byEmail))}</td>
+          <td>${esc(f.reason)}${f.note ? ` — ${esc(f.note)}` : ''}</td>
+        </tr>`).join('');
+    }
+
+    window.loadDeliveriesView = async function loadDeliveriesView() {
+      const refreshBtn = document.getElementById('delRefreshBtn');
+      setButtonLoading(refreshBtn, 'Loading…');
+      try {
+        const since = earliestNeededStart(new Date());
+        const [delivered, failures, pending] = await Promise.all([
+          fetchDeliveredSince(since), fetchFailedAttemptsSince(since), fetchPendingDeliveries(),
+        ]);
+        delData = { delivered, failures, pending };
+        renderDeliveries();
+      } catch (err) {
+        showToast('Could not load delivery analytics: ' + err.message, 'error');
+      } finally {
+        clearButtonLoading(refreshBtn);
+      }
+    };
+
+    delPeriod.addEventListener('change', renderDeliveries);
+    delOverdueHours.addEventListener('change', renderDeliveries);
+    document.getElementById('delRefreshBtn').addEventListener('click', () => window.loadDeliveriesView());
+  }
+  async function loadDeliveriesView() { if (window.loadDeliveriesView) await window.loadDeliveriesView(); }
 
   // ============= REP PERFORMANCE (manager) =============
   if (isManager) {
@@ -3665,21 +3846,24 @@ async function initDeliveryApp(user) {
     }
   });
 
-  // Per-order, best-effort accurate map link: look up the actual
-  // customer record for a real GPS pin if one's been saved; otherwise
-  // fall back to a text search on the location name (same idea as a
-  // WhatsApp text-location share — still opens Maps roughly in the
-  // right place). Never blocks rendering the card if this fails.
-  async function resolveMapUrlForOrder(order) {
+  // The delivery point is the customer's PINNED location (coordinates),
+  // never the location name. Prefer the customer's current pin (so a
+  // corrected pin is picked up); fall back to the pin saved on the order
+  // when the order was placed. No pin at all = no map button, a clear
+  // warning, and the "couldn't find the location" reason is available.
+  async function resolveDeliveryPin(order) {
     if (order.customerId) {
       try {
         const customer = await fetchCustomerById(order.customerId);
-        if (customer && typeof customer.lat === 'number' && typeof customer.lng === 'number') {
-          return googleMapsUrl(customer.lat, customer.lng);
-        }
-      } catch (err) { /* fall through to text-search fallback below */ }
+        if (hasPin(customer)) return { lat: customer.lat, lng: customer.lng };
+      } catch (err) { /* fall back to the pin saved on the order */ }
     }
-    return googleMapsSearchUrlForLocation(order.customerLocation && order.customerLocation !== '-' ? order.customerLocation : null);
+    if (isValidPin(order.customerLat, order.customerLng)) return { lat: order.customerLat, lng: order.customerLng };
+    return null;
+  }
+
+  function directionsUrl(pin) {
+    return `https://www.google.com/maps/dir/?api=1&destination=${pin.lat},${pin.lng}&travelmode=driving`;
   }
 
   function renderDeliveryEmpty() {
@@ -3688,22 +3872,36 @@ async function initDeliveryApp(user) {
 
   async function renderDeliveryCard(order) {
     const itemsHtml = (order.items || [])
-      .map(it => `<div class="delivery-item-row">${it.qty}× ${it.desc || '—'}</div>`)
+      .map(it => `<div class="delivery-item-row">${esc(it.qty)}× ${esc(it.desc || '—')}</div>`)
       .join('') || `<div class="delivery-item-row">—</div>`;
-    const hasLocation = order.customerLocation && order.customerLocation !== '-';
-    const mapUrl = await resolveMapUrlForOrder(order);
+    const areaLabel = (order.customerLocation && order.customerLocation !== '-') ? order.customerLocation : '';
+    const pin = await resolveDeliveryPin(order);
+    const failure = order.lastDeliveryFailure;
 
     const card = document.createElement('div');
     card.className = 'delivery-card';
     card.dataset.id = order.id;
     card.innerHTML = `
-      <div class="delivery-card-name">${order.customerName || '—'}</div>
-      ${hasLocation ? `<div class="delivery-card-location">📍 ${order.customerLocation}</div>` : ''}
-      ${mapUrl ? `<a href="${mapUrl}" target="_blank" rel="noopener" class="delivery-map-btn">🗺️ Open Map</a>` : ''}
+      <div class="delivery-card-name">${esc(order.customerName || '—')}</div>
+      ${pin
+        ? `<div class="delivery-card-location">📍 Pinned location${areaLabel ? ` · ${esc(areaLabel)}` : ''}</div>
+           <a href="${directionsUrl(pin)}" target="_blank" rel="noopener" class="delivery-map-btn">🗺️ Navigate to Pin</a>`
+        : `<div class="delivery-card-nopin">⚠ No pinned location saved for this customer.<br>Tell the manager.</div>`}
+      ${failure ? `<div class="delivery-card-failed">Last try failed: ${esc(failure.reason || '')}${failure.note ? ` — ${esc(failure.note)}` : ''}${order.deliveryAttemptCount > 1 ? ` (${esc(order.deliveryAttemptCount)} tries)` : ''}</div>` : ''}
       <div class="delivery-items">${itemsHtml}</div>
       <div class="delivery-total">${mwk(order.grandTotal || 0)}</div>
-      ${order.invoiceNo ? `<div class="delivery-invoice">Invoice ${order.invoiceNo}</div>` : ''}
-      <button type="button" class="delivery-deliver-btn" data-action="deliver" data-id="${order.id}">✓ DELIVERED</button>
+      ${order.invoiceNo ? `<div class="delivery-invoice">Invoice ${esc(order.invoiceNo)}</div>` : ''}
+      <button type="button" class="delivery-deliver-btn" data-action="deliver" data-id="${esc(order.id)}">✓ DELIVERED</button>
+      <button type="button" class="delivery-fail-btn" data-action="fail-open" data-id="${esc(order.id)}">✕ NOT DELIVERED</button>
+      <div class="delivery-fail-panel" style="display:none;">
+        <div class="delivery-fail-title">Why was it not delivered?</div>
+        ${FAIL_REASONS.map(r => `<button type="button" class="delivery-reason-btn" data-action="fail-reason" data-code="${r.code}" data-id="${esc(order.id)}"><span>${r.icon}</span> ${esc(r.label)}</button>`).join('')}
+        <div class="delivery-fail-other" style="display:none;">
+          <textarea class="delivery-fail-note" placeholder="Write the reason..."></textarea>
+          <button type="button" class="delivery-deliver-btn delivery-fail-save" data-action="fail-save-other" data-id="${esc(order.id)}">SAVE REASON</button>
+        </div>
+        <button type="button" class="list-action-btn delivery-fail-cancel" data-action="fail-cancel" style="width:100%; margin-top:10px; padding:14px;">Cancel</button>
+      </div>
     `;
     return card;
   }
@@ -3738,13 +3936,55 @@ async function initDeliveryApp(user) {
 
   deliveryLoadMoreBtn.addEventListener('click', loadNextDeliveryPage);
 
+  async function saveDeliveryFailure(order, card, reasonCode, note) {
+    await markOrderDeliveryFailed(order.id, { uid: user.uid, email: user.email, reasonCode, note });
+    const reasonLabel = FAIL_REASONS.find(r => r.code === reasonCode).label;
+    const updated = {
+      ...order,
+      lastDeliveryFailure: { reason: reasonLabel, note: (note || '').trim() },
+      deliveryAttemptCount: (order.deliveryAttemptCount || 0) + 1,
+    };
+    const idx = loadedDeliveries.findIndex(o => o.id === order.id);
+    if (idx !== -1) loadedDeliveries[idx] = updated;
+    card.replaceWith(await renderDeliveryCard(updated));
+    showToast('Saved. The order stays on your list for another try.', 'success');
+  }
+
   deliveryList.addEventListener('click', async (e) => {
-    const btn = e.target.closest('button[data-action="deliver"]');
+    const btn = e.target.closest('button[data-action]');
     if (!btn) return;
     const card = btn.closest('.delivery-card');
-    const order = loadedDeliveries.find(o => o.id === btn.dataset.id);
+    const action = btn.dataset.action;
+    const panel = card.querySelector('.delivery-fail-panel');
+    const order = loadedDeliveries.find(o => o.id === btn.dataset.id) || loadedDeliveries.find(o => o.id === card.dataset.id);
     if (!order) return;
 
+    if (action === 'fail-open') { panel.style.display = 'block'; btn.style.display = 'none'; return; }
+    if (action === 'fail-cancel') {
+      panel.style.display = 'none';
+      card.querySelector('[data-action="fail-open"]').style.display = '';
+      return;
+    }
+    if (action === 'fail-reason') {
+      const code = btn.dataset.code;
+      if (code === 'other') { card.querySelector('.delivery-fail-other').style.display = 'block'; return; }
+      const label = FAIL_REASONS.find(r => r.code === code).label;
+      if (!confirm(`Not delivered: "${label}". Save this?`)) return;
+      btn.disabled = true;
+      try { await saveDeliveryFailure(order, card, code, ''); }
+      catch (err) { showToast('Could not save: ' + err.message, 'error'); btn.disabled = false; }
+      return;
+    }
+    if (action === 'fail-save-other') {
+      const note = card.querySelector('.delivery-fail-note').value;
+      if (!note.trim()) { showToast('Please write the reason.', 'error'); return; }
+      btn.disabled = true;
+      try { await saveDeliveryFailure(order, card, 'other', note); }
+      catch (err) { showToast('Could not save: ' + err.message, 'error'); btn.disabled = false; }
+      return;
+    }
+
+    if (action !== 'deliver') return;
     const confirmed = confirm(`Mark ${order.customerName || 'this order'} as DELIVERED?`);
     if (!confirmed) return;
 
