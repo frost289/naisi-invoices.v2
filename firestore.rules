@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- role helpers (email lists in config/roles) ----------
+    // .get(name, []) means a missing list (e.g. no "deliverers" yet) is
+    // treated as empty instead of throwing. Emails in config/roles must be
+    // stored in lowercase, which is how Firebase Auth reports them.
+    function roleList(name) {
+      return get(/databases/$(database)/documents/config/roles).data.get(name, []);
+    }
+    function isManager() {
+      return request.auth != null && request.auth.token.email in roleList('managers');
+    }
+    function isSubmitter() {
+      return request.auth != null && request.auth.token.email in roleList('submitters');
+    }
+    function isDeliverer() {
+      return request.auth != null && request.auth.token.email in roleList('deliverers');
+    }
+    function isStaff() {
+      return isManager() || isSubmitter() || isDeliverer();
+    }
+
+    // The signed-in user created / owns the EXISTING document.
+    function ownsCreatedBy() {
+      return resource.data.createdBy == request.auth.uid;
+    }
+
+    match /config/roles {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /counters/{counterId} {
+      allow read, create, update: if isManager();
+      allow delete: if false;
+    }
+
+    match /orderCounters/{counterId} {
+      allow read: if isManager() || isSubmitter();
+      allow create: if (isManager() || isSubmitter()) &&
+        request.resource.data.counter is int &&
+        request.resource.data.counter > 0;
+      allow update: if (isManager() || isSubmitter()) &&
+        request.resource.data.counter == resource.data.counter + 1;
+      allow delete: if false;
+    }
+
+    match /invoices/{invoiceId} {
+      allow create, read, update: if isManager();
+      allow delete: if false;
+    }
+
+    match /customers/{customerId} {
+      allow read: if isStaff();
+      allow create, update: if isManager() || isSubmitter();
+      allow delete: if isManager();
+    }
+
+    match /expenses/{expenseId} {
+      // Anyone creating an expense must stamp it with their own uid.
+      allow create: if isManager() ||
+        ((isSubmitter() || isDeliverer()) &&
+          request.resource.data.createdBy == request.auth.uid);
+      allow read: if isManager() ||
+        ((isSubmitter() || isDeliverer()) && ownsCreatedBy());
+      // Owners can edit their own expense but not re-assign it to someone else.
+      allow update: if isManager() ||
+        ((isSubmitter() || isDeliverer()) && ownsCreatedBy() &&
+          request.resource.data.createdBy == resource.data.createdBy);
+      allow delete: if isManager();
+    }
+
+    match /products/{productId} {
+      allow read: if isManager() || isSubmitter();
+      allow create, update, delete: if isManager();
+    }
+
+    match /orders/{orderId} {
+      // Reps can only create orders in their own name, in the Submitted state.
+      // Without this check a rep could create an order that is already
+      // Approved/Invoiced, bypassing manager approval and the stock check.
+      allow create: if isManager() ||
+        (isSubmitter() &&
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.status == 'Submitted');
+      allow read: if isManager() ||
+        (isSubmitter() && ownsCreatedBy()) ||
+        (isDeliverer() && resource.data.status == 'Invoiced');
+      // Deliverers can only flip Invoiced -> Delivered, touching only the
+      // delivery fields (not items, totals, customer, etc.).
+      allow update: if isManager() ||
+        (isDeliverer() &&
+          resource.data.status == 'Invoiced' &&
+          request.resource.data.status == 'Delivered' &&
+          request.resource.data.deliveredBy == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'deliveredBy', 'deliveredByEmail', 'deliveredAt', 'updatedAt']));
+      allow delete: if false;
+    }
+
+    match /visits/{visitId} {
+      // repId must be the caller's own uid so reps cannot log visits (or
+      // inflate success rates) under another rep's name.
+      allow create: if isManager() ||
+        (isSubmitter() && request.resource.data.repId == request.auth.uid);
+      allow read: if isManager() ||
+        (isSubmitter() && resource.data.repId == request.auth.uid);
+      // Visit reports are a record: no edits by anyone (the apps never update them).
+      allow update, delete: if false;
+    }
+
+    match /stockMovements/{movementId} {
+      allow read, create: if isManager();
+      allow update, delete: if false;
+    }
+
+    match /locations/{locationId} {
+      allow read, create: if isManager() || isSubmitter();
+      allow update, delete: if isManager();
+    }
+
+    match /users/{uid} {
+      allow read: if isManager() || isSubmitter();
+      // Your own profile only, and the stored email must be your real login email.
+      allow create, update: if request.auth != null && request.auth.uid == uid &&
+        request.resource.data.email == request.auth.token.email;
+      allow delete: if false;
+    }
+  }
+}
