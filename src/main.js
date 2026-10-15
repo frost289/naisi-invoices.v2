@@ -34,7 +34,7 @@ import {
   seedDefaultProductsIfEmpty
 } from './products.js';
 import {
-  submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
+  fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
   fetchOrderById, setOrderStatus,
   issueInvoiceForOrder, issueStandaloneInvoice, newStandaloneInvoiceId,
   fetchOrdersReadyToDeliverPage, markOrderDelivered
@@ -50,9 +50,12 @@ import {
   fetchOrdersInRange, fetchExpensesInRange, fetchVisitsInRange, buildIntervalSummary
 } from './reports.js';
 import {
-  submitVisit, fetchMyVisitsPage, fetchAllVisitsForAggregation, aggregateVisitsByRep,
-  NO_ORDER_REASONS
+  fetchMyVisitsPage, fetchMyVisitsForDate, recordNoOrderVisit, submitOrderWithVisit,
+  validateNoOrderInput, validateOrderItems, newRequestId
 } from './visits.js';
+import { malawiDate, malawiWeekday, weekdayOfDate, addDays } from './malawiTime.js';
+import { repDayProgress, scheduledForDate, buildPerformanceReport, scheduleChangedSince } from './visitSchedule.js';
+import { fetchRepEmails } from './roles.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
   initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc, mergeById,
@@ -281,6 +284,7 @@ async function initApp(user, role) {
     summary: loadSummaryView,
     deliveries: loadDeliveriesView,
     myvisits: resetAndLoadMyVisits,
+    logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
   };
 
   async function showView(view) {
@@ -1183,7 +1187,7 @@ async function initApp(user, role) {
     const scheduleDayTabs = document.getElementById('scheduleDayTabs');
     const scheduleDayList = document.getElementById('scheduleDayList');
     const scheduleDayLabels = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
-    let currentScheduleDay = VISIT_DAYS[new Date().getDay() === 0 ? 0 : new Date().getDay() - 1] || 'Mon';
+    let currentScheduleDay = VISIT_DAYS.includes(malawiWeekday()) ? malawiWeekday() : 'Mon';
 
     function renderScheduleDayTabs() {
       scheduleDayTabs.innerHTML = VISIT_DAYS.map(d => `
@@ -1196,8 +1200,9 @@ async function initApp(user, role) {
       scheduleDayList.innerHTML = customersForDay.length
         ? `<p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${customersForDay.length} customer${customersForDay.length === 1 ? '' : 's'} on ${scheduleDayLabels[currentScheduleDay]}</p>` +
           customersForDay.map(c => `
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line);">
-              <span>${c.name}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${c.location}</span>` : ''}</span>
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line);">
+              <span>${esc(c.name)}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${esc(c.location)}</span>` : ''}</span>
+              ${customerDayCellHtml(c)}
             </div>
           `).join('')
         : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${scheduleDayLabels[currentScheduleDay]} yet — set a day per customer in the Manage Customers table above.</p>`;
@@ -1213,6 +1218,26 @@ async function initApp(user, role) {
       if (!btn) return;
       currentScheduleDay = btn.dataset.day;
       refreshWeeklySchedule();
+    });
+
+    // Managers can change a customer's weekly day right here too (same save as the Manage Customers table).
+    scheduleDayList.addEventListener('change', async (e) => {
+      const select = e.target.closest('.customer-day-select');
+      if (!select) return;
+      const id = select.dataset.id, day = select.value || null;
+      select.disabled = true;
+      try {
+        await setCustomerVisitDay(id, day);
+        await loadCustomersCache();
+        const idx = loadedCustomers.findIndex(c => c.id === id);
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
+        applyCustomerSearchAndRender();
+        showToast('Visit day updated.', 'success');
+      } catch (err) {
+        showToast('Could not update visit day: ' + err.message, 'error');
+      } finally {
+        refreshWeeklySchedule();
+      }
     });
 
     refreshWeeklySchedule();
@@ -3242,7 +3267,9 @@ async function initApp(user, role) {
     window.__openEditOrderModal = openEditOrderModal;
   }
 
-  // ============= LOG VISIT (submitter) =============
+  // ============= TODAY'S VISITS (sales rep) =============
+  // Opens automatically for a rep. Everyone shares one list (active customers whose weekly
+  // day matches today in MALAWI time); each rep's visits and progress are recorded separately.
   if (!isManager) {
     const lvCustSearch = document.getElementById('lvCustSearch');
     const lvCustSuggestions = document.getElementById('lvCustSuggestions');
@@ -3257,6 +3284,9 @@ async function initApp(user, role) {
     const lvNoOrderFields = document.getElementById('lvNoOrderFields');
     const lvReason = document.getElementById('lvReason');
     const lvReasonNotes = document.getElementById('lvReasonNotes');
+    const lvReasonNotesLabel = document.getElementById('lvReasonNotesLabel');
+    const lvNoOrderError = document.getElementById('lvNoOrderError');
+    const lvRepeatNote = document.getElementById('lvRepeatNote');
     const lvSubmitNoOrderBtn = document.getElementById('lvSubmitNoOrderBtn');
     const lvOrderFormWrap = document.getElementById('lvOrderFormWrap');
     const lvOrderNotes = document.getElementById('lvOrderNotes');
@@ -3266,6 +3296,8 @@ async function initApp(user, role) {
     const lvPinNowBtn = document.getElementById('lvPinNowBtn');
 
     let lvSelected = null;
+    let lvRequestId = null;   // one per shop selection; kept across failed/ambiguous saves so a retry cannot duplicate
+    let lvSaving = false;     // blocks double-clicks while a save is in flight
 
     // ---- Pinned-location gate ----
     // A rep can log a "No Order" visit for any customer, but cannot place
@@ -3294,7 +3326,7 @@ async function initApp(user, role) {
           await updateCustomerLocation(target.id, { lat, lng });
           target.lat = lat; target.lng = lng;      // same object the customer cache holds
           if (lvSelected && lvSelected.id === target.id) lvApplyPinGate();
-          renderTodaysRoute();
+          renderTodaysVisits();
           showToast('Location pinned. You can place the order now.', 'success');
         },
       });
@@ -3312,16 +3344,26 @@ async function initApp(user, role) {
       lvOrderItemsBody.innerHTML = '';
       lvOrderNotes.value = '';
       lvReasonNotes.value = '';
-      lvReason.value = 'Not interested';
+      lvReason.selectedIndex = 0;            // "Select a reason…" — never pre-chosen
+      lvNoOrderError.style.display = 'none';
+      lvRepeatNote.style.display = 'none';
+      lvUpdateExplanationLabel();
     }
 
     function lvResetAll() {
       lvSelected = null;
+      lvRequestId = null;
       lvSelectedCustomer.style.display = 'none';
       lvCustSearch.style.display = 'block';
       lvCustSearch.value = '';
       lvResetOutcome();
     }
+
+    function lvUpdateExplanationLabel() {
+      lvReasonNotesLabel.textContent = lvReason.value === 'Other' ? 'Explanation (required for "Other")' : 'Details (optional)';
+      lvReasonNotes.required = lvReason.value === 'Other';
+    }
+    lvReason.addEventListener('change', () => { lvUpdateExplanationLabel(); lvNoOrderError.style.display = 'none'; });
 
     // Reps can only use Quick Add from the catalog — free-text custom
     // items are how inconsistent/misspelled product descriptions creep
@@ -3332,6 +3374,7 @@ async function initApp(user, role) {
 
     function selectCustomerForVisit(c) {
       lvSelected = c;
+      lvRequestId = newRequestId();
       lvCustName.textContent = c.name;
       lvCustPhone.textContent = c.phone || '';
       lvCustLocation.textContent = c.location || '';
@@ -3340,20 +3383,32 @@ async function initApp(user, role) {
       lvCustSearch.style.display = 'none';
       lvCustSuggestions.style.display = 'none';
       lvOutcomeCard.style.display = 'block';
+      const earlier = todayVisits.filter(v => v.customerId === c.id);
+      if (earlier.length) {
+        const last = earlier[earlier.length - 1];
+        lvRepeatNote.textContent = `Already visited today (${last.outcome === 'Order Placed' ? 'order ' + (last.orderNo || '') : 'no order: ' + (last.reasonNoOrder || '')}). Saving again records an extra visit; it still counts as one shop visited.`;
+        lvRepeatNote.style.display = 'block';
+      } else {
+        lvRepeatNote.style.display = 'none';
+      }
     }
 
-    // ---- Today's Route ----
-    // A predictable weekly routine: whatever day it is, show exactly
-    // the active customers assigned to that day (set by the manager
-    // in Manage Customers), so the rep always knows who to see without
-    // having to remember or search — and so customers themselves can
-    // learn "the Naisi guys come on Wednesdays".
+    // ---- Today's list and progress ----
+    // Saved visits are the single source of truth: the list and the counters are rebuilt from
+    // them, so leaving the screen or refreshing the page shows the same progress.
     const todaysRouteCard = document.getElementById('todaysRouteCard');
     const todaysRouteDayLabel = document.getElementById('todaysRouteDayLabel');
+    const todaysRouteDate = document.getElementById('todaysRouteDate');
     const todaysRouteList = document.getElementById('todaysRouteList');
     const todaysRouteEmpty = document.getElementById('todaysRouteEmpty');
-    const dayFullNames = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
-    const dayAbbrevByJsDay = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']; // JS getDay(): 0=Sun..6=Sat
+    const todaysOtherWrap = document.getElementById('todaysOtherWrap');
+    const todaysOtherList = document.getElementById('todaysOtherList');
+    const todaysLoadError = document.getElementById('todaysLoadError');
+    const dayFullNames = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday', Sun: 'Sunday' };
+
+    let todayVisits = [];        // this rep's visits for todayDate
+    let todayDate = malawiDate();
+    let visitsLoaded = false;
 
     // Straight-line route ordering for today's customers. Start = phone GPS,
     // falling back to the warehouse pin. Unpinned customers go last.
@@ -3362,8 +3417,7 @@ async function initApp(user, role) {
     const todaysRouteSummary = document.getElementById('todaysRouteSummary');
 
     todaysRouteOptimizeBtn.addEventListener('click', async () => {
-      const todayAbbrev = dayAbbrevByJsDay[new Date().getDay()];
-      const todays = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
+      const todays = scheduledForDate(customersCache, todayDate);
       const pinned = todays.filter(hasPin);
       if (pinned.length === 0) { showToast('None of today\'s customers have a pin yet.', 'error'); return; }
       setButtonLoading(todaysRouteOptimizeBtn, 'Finding your location…');
@@ -3381,45 +3435,104 @@ async function initApp(user, role) {
         todaysRouteSummary.textContent =
           `Shortest route from ${startLabel(start)}: about ${formatKm(totalKm)} for ${ordered.length} stop${ordered.length === 1 ? '' : 's'} (straight-line).` +
           (todays.length > pinned.length ? ` ${todays.length - pinned.length} without a pin are listed last.` : '');
-        renderTodaysRoute();
+        renderTodaysVisits();
       } finally {
         clearButtonLoading(todaysRouteOptimizeBtn);
       }
     });
 
-    function renderTodaysRoute() {
-      const todayAbbrev = dayAbbrevByJsDay[new Date().getDay()];
-      if (!todayAbbrev) { todaysRouteCard.style.display = 'none'; return; } // Sunday — no route
-      todaysRouteCard.style.display = 'block';
-      todaysRouteDayLabel.textContent = dayFullNames[todayAbbrev];
-
-      let todaysCustomers = customersCache.filter(c => c.active !== false && c.assignedDay === todayAbbrev);
-      todaysRouteEmpty.style.display = todaysCustomers.length === 0 ? 'block' : 'none';
-      todaysRouteOptimizeBtn.style.display = todaysCustomers.length > 1 ? 'block' : 'none';
-      if (todaysRouteInfo) {
-        todaysCustomers = todaysCustomers.slice().sort((a, b) =>
-          (todaysRouteInfo.get(a.id)?.stopNo ?? 9999) - (todaysRouteInfo.get(b.id)?.stopNo ?? 9999));
-      }
-      todaysRouteList.innerHTML = todaysCustomers.map(c => `
-        <button type="button" class="todays-route-item" data-id="${c.id}">
-          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="route-stop-badge">${todaysRouteInfo.get(c.id).stopNo}</span>` : ''}
-          <span class="todays-route-name">${c.name}</span>
-          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="todays-route-location">${formatKm(todaysRouteInfo.get(c.id).legKm)} from previous</span>` : ''}
-          ${c.location ? `<span class="todays-route-location">${c.location}</span>` : ''}
-          ${hasPin(c) ? '' : '<span class="no-pin-tag">📍 needs pin</span>'}
-        </button>
-      `).join('');
+    function visitStatusHtml(visits) {
+      if (!visits || !visits.length) return '<span class="visit-status todo">To visit</span>';
+      const last = visits[visits.length - 1];
+      const more = visits.length > 1 ? ` · ${visits.length} visits` : '';
+      return last.outcome === 'Order Placed'
+        ? `<span class="visit-status order">✓ Order ${esc(last.orderNo || '')}${more}</span>`
+        : `<span class="visit-status noorder">✓ No order: ${esc(last.reasonNoOrder || '')}${more}</span>`;
     }
+
+    function renderTodaysVisits() {
+      todayDate = malawiDate();
+      const weekday = weekdayOfDate(todayDate);
+      todaysRouteCard.style.display = 'block';
+      todaysRouteDayLabel.textContent = dayFullNames[weekday];
+      todaysRouteDate.textContent = `(${formatDate(todayDate)}, Malawi time)`;
+
+      const progress = repDayProgress({ customers: customersCache, visits: todayVisits, date: todayDate });
+      document.getElementById('vpScheduled').textContent = progress.scheduledCount;
+      document.getElementById('vpVisited').textContent = progress.visitedCount;
+      document.getElementById('vpDue').textContent = progress.stillDue.length;
+      document.getElementById('vpOrders').textContent = progress.ordersTaken;
+      document.getElementById('vpNoOrder').textContent = progress.noOrderVisits;
+
+      let list = progress.scheduled;
+      todaysRouteEmpty.style.display = list.length === 0 ? 'block' : 'none';
+      todaysRouteOptimizeBtn.style.display = list.length > 1 ? 'block' : 'none';
+      if (todaysRouteInfo) {
+        list = list.slice().sort((a, b) => (todaysRouteInfo.get(a.id)?.stopNo ?? 9999) - (todaysRouteInfo.get(b.id)?.stopNo ?? 9999));
+      } else {
+        // still-to-visit first, then the ones with an outcome
+        list = list.slice().sort((a, b) => (progress.visitsByCustomer.has(a.id) ? 1 : 0) - (progress.visitsByCustomer.has(b.id) ? 1 : 0));
+      }
+      todaysRouteList.innerHTML = list.map(c => {
+        const visits = progress.visitsByCustomer.get(c.id);
+        return `
+        <button type="button" class="todays-route-item ${visits ? 'visited' : ''}" data-id="${esc(c.id)}">
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="route-stop-badge">${todaysRouteInfo.get(c.id).stopNo}</span>` : ''}
+          <span class="todays-route-name">${esc(c.name)}</span>${visitStatusHtml(visits)}
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="todays-route-location">${formatKm(todaysRouteInfo.get(c.id).legKm)} from previous</span>` : ''}
+          ${c.location ? `<span class="todays-route-location">${esc(c.location)}</span>` : ''}
+          ${hasPin(c) ? '' : '<span class="no-pin-tag">📍 needs pin</span>'}
+        </button>`;
+      }).join('');
+
+      // visits to shops that are not on today's list
+      const scheduledIds = new Set(progress.scheduled.map(c => c.id));
+      const otherIds = [...progress.visitsByCustomer.keys()].filter(id => !scheduledIds.has(id));
+      todaysOtherWrap.style.display = otherIds.length ? 'block' : 'none';
+      todaysOtherList.innerHTML = otherIds.map(id => {
+        const visits = progress.visitsByCustomer.get(id);
+        return `<div style="padding:6px 0; border-bottom:1px solid var(--line);">${esc(visits[0].customerName)} ${visitStatusHtml(visits)}</div>`;
+      }).join('');
+    }
+
+    const todaysVisitsGuard = createPagedLoadGuard();
+    async function loadTodaysVisits() {
+      todaysVisitsGuard.reset();
+      const date = malawiDate();
+      await todaysVisitsGuard.run({
+        fetch: async () => {
+          try { await loadCustomersCache(); } catch (err) { /* keep the cache we already have */ }
+          return fetchMyVisitsForDate(user.uid, date);
+        },
+        apply: (visits) => {
+          todayVisits = visits; todayDate = date; visitsLoaded = true;
+          todaysLoadError.style.display = 'none';
+          renderTodaysVisits();
+        },
+        onError: (err) => {
+          // Never show an empty "0 visited" screen as if it were true when the load failed.
+          todaysLoadError.textContent = 'Could not load today\'s saved visits (' + err.message + '). Progress shown may be incomplete. Pull to refresh or reopen this screen.';
+          todaysLoadError.style.display = 'block';
+          renderTodaysVisits();
+        },
+      });
+    }
+    window.__loadTodaysVisits = loadTodaysVisits;
+
+    // If the app stays open past midnight (Malawi), reload when the rep comes back to it.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && visitsLoaded && malawiDate() !== todayDate) loadTodaysVisits();
+    });
 
     todaysRouteList.addEventListener('click', (e) => {
       const item = e.target.closest('.todays-route-item');
-      if (!item) return;
+      if (!item || lvSaving) return;
       const c = customersCache.find(cc => cc.id === item.dataset.id);
       if (!c) return;
+      lvResetOutcome();
       selectCustomerForVisit(c);
+      lvOutcomeCard.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     });
-
-    renderTodaysRoute();
 
     lvCustSearch.addEventListener('input', () => {
       const q = lvCustSearch.value.trim().toLowerCase();
@@ -3427,9 +3540,9 @@ async function initApp(user, role) {
       const matches = customersCache.filter(c => c.active !== false && (c.name || '').toLowerCase().includes(q));
       if (!matches.length) { lvCustSuggestions.style.display = 'none'; return; }
       lvCustSuggestions.innerHTML = matches.slice(0, 8).map(c => `
-        <div class="suggestion-item" data-id="${c.id}">
-          <span class="sug-name">${c.name}</span>
-          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}${hasPin(c) ? '' : ' · ⚠ no pin'}</span>
+        <div class="suggestion-item" data-id="${esc(c.id)}">
+          <span class="sug-name">${esc(c.name)}</span>
+          <span class="sug-meta">${esc(c.phone || '')}${c.phone && c.location ? ' · ' : ''}${esc(c.location || '')}${c.assignedDay === weekdayOfDate(malawiDate()) ? '' : ' · not scheduled today'}${hasPin(c) ? '' : ' · ⚠ no pin'}</span>
         </div>
       `).join('');
       lvCustSuggestions.style.display = 'block';
@@ -3440,11 +3553,13 @@ async function initApp(user, role) {
       if (!item) return;
       const c = customersCache.find(c => c.id === item.dataset.id);
       if (!c) return;
+      lvResetOutcome();
       selectCustomerForVisit(c);
     });
 
     lvClearCustomer.addEventListener('click', (e) => {
       e.preventDefault();
+      if (lvSaving) return;
       lvResetAll();
     });
 
@@ -3464,28 +3579,43 @@ async function initApp(user, role) {
       lvNoOrderFields.style.display = 'block';
     });
 
+    function lvAfterSaved() {
+      lvResetAll();
+      return loadTodaysVisits();   // reload from the database so what is shown is what is saved
+    }
+
     lvSubmitNoOrderBtn.addEventListener('click', async () => {
+      if (lvSaving) return;
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
+      const problem = validateNoOrderInput({ reason: lvReason.value, notes: lvReasonNotes.value });
+      if (problem) {
+        lvNoOrderError.textContent = problem;
+        lvNoOrderError.style.display = 'block';
+        (lvReason.value ? lvReasonNotes : lvReason).focus();
+        return;
+      }
+      lvNoOrderError.style.display = 'none';
+      lvSaving = true;
       setButtonLoading(lvSubmitNoOrderBtn, 'Saving…');
       try {
-        await submitVisit({
-          customerId: lvSelected.id, customerName: lvSelected.name,
-          outcome: 'No Order',
-          reasonNoOrder: lvReason.value,
-          reasonNotes: lvReasonNotes.value.trim(),
-          orderId: null, orderNo: null,
-          uid: user.uid, email: user.email,
+        const res = await recordNoOrderVisit({
+          customerId: lvSelected.id, reason: lvReason.value, notes: lvReasonNotes.value,
+          requestId: lvRequestId, uid: user.uid, email: user.email,
         });
-        showToast('Visit logged.', 'success');
-        lvResetAll();
+        showToast(res.alreadySaved ? 'This visit had already been saved. No duplicate was created.' : 'Visit logged.', res.alreadySaved ? 'info' : 'success');
+        await lvAfterSaved();
       } catch (err) {
-        showToast('Could not log visit: ' + err.message, 'error');
+        // lvRequestId is kept: if the save actually went through, Retry finds it instead of duplicating.
+        lvNoOrderError.textContent = 'Could not save the visit: ' + err.message + ' You can tap Log Visit again; it will not create a duplicate.';
+        lvNoOrderError.style.display = 'block';
       } finally {
+        lvSaving = false;
         clearButtonLoading(lvSubmitNoOrderBtn);
       }
     });
 
     lvSubmitOrderBtn.addEventListener('click', async () => {
+      if (lvSaving) return;
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
       if (!hasPin(lvSelected)) {
         showToast('Pin this customer\'s location before placing an order.', 'error');
@@ -3493,37 +3623,30 @@ async function initApp(user, role) {
         return;
       }
       const items = getItems(lvOrderItemsBody);
-      if (items.length === 0) { showToast('Add at least one item.', 'error'); return; }
+      const problem = validateOrderItems(items);
+      if (problem) { showToast(problem, 'error'); return; }
 
+      lvSaving = true;
       setButtonLoading(lvSubmitOrderBtn, 'Submitting…');
       try {
-        const { id: orderId, orderNo } = await submitOrder({
-          customerId: lvSelected.id,
-          customerName: lvSelected.name,
-          customerPhone: lvSelected.phone || '-',
-          customerLocation: lvSelected.location || '-',
-          customerLat: lvSelected.lat,
-          customerLng: lvSelected.lng,
-          items,
-          notes: lvOrderNotes.value.trim(),
-          uid: user.uid,
-          email: user.email,
+        // Order + visit + order number are saved together or not at all.
+        const res = await submitOrderWithVisit({
+          customerId: lvSelected.id, items, notes: lvOrderNotes.value,
+          requestId: lvRequestId, uid: user.uid, email: user.email,
         });
-        await submitVisit({
-          customerId: lvSelected.id, customerName: lvSelected.name,
-          outcome: 'Order Placed',
-          reasonNoOrder: null, reasonNotes: '',
-          orderId, orderNo,
-          uid: user.uid, email: user.email,
-        });
-        showToast(`Order ${orderNo} submitted and visit logged.`, 'success');
-        lvResetAll();
+        showToast(res.alreadySaved
+          ? `Order ${res.orderNo} had already been saved. No duplicate was created.`
+          : `Order ${res.orderNo} submitted and visit logged.`, res.alreadySaved ? 'info' : 'success');
+        await lvAfterSaved();
       } catch (err) {
-        showToast('Could not submit order: ' + err.message, 'error');
+        showToast('Could not submit the order: ' + err.message + ' Nothing was half-saved; you can tap Submit again, it will not create a duplicate.', 'error', 7000);
       } finally {
+        lvSaving = false;
         clearButtonLoading(lvSubmitOrderBtn);
       }
     });
+
+    renderTodaysVisits();
   }
 
   // ============= MY VISITS (submitter) =============
@@ -3693,60 +3816,136 @@ async function initApp(user, role) {
   async function loadDeliveriesView() { if (window.loadDeliveriesView) await window.loadDeliveriesView(); }
 
   // ============= REP PERFORMANCE (manager) =============
+  // Daily-visit report: filter by date range and rep; reps with no visits are included.
+  // Definitions (also shown on screen): see src/visitSchedule.js and docs/DAILY-VISITS.md.
   if (isManager) {
     const repSummaryBody = document.getElementById('repSummaryBody');
     const repSummaryEmpty = document.getElementById('repSummaryEmpty');
     const allVisitsBody = document.getElementById('allVisitsBody');
     const allVisitsEmpty = document.getElementById('allVisitsEmpty');
     const perfRepFilter = document.getElementById('perfRepFilter');
-    let allVisitsCache = [];
+    const perfFrom = document.getElementById('perfFrom');
+    const perfTo = document.getElementById('perfTo');
+    const perfRunBtn = document.getElementById('perfRunBtn');
+    const perfScheduleWarning = document.getElementById('perfScheduleWarning');
+    const dueBody = document.getElementById('dueBody'), dueEmpty = document.getElementById('dueEmpty');
+    const noOrderBody = document.getElementById('noOrderBody'), noOrderEmpty = document.getElementById('noOrderEmpty');
+    const ordersTakenBody = document.getElementById('ordersTakenBody'), ordersTakenEmpty = document.getElementById('ordersTakenEmpty');
+    const ordersValueNote = document.getElementById('ordersValueNote');
+    const perfGuard = createPagedLoadGuard();
+    let perfReps = [];
 
-    window.loadPerformanceView = async function loadPerformanceView() {
-      try {
-        allVisitsCache = await fetchAllVisitsForAggregation();
-        await loadProfilesCache(); // refresh in case a rep set/changed their name since page load
-      } catch (err) {
-        showToast('Could not load visit reports: ' + err.message, 'error');
-        return;
+    const pctText = (p) => (p === null ? '—' : p + '%');
+    const nameOf = (email) => esc(displayNameForEmail(email));
+
+    function renderPerformance(report, visits) {
+      const rows = report.rows;
+      repSummaryEmpty.style.display = rows.length === 0 ? 'block' : 'none';
+      repSummaryBody.innerHTML = rows.map(r => `
+        <tr data-rep="${esc(r.rep)}">
+          <td>${nameOf(r.rep)}${r.totalVisits === 0 ? ' <span class="numbering-hint">(no visits recorded)</span>' : ''}</td>
+          <td>${r.scheduledCount}</td><td>${r.visitedCount}</td><td>${r.stillDueCount}</td>
+          <td>${r.ordersTaken}</td><td>${r.noOrderVisits}</td>
+          <td>${pctText(r.coveragePct)}</td><td>${pctText(r.conversionPct)}</td>
+        </tr>`).join('');
+
+      const due = rows.flatMap(r => r.due.map(d => ({ rep: r.rep, ...d })));
+      dueEmpty.style.display = due.length ? 'none' : 'block';
+      dueBody.innerHTML = due.sort((a, b) => a.date.localeCompare(b.date) || a.rep.localeCompare(b.rep)).map(d => `
+        <tr><td>${formatDate(d.date)}</td><td>${nameOf(d.rep)}</td><td>${esc(d.customer.name)}</td><td>${esc(d.customer.location || '')}</td></tr>`).join('');
+
+      const noOrder = rows.flatMap(r => r.noOrder).sort((a, b) => b.date.localeCompare(a.date));
+      noOrderEmpty.style.display = noOrder.length ? 'none' : 'block';
+      noOrderBody.innerHTML = noOrder.map(v => `
+        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
+        <td>${esc(v.reasonNoOrder || '—')}</td><td>${esc(v.reasonNotes || '')}</td></tr>`).join('');
+
+      const orders = rows.flatMap(r => r.orders).sort((a, b) => b.date.localeCompare(a.date));
+      ordersTakenEmpty.style.display = orders.length ? 'none' : 'block';
+      ordersTakenBody.innerHTML = orders.map(v => `
+        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
+        <td>${v.orderId ? `<button type="button" class="list-action-btn" data-view-order="${esc(v.orderId)}">${esc(v.orderNo || 'View order')}</button>` : '—'}</td>
+        <td>${typeof v.orderValue === 'number' ? mwk(v.orderValue) : '—'}</td></tr>`).join('');
+      const valued = rows.reduce((s, r) => s + r.valuedOrders, 0), unvalued = rows.reduce((s, r) => s + r.unvaluedOrders, 0);
+      const total = rows.reduce((s, r) => s + (r.valueTotal || 0), 0);
+      ordersValueNote.textContent = orders.length
+        ? (valued ? `Value of ${valued} order(s) where a value was recorded when the visit was saved: ${mwk(total)}.` : 'No order values were recorded for these visits.') +
+          (unvalued ? ` ${unvalued} older visit(s) have no recorded value and are left out of that total (shown as "—", not as zero).` : '') +
+          ' Values are as taken on the visit; later edits to an order are not reflected.'
+        : '';
+
+      const repKeys = new Set(rows.map(r => r.rep));
+      const shown = visits.filter(v => repKeys.has(String(v.repEmail || '').trim().toLowerCase()))
+        .sort((a, b) => b.date.localeCompare(a.date));
+      allVisitsEmpty.style.display = shown.length ? 'none' : 'block';
+      allVisitsBody.innerHTML = shown.map(v => `
+        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
+        <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
+        <td>${v.outcome === 'No Order' ? esc(v.reasonNoOrder || '—') + (v.reasonNotes ? ': ' + esc(v.reasonNotes) : '') : '—'}</td>
+        <td>${v.wasScheduled === true ? 'Yes' : v.wasScheduled === false ? 'No' : '—'}</td></tr>`).join('');
+
+      // Schedule-change warning
+      const changed = scheduleChangedSince(customersCache, report.from, (ms) => malawiDate(new Date(ms)));
+      if (changed.length) {
+        perfScheduleWarning.textContent = `Heads up: the visit day of ${changed.length} customer(s) was changed on or after ${formatDate(report.from)}. Scheduled and Still due figures for earlier days in this range use the schedule as it is now, so they may differ from what applied at the time. Visited, Orders and No order counts come from saved visits and are unaffected.`;
+        perfScheduleWarning.style.display = 'block';
+      } else {
+        perfScheduleWarning.style.display = 'none';
       }
-
-      const summary = aggregateVisitsByRep(allVisitsCache);
-      repSummaryEmpty.style.display = summary.length === 0 ? 'block' : 'none';
-      repSummaryBody.innerHTML = summary.map(r => `
-        <tr>
-          <td>${displayNameForEmail(r.repEmail)}</td>
-          <td>${r.total}</td>
-          <td>${r.ordersPlaced}</td>
-          <td><strong>${r.successRate}%</strong></td>
-        </tr>
-      `).join('');
-
-      const reps = [...new Set(allVisitsCache.map(v => v.repEmail))].sort();
-      perfRepFilter.innerHTML = `<option value="all">All reps</option>` +
-        reps.map(r => `<option value="${r}">${displayNameForEmail(r)}</option>`).join('');
-
-      renderAllVisits();
-    };
-
-    function renderAllVisits() {
-      const filterVal = perfRepFilter.value;
-      const filtered = filterVal === 'all' ? allVisitsCache : allVisitsCache.filter(v => v.repEmail === filterVal);
-      allVisitsEmpty.style.display = filtered.length === 0 ? 'block' : 'none';
-      allVisitsBody.innerHTML = filtered.map(v => {
-        const reason = v.outcome === 'No Order' ? (v.reasonNoOrder || '—') : '—';
-        return `
-          <tr>
-            <td>${formatDate(v.date)}</td>
-            <td>${displayNameForEmail(v.repEmail)}</td>
-            <td>${v.customerName}</td>
-            <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
-            <td>${reason}</td>
-          </tr>
-        `;
-      }).join('');
     }
 
-    perfRepFilter.addEventListener('change', renderAllVisits);
+    async function runPerformance() {
+      const from = perfFrom.value, to = perfTo.value;
+      if (!from || !to || from > to) { showToast('Choose a valid From and To date (From must not be after To).', 'error'); return; }
+      await perfGuard.run({
+        setLoading: (on) => (on ? setButtonLoading(perfRunBtn, 'Loading…') : clearButtonLoading(perfRunBtn)),
+        fetch: async () => {
+          const [visits, reps] = await Promise.all([fetchVisitsInRange(from, to), fetchRepEmails()]);
+          try { await loadProfilesCache(); await loadCustomersCache(); } catch (err) { /* names fall back to emails */ }
+          return { visits, reps };
+        },
+        apply: ({ visits, reps }) => {
+          perfReps = reps;
+          const prev = perfRepFilter.value;
+          const all = [...new Set([...reps, ...visits.map(v => v.repEmail)].filter(Boolean).map(e => e.trim().toLowerCase()))].sort();
+          perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${nameOf(r)}</option>`).join('');
+          perfRepFilter.value = all.includes(prev) ? prev : 'all';
+          perfReport = { visits, from, to };
+          drawPerformance();
+        },
+        onError: (err) => showToast('Could not load the report: ' + err.message, 'error'),
+      });
+    }
+    let perfReport = null;
+    function drawPerformance() {
+      if (!perfReport) return;
+      const { visits, from, to } = perfReport;
+      const report = buildPerformanceReport({ customers: customersCache, visits, reps: perfReps, from, to, repFilter: perfRepFilter.value });
+      renderPerformance(report, visits);
+    }
+
+    window.loadPerformanceView = async function loadPerformanceView() {
+      if (!perfFrom.value || !perfTo.value) { perfFrom.value = perfTo.value = malawiDate(); }
+      await runPerformance();
+    };
+
+    perfRunBtn.addEventListener('click', runPerformance);
+    document.getElementById('perfTodayBtn').addEventListener('click', () => { perfFrom.value = perfTo.value = malawiDate(); runPerformance(); });
+    document.getElementById('perfWeekBtn').addEventListener('click', () => {
+      const today = malawiDate();
+      const offset = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[weekdayOfDate(today)];
+      perfFrom.value = addDays(today, -offset); perfTo.value = today; runPerformance();
+    });
+    perfRepFilter.addEventListener('change', drawPerformance);
+    ordersTakenBody.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-view-order]');
+      if (!btn) return;
+      try {
+        const order = await fetchOrderById(btn.dataset.viewOrder);
+        if (!order) { showToast('That order could not be found.', 'error'); return; }
+        openOrderPreviewModal(order);
+      } catch (err) { showToast('Could not open the order: ' + err.message, 'error'); }
+    });
   }
   async function loadPerformanceView() { if (window.loadPerformanceView) await window.loadPerformanceView(); }
 
@@ -3759,20 +3958,17 @@ async function initApp(user, role) {
     const sumResultsBody = document.getElementById('sumResultsBody');
     const sumGenerateBtn = document.getElementById('sumGenerateBtn');
 
-    function isoDate(d) { return d.toISOString().slice(0, 10); }
+    function isoDate(d) { return malawiDate(d); }   // Malawi calendar date, so 'today' matches visit dates
 
     function setRangeToday() {
       const t = isoDate(new Date());
       sumFromInput.value = t; sumToInput.value = t;
     }
     function setRangeThisWeek() {
-      const now = new Date();
-      const day = now.getDay(); // 0 = Sunday
-      const diffToMonday = (day === 0 ? 6 : day - 1);
-      const monday = new Date(now);
-      monday.setDate(now.getDate() - diffToMonday);
-      sumFromInput.value = isoDate(monday);
-      sumToInput.value = isoDate(now);
+      const today = malawiDate();
+      const offset = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[weekdayOfDate(today)];
+      sumFromInput.value = addDays(today, -offset);
+      sumToInput.value = today;
     }
     function setRangeThisMonth() {
       const now = new Date();

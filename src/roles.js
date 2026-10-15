@@ -10,3 +10,10 @@ export async function getUserRole(email) {
   if ((data.deliverers || []).includes(email)) return 'delivery';
   return null;
 }
+
+// Emails of every sales rep (role "submitter"), so reports can list reps who
+// have not recorded any visit.
+export async function fetchRepEmails() {
+  const snap = await getDoc(doc(db, 'config', 'roles'));
+  return snap.exists() ? [...(snap.data().submitters || [])] : [];
+}

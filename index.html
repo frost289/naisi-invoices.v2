@@ -109,7 +109,7 @@
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
   <!-- Submitter-only -->
-  <button type="button" class="nav-tab" data-view="logvisit" id="navLogVisitBtn">Log Visit</button>
+  <button type="button" class="nav-tab" data-view="logvisit" id="navLogVisitBtn">Today's Visits</button>
   <button type="button" class="nav-tab" data-view="myvisits" id="navMyVisitsBtn">My Visits</button>
 </div>
 
@@ -119,11 +119,23 @@
   <div class="panel" style="grid-column:1/-1; max-width:700px; margin:0 auto;">
 
     <div class="card" id="todaysRouteCard" style="display:none;">
-      <h2><span class="dot"></span>Today's Route — <span id="todaysRouteDayLabel"></span></h2>
-      <button type="button" class="generate-btn" id="todaysRouteOptimizeBtn" style="margin:0 0 10px;">🧭 Order by shortest route</button>
+      <h2><span class="dot"></span>Today's Visits — <span id="todaysRouteDayLabel"></span> <span id="todaysRouteDate" class="numbering-hint" style="font-weight:400;"></span></h2>
+      <div class="visit-progress" id="visitProgress" aria-live="polite">
+        <div><strong id="vpScheduled">0</strong><span>Scheduled</span></div>
+        <div><strong id="vpVisited">0</strong><span>Visited</span></div>
+        <div><strong id="vpDue">0</strong><span>Still to visit</span></div>
+        <div><strong id="vpOrders">0</strong><span>Orders taken</span></div>
+        <div><strong id="vpNoOrder">0</strong><span>No order</span></div>
+      </div>
+      <p id="todaysLoadError" class="pin-required-box" style="display:none;"></p>
+      <button type="button" class="generate-btn" id="todaysRouteOptimizeBtn" style="margin:10px 0;">🧭 Order by shortest route</button>
       <p id="todaysRouteSummary" class="numbering-hint" style="display:none; margin:0 0 10px;"></p>
       <div id="todaysRouteList"></div>
       <p id="todaysRouteEmpty" style="display:none; color:var(--muted); font-size:0.85rem;">No customers scheduled for today. Use search below for anyone else.</p>
+      <div id="todaysOtherWrap" style="display:none; margin-top:12px;">
+        <div class="quick-add-label">Also visited today (not scheduled today)</div>
+        <div id="todaysOtherList"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -142,6 +154,7 @@
 
     <div class="card" id="lvOutcomeCard" style="display:none;">
       <h2><span class="dot"></span>Visit Outcome</h2>
+      <p id="lvRepeatNote" class="numbering-hint" style="display:none; margin:0 0 8px;"></p>
       <div class="outcome-toggle">
         <button type="button" class="outcome-btn" data-outcome="Order Placed" id="lvOutcomeYes">✓ Order Placed</button>
         <button type="button" class="outcome-btn" data-outcome="No Order" id="lvOutcomeNo">✕ No Order</button>
@@ -155,19 +168,24 @@
 
       <div id="lvNoOrderFields" style="display:none; margin-top:14px;">
         <div class="field">
-          <label>Reason</label>
+          <label for="lvReason">Reason for no order <span class="auto-tag">required</span></label>
           <select id="lvReason">
-            <option>Not interested</option>
-            <option>Stock issue</option>
+            <option value="" selected disabled>Select a reason…</option>
+            <option>Shop still has stock</option>
             <option>Price too high</option>
-            <option>Customer unavailable</option>
+            <option>Stock unavailable</option>
+            <option>Shop owner unavailable</option>
+            <option>Shop closed</option>
+            <option>No money today</option>
+            <option>Not interested</option>
             <option>Other</option>
           </select>
         </div>
         <div class="field">
-          <label>Notes (optional)</label>
-          <textarea id="lvReasonNotes" placeholder="Any extra detail..."></textarea>
+          <label for="lvReasonNotes" id="lvReasonNotesLabel">Details (optional)</label>
+          <textarea id="lvReasonNotes" maxlength="500" placeholder="Any extra detail..."></textarea>
         </div>
+        <p id="lvNoOrderError" class="pin-required-box" style="display:none;" role="alert"></p>
         <button class="generate-btn" id="lvSubmitNoOrderBtn" type="button">Log Visit</button>
       </div>
     </div>
@@ -298,24 +316,60 @@
 <!-- ===================== REP PERFORMANCE VIEW (manager) ===================== -->
 <div id="performanceView" class="list-section" style="display:none;">
   <div class="card">
-    <h2><span class="dot"></span>Rep Success Rate</h2>
+    <h2><span class="dot"></span>Rep Visit Performance</h2>
+    <div class="row3" style="align-items:end;">
+      <div class="field"><label for="perfFrom">From</label><input type="date" id="perfFrom"></div>
+      <div class="field"><label for="perfTo">To</label><input type="date" id="perfTo"></div>
+      <div class="field"><label for="perfRepFilter">Sales rep</label><select id="perfRepFilter"><option value="all">All reps</option></select></div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+      <button type="button" class="generate-btn" id="perfRunBtn" style="width:auto;">Show report</button>
+      <button type="button" class="list-action-btn" id="perfTodayBtn">Today</button>
+      <button type="button" class="list-action-btn" id="perfWeekBtn">This week</button>
+    </div>
+    <p id="perfScheduleWarning" class="pin-required-box" style="display:none;"></p>
+    <div style="overflow-x:auto;">
     <table class="items-table" id="repSummaryTable" style="width:100%;">
-      <thead><tr><th>Rep</th><th>Visits</th><th>Orders Placed</th><th>Success Rate</th></tr></thead>
+      <thead><tr><th>Rep</th><th>Scheduled</th><th>Visited</th><th>Still due</th><th>Orders</th><th>No order</th><th>Coverage</th><th>Conversion</th></tr></thead>
       <tbody id="repSummaryBody"></tbody>
     </table>
-    <p id="repSummaryEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits logged yet.</p>
+    </div>
+    <p id="repSummaryEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No reps found.</p>
+    <details class="numbering-hint" style="margin-top:10px;" open>
+      <summary><strong>How these numbers are worked out</strong></summary>
+      <ul style="margin:6px 0 0 18px;">
+        <li><strong>Scheduled</strong>: active customers whose weekly visit day matches each date in the range, added up over the days. Every rep shares the same list.</li>
+        <li><strong>Visited</strong>: scheduled customers this rep recorded at least once that day. A repeat visit is kept in the history but counted once.</li>
+        <li><strong>Still due</strong> = Scheduled &minus; Visited.</li>
+        <li><strong>Orders / No order</strong>: every recorded visit with that outcome, including repeat visits and shops that were not scheduled that day.</li>
+        <li><strong>Coverage</strong> = Visited &divide; Scheduled. <strong>Conversion</strong> = Orders &divide; all recorded visits. Shown as &ldquo;&mdash;&rdquo; when the divisor is zero.</li>
+        <li><strong>Schedule changes</strong>: past days are measured against the schedule as it is <em>now</em>. If a customer&rsquo;s day was changed, earlier Scheduled and Still due figures can differ from what applied then; the report warns when that may affect the range.</li>
+      </ul>
+    </details>
   </div>
   <div class="card">
-    <h2><span class="dot"></span>All Visit Reports</h2>
-    <div class="field">
-      <label>Filter by rep</label>
-      <select id="perfRepFilter"><option value="all">All reps</option></select>
-    </div>
+    <h2><span class="dot"></span>Shops still due</h2>
+    <table class="items-table" style="width:100%;"><thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Location</th></tr></thead><tbody id="dueBody"></tbody></table>
+    <p id="dueEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">Nothing is due for this selection.</p>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span>Visits with no order</h2>
+    <table class="items-table" style="width:100%;"><thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Reason</th><th>Explanation</th></tr></thead><tbody id="noOrderBody"></tbody></table>
+    <p id="noOrderEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No unsuccessful visits for this selection.</p>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span>Orders taken on visits</h2>
+    <table class="items-table" style="width:100%;"><thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Order</th><th>Value when taken</th></tr></thead><tbody id="ordersTakenBody"></tbody></table>
+    <p id="ordersTakenEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No orders taken for this selection.</p>
+    <p id="ordersValueNote" class="numbering-hint"></p>
+  </div>
+  <div class="card">
+    <h2><span class="dot"></span>All visits in range</h2>
     <table class="items-table" id="allVisitsTable" style="width:100%;">
-      <thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Outcome</th><th>Reason</th></tr></thead>
+      <thead><tr><th>Date</th><th>Rep</th><th>Customer</th><th>Outcome</th><th>Reason</th><th>Scheduled?</th></tr></thead>
       <tbody id="allVisitsBody"></tbody>
     </table>
-    <p id="allVisitsEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits logged yet.</p>
+    <p id="allVisitsEmpty" style="color:var(--muted); font-size:0.85rem; display:none;">No visits recorded for this selection.</p>
   </div>
 </div>
 

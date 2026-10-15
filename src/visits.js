@@ -1,26 +1,173 @@
 import { db } from './firebase.js';
 import {
-  collection, addDoc, getDocs, serverTimestamp,
+  collection, doc, getDocs, runTransaction, serverTimestamp,
   query, where, orderBy, limit, startAfter
 } from 'firebase/firestore';
+import { ORDER_COUNTER_DOC, buildOrderNo } from './orderNumbering.js';
+import { isValidPin } from './customers.js';
+import { makeError } from './orderRevision.js';
+import { malawiDate, weekdayOfDate } from './malawiTime.js';
 
 const PAGE_SIZE = 25;
 
-export const NO_ORDER_REASONS = ['Not interested', 'Stock issue', 'Price too high', 'Customer unavailable', 'Other'];
+// No-order reasons. The rep must choose one deliberately (the form has no default).
+// "Other" requires a written explanation; the rest may carry optional details.
+export const NO_ORDER_REASONS = [
+  'Shop still has stock',
+  'Price too high',
+  'Stock unavailable',
+  'Shop owner unavailable',
+  'Shop closed',
+  'No money today',
+  'Not interested',
+  'Other',
+];
+export const MIN_OTHER_EXPLANATION = 3;   // non-blank characters
+export const MAX_NOTES_LENGTH = 500;
 
-export async function submitVisit({ customerId, customerName, outcome, reasonNoOrder, reasonNotes, orderId, orderNo, uid, email }) {
-  const docRef = await addDoc(collection(db, 'visits'), {
-    customerId, customerName,
+// ---- validation (used by the screens AND enforced again before any write) ----
+export function validateNoOrderInput({ reason, notes }) {
+  const text = String(notes ?? '').trim();
+  if (!reason || !NO_ORDER_REASONS.includes(reason)) return 'Choose a reason for no order.';
+  if (reason === 'Other' && text.length < MIN_OTHER_EXPLANATION) return 'Please explain the reason when you choose "Other".';
+  if (text.length > MAX_NOTES_LENGTH) return `Details must be ${MAX_NOTES_LENGTH} characters or fewer.`;
+  return null;
+}
+
+export function validateOrderItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return 'Add at least one item.';
+  for (const [i, it] of items.entries()) {
+    const n = i + 1;
+    if (!it || typeof it !== 'object') return `Item ${n} is not valid.`;
+    if (typeof it.productId !== 'string' || !it.productId) return `Item ${n} must be chosen from the product list.`;
+    if (!Number.isSafeInteger(it.qty) || it.qty <= 0) return `Item ${n}: quantity must be a whole number above 0.`;
+    if (!Number.isFinite(it.price) || it.price < 0) return `Item ${n}: price is not valid.`;
+    if (!Number.isFinite(it.total) || Math.abs(it.total - it.qty * it.price) > 0.01) return `Item ${n}: total does not match quantity x price.`;
+  }
+  return null;
+}
+
+// ---- idempotency ----
+// The screen creates ONE request id when a shop is selected and keeps it until the
+// save succeeds (or the shop is changed). The visit and order document ids are derived
+// from it, so a double-click or a retry after a lost acknowledgement finds the
+// already-saved visit and returns it instead of creating anything new.
+export function newRequestId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return 'r' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+const REQUEST_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
+export const visitIdFor = (uid, requestId) => `v_${uid}_${requestId}`;
+export const orderIdFor = (uid, requestId) => `o_${uid}_${requestId}`;
+
+function checkBasics({ customerId, requestId, uid }) {
+  if (!uid) throw new Error('Not signed in.');
+  if (!customerId) throw new Error('Select a customer first.');
+  if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) throw new Error('Missing request id.');
+}
+
+function requireActiveCustomer(snap) {
+  if (!snap.exists()) throw new Error('That customer no longer exists.');
+  const c = snap.data();
+  if (c.active === false) throw new Error('That customer is inactive and cannot be visited.');
+  return c;
+}
+
+function visitBase({ customerId, customer, uid, email, requestId, now }) {
+  const date = malawiDate(now());
+  const scheduledDay = customer.assignedDay || null;
+  return {
+    schemaVersion: 2, requestId,
+    customerId, customerName: customer.name,
     repId: uid, repEmail: email,
-    date: new Date().toISOString().slice(0, 10),
-    outcome,
-    reasonNoOrder: outcome === 'No Order' ? (reasonNoOrder || null) : null,
-    reasonNotes: reasonNotes || '',
-    orderId: orderId || null,
-    orderNo: orderNo || null,
-    createdAt: serverTimestamp(),
+    date,                                   // calendar date in Malawi (see malawiTime.js)
+    scheduledDay,                           // the customer's weekly day AT THE TIME of the visit
+    wasScheduled: scheduledDay === weekdayOfDate(date),
+    createdAt: serverTimestamp(),           // authoritative time of the event
+  };
+}
+
+// ---- "No Order" visit: one transaction, idempotent ----
+export async function recordNoOrderVisit({ customerId, reason, notes, requestId, uid, email, now = () => new Date() }) {
+  checkBasics({ customerId, requestId, uid });
+  const problem = validateNoOrderInput({ reason, notes });
+  if (problem) throw new Error(problem);
+
+  const visitRef = doc(db, 'visits', visitIdFor(uid, requestId));
+  return await runTransaction(db, async (tx) => {
+    const visitSnap = await tx.get(visitRef);
+    const customerSnap = await tx.get(doc(db, 'customers', customerId));
+    if (visitSnap.exists()) return { visitId: visitRef.id, alreadySaved: true };
+    const customer = requireActiveCustomer(customerSnap);
+    tx.set(visitRef, {
+      ...visitBase({ customerId, customer, uid, email, requestId, now }),
+      outcome: 'No Order',
+      reasonNoOrder: reason,
+      reasonNotes: String(notes ?? '').trim(),
+      orderId: null, orderNo: null, orderValue: null,
+    });
+    return { visitId: visitRef.id, alreadySaved: false };
   });
-  return docRef.id;
+}
+
+// ---- "Order Placed" visit: order + visit + order number in ONE transaction ----
+// Either all three are saved or none. The customer details are read from the customer
+// record inside the transaction (not trusted from the screen). Stock and invoicing are
+// untouched: the order starts as "Submitted", exactly like before, and goes through the
+// existing approval workflow.
+export async function submitOrderWithVisit({ customerId, items, notes, requestId, uid, email, now = () => new Date() }) {
+  checkBasics({ customerId, requestId, uid });
+  const problem = validateOrderItems(items);
+  if (problem) throw new Error(problem);
+
+  const visitRef = doc(db, 'visits', visitIdFor(uid, requestId));
+  const orderRef = doc(db, 'orders', orderIdFor(uid, requestId));
+  const grandTotal = items.reduce((sum, it) => sum + it.total, 0);
+
+  return await runTransaction(db, async (tx) => {
+    // All reads first.
+    const visitSnap = await tx.get(visitRef);
+    const customerSnap = await tx.get(doc(db, 'customers', customerId));
+    const counterSnap = await tx.get(ORDER_COUNTER_DOC);
+    if (visitSnap.exists()) {
+      const v = visitSnap.data();
+      if (v.outcome !== 'Order Placed') throw makeError('This visit was already saved as "No Order".', { code: 'visit-conflict' });
+      return { visitId: visitRef.id, orderId: v.orderId, orderNo: v.orderNo, alreadySaved: true };
+    }
+    const customer = requireActiveCustomer(customerSnap);
+    if (!isValidPin(customer.lat, customer.lng)) throw new Error('This customer has no pinned location. Pin it before placing an order.');
+
+    const counter = counterSnap.exists() ? counterSnap.data().counter : 1;
+    const orderNo = buildOrderNo(counter);
+    tx.set(ORDER_COUNTER_DOC, { counter: counter + 1 });
+    tx.set(orderRef, {
+      orderNo, status: 'Submitted',
+      customerId, customerName: customer.name, customerPhone: customer.phone || '-', customerLocation: customer.location || '-',
+      customerLat: customer.lat, customerLng: customer.lng,
+      items, notes: String(notes ?? '').trim(), grandTotal,
+      createdBy: uid, createdByEmail: email,
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp(), submittedAt: serverTimestamp(),
+      approvedAt: null, rejectedAt: null, cancelledAt: null, invoicedAt: null,
+      managerNotes: '', invoiceId: null, invoiceNo: null,
+      visitId: visitRef.id,
+    });
+    tx.set(visitRef, {
+      ...visitBase({ customerId, customer, uid, email, requestId, now }),
+      outcome: 'Order Placed',
+      reasonNoOrder: null, reasonNotes: '',
+      orderId: orderRef.id, orderNo, orderValue: grandTotal,   // value when the order was taken
+    });
+    return { visitId: visitRef.id, orderId: orderRef.id, orderNo, alreadySaved: false };
+  });
+}
+
+// ---- reading ----
+// Equality-only filters (no orderBy), so no composite index is needed.
+export async function fetchMyVisitsForDate(uid, date) {
+  const snap = await getDocs(query(collection(db, 'visits'), where('repId', '==', uid), where('date', '==', date)));
+  const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const ms = (v) => (v.createdAt && typeof v.createdAt.toMillis === 'function' ? v.createdAt.toMillis() : 0);
+  return items.sort((a, b) => ms(a) - ms(b));
 }
 
 export async function fetchMyVisitsPage(uid, cursor = null) {
@@ -28,25 +175,4 @@ export async function fetchMyVisitsPage(uid, cursor = null) {
   if (cursor) constraints.push(startAfter(cursor));
   const snap = await getDocs(query(collection(db, 'visits'), ...constraints));
   return { items: snap.docs.map(d => ({ id: d.id, ...d.data() })), lastDoc: snap.docs.at(-1) || null, hasMore: snap.docs.length === PAGE_SIZE };
-}
-
-// Fetches ALL visits (no page cap) — used for the manager's success-rate
-// aggregation. Fine for a small-to-medium sales team; if the collection
-// grows large, switch this to date-range queries instead.
-export async function fetchAllVisitsForAggregation() {
-  const snap = await getDocs(query(collection(db, 'visits'), orderBy('createdAt', 'desc')));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
-export function aggregateVisitsByRep(visits) {
-  const map = {};
-  for (const v of visits) {
-    const key = v.repEmail || v.repId;
-    if (!map[key]) map[key] = { repEmail: v.repEmail, total: 0, ordersPlaced: 0 };
-    map[key].total += 1;
-    if (v.outcome === 'Order Placed') map[key].ordersPlaced += 1;
-  }
-  return Object.values(map)
-    .map(r => ({ ...r, successRate: r.total ? Math.round((r.ordersPlaced / r.total) * 100) : 0 }))
-    .sort((a, b) => b.successRate - a.successRate);
 }

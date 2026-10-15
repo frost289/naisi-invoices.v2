@@ -537,3 +537,15 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 }
 .persist-notice-msg { font-size: 0.85rem; margin-bottom: 8px; }
 .persist-notice-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---- Today's Visits ---- */
+.visit-progress { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; text-align:center; }
+.visit-progress > div { background:#f7f6f2; border-radius:8px; padding:8px 2px; }
+.visit-progress strong { display:block; font-size:1.25rem; color:var(--forest-2); }
+.visit-progress span { font-size:0.68rem; color:var(--muted); }
+@media (max-width:420px){ .visit-progress { grid-template-columns:repeat(3,1fr); } }
+.visit-status { display:inline-block; font-size:0.72rem; font-weight:700; border-radius:20px; padding:2px 8px; margin-left:6px; }
+.visit-status.todo { background:#fff4e0; color:#7a5210; }
+.visit-status.order { background:#eef6ea; color:#1f5c30; }
+.visit-status.noorder { background:#fbe4e4; color:#b23b3b; }
+.todays-route-item.visited { opacity:.85; }

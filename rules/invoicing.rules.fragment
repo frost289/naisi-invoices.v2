@@ -80,3 +80,55 @@ function orderInvoiceIdOk(db) {
 // and add 'unitsPerCase' to the allowed key list.
 // Receiving stock now writes products (stockOnHand [+ unitsPerCase]) and stockMovements in ONE transaction;
 // if your rules validate the movement against the product with getAfter(), that still holds.
+
+// =====================================================================
+// DAILY VISITS (added with the Today's Visits feature) - PROPOSAL ONLY, UNVERIFIED.
+// Same caveat as above: the real rules are not in the repo. Every item below must be checked
+// against them. Replace isRep()/isManager() with your real helpers.
+// =====================================================================
+//
+// 1. A rep's save is ONE transaction touching three documents:
+//      orderCounters/naisiOrder  (read + write, counter + 1)
+//      orders/o_<uid>_<requestId>   (create)
+//      visits/v_<uid>_<requestId>   (create)
+//    The rules must allow a rep to create an order with a deterministic id (not only addDoc ids),
+//    and to read a visit document that does not exist yet (the transaction reads it to detect a retry).
+//
+// match /visits/{visitId} {
+//   // `resource == null` makes the "does this retry already exist?" read of a missing doc succeed.
+//   allow get: if isManager() || resource == null || resource.data.repId == request.auth.uid;
+//   // list: reps by their own repId (equality filter), managers any. The app queries
+//   //   where repId == uid AND date == 'YYYY-MM-DD'   (rep, Today's Visits)
+//   //   where date >= from AND date <= to, orderBy date (manager report; already used by Summary)
+//   allow list: if isManager() || resource.data.repId == request.auth.uid;
+//   allow create: if isRep() && visitShapeOk() && visitId == 'v_' + request.auth.uid + '_' + request.resource.data.requestId;
+//   allow update, delete: if false;     // visits are an append-only record
+// }
+// function visitShapeOk() {
+//   let d = request.resource.data;
+//   return d.repId == request.auth.uid && d.repEmail == request.auth.token.email
+//     && d.createdAt == request.time
+//     && d.schemaVersion == 2
+//     && d.date is string && d.date.matches('^\\d{4}-\\d{2}-\\d{2}$')     // the rules cannot derive Malawi time from request.time; see docs/DAILY-VISITS.md
+//     && d.outcome in ['Order Placed', 'No Order']
+//     && (d.outcome == 'Order Placed'
+//           ? (d.orderId is string && d.orderNo is string && d.orderValue is number && d.reasonNoOrder == null)
+//           : (d.orderId == null && d.reasonNoOrder in ['Shop still has stock', 'Price too high', 'Stock unavailable',
+//                'Shop owner unavailable', 'Shop closed', 'No money today', 'Not interested', 'Other']
+//              && (d.reasonNoOrder != 'Other' || d.reasonNotes.trim().size() >= 3)))
+//     && d.reasonNotes.size() <= 500;
+// }
+//
+// 2. Visit and order must exist together (the transaction guarantees it for new clients; rules can enforce it
+//    for everyone):   visits create with outcome 'Order Placed'  =>  existsAfter(orders/<orderId>)
+//                     orders create by a rep with a visitId       =>  existsAfter(visits/<visitId>)
+// 3. The order counter: allow a rep to update orderCounters/naisiOrder only to counter + 1.
+// 4. customers: managers write assignedDay (Mon..Sat or null) and assignedDayChangedAt (new field). Reps read customers.
+//    If customers has a field allowlist, add assignedDayChangedAt.
+// 5. config/roles: the manager report reads it (fetchRepEmails) - managers already read it via getUserRole.
+// 6. Orders: new optional field `visitId` on orders created from a visit. Old clients (open tabs) still write
+//    orders (addDoc) and visits (no requestId/schemaVersion) with separate writes; only rules that require the
+//    new shape can stop that.
+//
+// Indexes: none new. rep query = two equality filters (no orderBy); manager query = range + orderBy on the SAME
+// field (date). Confirm in the Firebase console that no composite index prompt appears.

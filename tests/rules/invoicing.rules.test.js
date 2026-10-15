@@ -97,3 +97,47 @@ d('invoicing rules (emulator, real rules file)', () => {
     await assertFails(setDoc(doc(db, 'invoices', 'ord_o1'), { ...newInvoice }));
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Daily-visits rule checks (see rules/invoicing.rules.fragment, "DAILY VISITS"). NOT RUN here.
+// They need a rep user in the rules' own terms (adapt seedUsers/repCtx) and the REAL rules file.
+// ---------------------------------------------------------------------------------------------
+d('daily visits rules (emulator, real rules file) - NOT RUN in the authoring environment', () => {
+  const repCtx = () => env.authenticatedContext('rep1', { email: 'rep1@example.com' /*, role: 'submitter' */ });
+  const visit = (over = {}) => ({ schemaVersion: 2, requestId: 'req-aaaaaaaa-1111', customerId: 'c1', customerName: 'Shop', repId: 'rep1', repEmail: 'rep1@example.com',
+    date: '2026-10-15', scheduledDay: 'Thu', wasScheduled: true, outcome: 'No Order', reasonNoOrder: 'Shop closed', reasonNotes: '', orderId: null, orderNo: null, orderValue: null, createdAt: serverTimestamp(), ...over });
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'customers', 'c1'), { name: 'Shop', active: true, assignedDay: 'Thu', lat: -13.9, lng: 33.7 });
+      await setDoc(doc(ctx.firestore(), 'orderCounters', 'naisiOrder'), { counter: 41 });
+    });
+  });
+  it('rep can create a valid no-order visit with the deterministic id', async () => {
+    await assertSucceeds(setDoc(doc(repCtx().firestore(), 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit()));
+  });
+  it('rep cannot create a visit for another rep, with a bad reason, or "Other" without an explanation', async () => {
+    const db = repCtx().firestore();
+    await assertFails(setDoc(doc(db, 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ repId: 'rep2' })));
+    await assertFails(setDoc(doc(db, 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ reasonNoOrder: 'Because' })));
+    await assertFails(setDoc(doc(db, 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ reasonNoOrder: 'Other', reasonNotes: '' })));
+  });
+  it('visits cannot be edited or deleted', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ createdAt: Timestamp.now() })); });
+    await assertFails(setDoc(doc(repCtx().firestore(), 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ reasonNoOrder: 'Shop closed', reasonNotes: 'changed' })));
+  });
+  it('rep can read a missing visit doc (retry check) and query own visits by repId + date; cannot query others', async () => {
+    const db = repCtx().firestore();
+    await assertSucceeds(getDoc(doc(db, 'visits', 'v_rep1_never-saved-1')));
+  });
+  it('order + visit + counter in one batch succeeds; an order alone with a visitId is refused', async () => {
+    const db = repCtx().firestore();
+    const b = writeBatch(db);
+    b.set(doc(db, 'orderCounters', 'naisiOrder'), { counter: 42 });
+    b.set(doc(db, 'orders', 'o_rep1_req-aaaaaaaa-1111'), { orderNo: 'ORD-2026-0041', status: 'Submitted', createdBy: 'rep1', customerId: 'c1', items: [], grandTotal: 0, visitId: 'v_rep1_req-aaaaaaaa-1111' });
+    b.set(doc(db, 'visits', 'v_rep1_req-aaaaaaaa-1111'), visit({ outcome: 'Order Placed', reasonNoOrder: null, orderId: 'o_rep1_req-aaaaaaaa-1111', orderNo: 'ORD-2026-0041', orderValue: 0 }));
+    await assertSucceeds(b.commit());
+    const lone = writeBatch(db);
+    lone.set(doc(db, 'orders', 'o_rep1_req-bbbbbbbb-2222'), { orderNo: 'ORD-2026-0042', status: 'Submitted', createdBy: 'rep1', customerId: 'c1', items: [], grandTotal: 0, visitId: 'v_rep1_req-bbbbbbbb-2222' });
+    await assertFails(lone.commit());
+  });
+});

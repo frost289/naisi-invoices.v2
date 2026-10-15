@@ -1,7 +1,7 @@
 import { db } from './firebase.js';
 import { doc, runTransaction } from 'firebase/firestore';
 
-const ORDER_COUNTER_DOC = doc(db, 'orderCounters', 'naisiOrder');
+export const ORDER_COUNTER_DOC = doc(db, 'orderCounters', 'naisiOrder');
 
 function currentYear() {
   return String(new Date().getFullYear());
@@ -11,7 +11,7 @@ function pad4(n) {
   return String(n).padStart(4, '0');
 }
 
-function buildOrderNo(counter) {
+export function buildOrderNo(counter) {
   return `ORD-${currentYear()}-${pad4(counter)}`;
 }
 

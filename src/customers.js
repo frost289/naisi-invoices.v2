@@ -154,7 +154,7 @@ export async function addCustomer({ name, phone, location, lat, lng, uid, assign
 // Reactivating (e.g. the shop reopens under the same owner) is just
 // as easy, in case that was a mistake or temporary.
 export async function deactivateCustomer(id) {
-  await updateDoc(doc(db, 'customers', id), { active: false, assignedDay: null, updatedAt: serverTimestamp() });
+  await updateDoc(doc(db, 'customers', id), { active: false, assignedDay: null, assignedDayChangedAt: serverTimestamp(), updatedAt: serverTimestamp() });
 }
 
 export async function reactivateCustomer(id) {
@@ -166,7 +166,11 @@ export async function reactivateCustomer(id) {
 // one day — keeps the rep's weekly routine predictable (same day,
 // every week) so customers themselves learn the rhythm too.
 export async function setCustomerVisitDay(id, day) {
-  await updateDoc(doc(db, 'customers', id), { assignedDay: day || null, updatedAt: serverTimestamp() });
+  // assignedDayChangedAt lets the manager report warn that earlier dates are
+  // being measured against the current schedule (see docs/DAILY-VISITS.md).
+  const VALID = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  if (day && !VALID.includes(day)) throw new Error('Visit day must be Monday to Saturday.');
+  await updateDoc(doc(db, 'customers', id), { assignedDay: day || null, assignedDayChangedAt: serverTimestamp(), updatedAt: serverTimestamp() });
 }
 
 export async function updateCustomer(id, { name, phone, location, lat, lng }) {

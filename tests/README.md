@@ -23,6 +23,13 @@ They do not exercise the real Firebase SDK, the network, offline persistence, re
 
 Needs Java and the Firestore emulator (`firebase-tools` downloads it). Adapt `seedUsers()` in `rules/invoicing.rules.test.js` to your manager check first. Without `NAISI_RULES_PATH` the file is skipped. These tests encode the behaviour proposed in `../rules/invoicing.rules.fragment`; failures against your current rules show the gaps.
 
+## Browser tests (daily visits) - run against an in-memory stand-in, NOT the emulators
+
+    cd tests
+    npm run test:e2e        # about 100 s; builds the app with Firebase aliased to local fakes, then drives headless Chromium (phone viewport, America/Los_Angeles time zone)
+
+`e2e/` builds the real app with `firebase/*` replaced by `e2e/firestoreBrowser.js` and `e2e/authFake.js` (in-memory, data persisted to localStorage so refresh can be tested; failure injection for failed saves and lost acknowledgements). Non-local network requests are aborted. 22 checks (E1-E22) cover the visit workflow. This is NOT the Firestore or Auth emulator (the emulator download is blocked in the build environment) and it knows nothing about security rules. Setting `VITE_USE_EMULATORS=true` at build time makes `src/firebase.js` use emulators on 8080/9099 for anyone who can run them. Checks that need the emulators or the real rules are BLOCKED.
+
 ## Files
 
 | File | Covers |
@@ -35,3 +42,7 @@ Needs Java and the Firestore emulator (`firebase-tools` downloads it). Adapt `se
 | `unit/bulkProgress.test.js` | overlapping jobs, re-entry, de-duplication, button locking, retry-failed-only, PDF retry |
 | `unit/pagination.test.js` | out-of-order responses, stale failure, loading state, double Load more |
 | `unit/reconcile.test.js` | read-only reconciliation classification |
+| `unit/malawiTime.test.js` | Malawi date, weekday and range helpers across the UTC boundary |
+| `unit/visits.test.js` | visit validation, atomic order+visit, idempotent retry, conflict, failure atomicity |
+| `unit/visitSchedule.test.js` | scheduled lists, distinct progress, performance report, schedule-change warning |
+| `e2e/visits.e2e.mjs` | 22 real-browser checks E1-E22 (see above) |
