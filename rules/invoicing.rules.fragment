@@ -132,3 +132,9 @@ function orderInvoiceIdOk(db) {
 //
 // Indexes: none new. rep query = two equality filters (no orderBy); manager query = range + orderBy on the SAME
 // field (date). Confirm in the Firebase console that no composite index prompt appears.
+
+// DAILY VISITS - CORRECTION 2 (UNVERIFIED proposal, not the real rules):
+// submitOrderWithVisit now also READS orders/o_<uid>_<requestId> inside the transaction (it does
+// not exist on a first save; on a retry it is compared with the incoming details). The rep must be
+// allowed `get` on that path when it does not exist (resource == null) and when createdBy == uid.
+// Check this against the real rules; if `get` on a missing order is denied the whole transaction fails.

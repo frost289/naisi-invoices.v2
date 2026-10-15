@@ -31,3 +31,36 @@ describe('Malawi date boundaries (Africa/Blantyre, UTC+2)', () => {
     expect(t.addDays('2026-12-31', 1)).toBe('2027-01-01');
   });
 });
+
+// ---- Review finding 3: no silent truncation; one effective reporting interval ----
+describe('report range limit', () => {
+  it('MAX_REPORT_DAYS is 366 and daysInRange counts inclusively', () => {
+    expect(t.MAX_REPORT_DAYS).toBe(366);
+    expect(t.daysInRange('2026-10-15', '2026-10-15')).toBe(1);
+    expect(t.daysInRange('2026-10-14', '2026-10-16')).toBe(3);
+    expect(t.daysInRange('2024-02-28', '2024-03-01')).toBe(3);   // 28 Feb, 29 Feb (leap day), 1 Mar
+    expect(t.daysInRange('2025-02-28', '2025-03-01')).toBe(2);   // no leap day in 2025
+  });
+  it('exactly the maximum is accepted (inclusive start and end), one day more is refused', () => {
+    expect(t.daysInRange('2024-01-01', '2024-12-31')).toBe(366);            // leap year
+    expect(t.validateReportRange('2024-01-01', '2024-12-31')).toBeNull();
+    expect(t.datesInRange('2024-01-01', '2024-12-31')).toHaveLength(366);
+    expect(t.datesInRange('2024-01-01', '2024-12-31').at(-1)).toBe('2024-12-31');
+    expect(t.daysInRange('2025-03-01', '2026-03-01')).toBe(366);            // spans 12 months, not a leap year
+    expect(t.validateReportRange('2025-03-01', '2026-03-01')).toBeNull();
+    expect(t.daysInRange('2025-03-01', '2026-03-02')).toBe(367);
+    const msg = t.validateReportRange('2025-03-01', '2026-03-02');
+    expect(msg).toMatch(/366/); expect(msg).toMatch(/shorter|split/i);
+    expect(t.validateReportRange('2025-01-01', '2025-12-31')).toBeNull();   // 365 days
+  });
+  it('a two-year range is refused with an explanation, never truncated', () => {
+    expect(t.validateReportRange('2025-01-01', '2026-12-31')).toMatch(/366/);
+    expect(() => t.datesInRange('2025-01-01', '2026-12-31')).toThrow(RangeError);
+    expect(() => t.datesInRange('2024-01-01', '2025-01-01')).toThrow(RangeError);   // 367 days
+  });
+  it('invalid or reversed ranges are reported, not quietly emptied', () => {
+    expect(t.validateReportRange('', '2026-10-15')).toMatch(/date/i);
+    expect(t.validateReportRange('2026-10-16', '2026-10-15')).toMatch(/after/i);
+    expect(t.validateReportRange('2026-02-30', '2026-03-01')).toMatch(/date/i);
+  });
+});

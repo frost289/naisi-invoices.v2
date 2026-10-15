@@ -28,7 +28,7 @@ Needs Java and the Firestore emulator (`firebase-tools` downloads it). Adapt `se
     cd tests
     npm run test:e2e        # about 100 s; builds the app with Firebase aliased to local fakes, then drives headless Chromium (phone viewport, America/Los_Angeles time zone)
 
-`e2e/` builds the real app with `firebase/*` replaced by `e2e/firestoreBrowser.js` and `e2e/authFake.js` (in-memory, data persisted to localStorage so refresh can be tested; failure injection for failed saves and lost acknowledgements). Non-local network requests are aborted. 22 checks (E1-E22) cover the visit workflow. This is NOT the Firestore or Auth emulator (the emulator download is blocked in the build environment) and it knows nothing about security rules. Setting `VITE_USE_EMULATORS=true` at build time makes `src/firebase.js` use emulators on 8080/9099 for anyone who can run them. Checks that need the emulators or the real rules are BLOCKED.
+`e2e/` builds the real app with `firebase/*` replaced by `e2e/firestoreBrowser.js` and `e2e/authFake.js` (in-memory, data persisted to localStorage so refresh can be tested; failure injection for failed saves and lost acknowledgements). Non-local network requests are aborted. 25 checks (E1-E25) cover the visit workflow, including changed retries (E22), slow report answers (E23) and the report range limit (E24). This is NOT the Firestore or Auth emulator (the emulator download is blocked in the build environment) and it knows nothing about security rules. Setting `VITE_USE_EMULATORS=true` at build time makes `src/firebase.js` use emulators on 8080/9099 for anyone who can run them. Checks that need the emulators or the real rules are BLOCKED.
 
 ## Files
 
@@ -45,4 +45,5 @@ Needs Java and the Firestore emulator (`firebase-tools` downloads it). Adapt `se
 | `unit/malawiTime.test.js` | Malawi date, weekday and range helpers across the UTC boundary |
 | `unit/visits.test.js` | visit validation, atomic order+visit, idempotent retry, conflict, failure atomicity |
 | `unit/visitSchedule.test.js` | scheduled lists, distinct progress, performance report, schedule-change warning |
-| `e2e/visits.e2e.mjs` | 22 real-browser checks E1-E22 (see above) |
+| `unit/reportLoader.test.js` | manager report: newest range wins, out-of-order and failing stale responses, range limit |
+| `e2e/visits.e2e.mjs` | 25 real-browser checks E1-E25 (see above) |

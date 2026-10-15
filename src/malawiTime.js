@@ -40,10 +40,33 @@ export function addDays(dateStr, n) {
   return d.toISOString().slice(0, 10);
 }
 
-// Every calendar date from..to inclusive (empty if from > to; capped at 366).
+// Longest report range supported (days, start and end both counted). Longer ranges are
+// REFUSED with an explanation; they are never silently shortened, so every figure in a
+// report always covers the same interval.
+export const MAX_REPORT_DAYS = 366;
+
+// Number of calendar days from..to, both included (0 if the dates are invalid or reversed).
+export function daysInRange(from, to) {
+  if (!isDateString(from) || !isDateString(to) || from > to) return 0;
+  return Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400000) + 1;
+}
+
+// null when the range can be reported, otherwise the message to show the user.
+export function validateReportRange(from, to) {
+  if (!isDateString(from) || !isDateString(to)) return 'Choose a valid From and To date.';
+  if (from > to) return 'From must not be after To.';
+  const n = daysInRange(from, to);
+  if (n > MAX_REPORT_DAYS) return `That range is ${n} days. Reports cover at most ${MAX_REPORT_DAYS} days (about one year). Choose a shorter range or split it into two reports.`;
+  return null;
+}
+
+// Every calendar date from..to inclusive. Throws RangeError beyond MAX_REPORT_DAYS
+// rather than returning a shortened list.
 export function datesInRange(from, to) {
   if (!isDateString(from) || !isDateString(to) || from > to) return [];
+  const n = daysInRange(from, to);
+  if (n > MAX_REPORT_DAYS) throw new RangeError(validateReportRange(from, to));
   const out = [];
-  for (let d = from; d <= to && out.length < 366; d = addDays(d, 1)) out.push(d);
+  for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
   return out;
 }

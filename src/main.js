@@ -53,6 +53,7 @@ import {
   fetchMyVisitsPage, fetchMyVisitsForDate, recordNoOrderVisit, submitOrderWithVisit,
   validateNoOrderInput, validateOrderItems, newRequestId
 } from './visits.js';
+import { requestReport } from './reportLoader.js';
 import { malawiDate, malawiWeekday, weekdayOfDate, addDays } from './malawiTime.js';
 import { repDayProgress, scheduledForDate, buildPerformanceReport, scheduleChangedSince } from './visitSchedule.js';
 import { fetchRepEmails } from './roles.js';
@@ -3287,6 +3288,9 @@ async function initApp(user, role) {
     const lvReasonNotesLabel = document.getElementById('lvReasonNotesLabel');
     const lvNoOrderError = document.getElementById('lvNoOrderError');
     const lvRepeatNote = document.getElementById('lvRepeatNote');
+    const lvConflictBox = document.getElementById('lvConflictBox');
+    const lvConflictText = document.getElementById('lvConflictText');
+    let lvConflict = false;   // true while the rep has to choose between the saved visit and a new one
     const lvSubmitNoOrderBtn = document.getElementById('lvSubmitNoOrderBtn');
     const lvOrderFormWrap = document.getElementById('lvOrderFormWrap');
     const lvOrderNotes = document.getElementById('lvOrderNotes');
@@ -3347,8 +3351,29 @@ async function initApp(user, role) {
       lvReason.selectedIndex = 0;            // "Select a reason…" — never pre-chosen
       lvNoOrderError.style.display = 'none';
       lvRepeatNote.style.display = 'none';
+      lvConflict = false; lvConflictBox.style.display = 'none';
       lvUpdateExplanationLabel();
     }
+
+    // The request id was already saved with DIFFERENT details. Nothing new was saved. Show what
+    // is on record and make the rep choose; never swap the request id automatically.
+    function lvShowConflict(err) {
+      lvConflict = true;
+      lvConflictText.textContent = 'On record: ' + (err.message.match(/differently: (.*?)\. The new details/)?.[1] || 'a visit saved earlier') + '.';
+      lvConflictBox.style.display = 'block';
+      lvConflictBox.scrollIntoView?.({ block: 'center' });
+    }
+    document.getElementById('lvConflictKeepBtn').addEventListener('click', () => {
+      if (lvSaving) return;
+      lvConflict = false; lvConflictBox.style.display = 'none';
+      lvAfterSaved();                       // close the form and reload what is actually saved
+    });
+    document.getElementById('lvConflictNewBtn').addEventListener('click', () => {
+      if (lvSaving) return;
+      lvRequestId = newRequestId();         // deliberate choice by the rep: a separate, extra visit
+      lvConflict = false; lvConflictBox.style.display = 'none';
+      showToast('Ready to record this as a new visit. Check the details and save again.', 'info');
+    });
 
     function lvResetAll() {
       lvSelected = null;
@@ -3586,6 +3611,7 @@ async function initApp(user, role) {
 
     lvSubmitNoOrderBtn.addEventListener('click', async () => {
       if (lvSaving) return;
+      if (lvConflict) { showToast('This visit was already saved differently. Choose "Keep what was saved" or "Record my new details as a NEW visit" first.', 'error', 6000); return; }
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
       const problem = validateNoOrderInput({ reason: lvReason.value, notes: lvReasonNotes.value });
       if (problem) {
@@ -3605,6 +3631,7 @@ async function initApp(user, role) {
         showToast(res.alreadySaved ? 'This visit had already been saved. No duplicate was created.' : 'Visit logged.', res.alreadySaved ? 'info' : 'success');
         await lvAfterSaved();
       } catch (err) {
+        if (err.code === 'visit-conflict') { lvShowConflict(err); return; }
         // lvRequestId is kept: if the save actually went through, Retry finds it instead of duplicating.
         lvNoOrderError.textContent = 'Could not save the visit: ' + err.message + ' You can tap Log Visit again; it will not create a duplicate.';
         lvNoOrderError.style.display = 'block';
@@ -3616,6 +3643,7 @@ async function initApp(user, role) {
 
     lvSubmitOrderBtn.addEventListener('click', async () => {
       if (lvSaving) return;
+      if (lvConflict) { showToast('This visit was already saved differently. Choose "Keep what was saved" or "Record my new details as a NEW visit" first.', 'error', 6000); return; }
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
       if (!hasPin(lvSelected)) {
         showToast('Pin this customer\'s location before placing an order.', 'error');
@@ -3639,6 +3667,7 @@ async function initApp(user, role) {
           : `Order ${res.orderNo} submitted and visit logged.`, res.alreadySaved ? 'info' : 'success');
         await lvAfterSaved();
       } catch (err) {
+        if (err.code === 'visit-conflict') { lvShowConflict(err); return; }
         showToast('Could not submit the order: ' + err.message + ' Nothing was half-saved; you can tap Submit again, it will not create a duplicate.', 'error', 7000);
       } finally {
         lvSaving = false;
@@ -3887,30 +3916,44 @@ async function initApp(user, role) {
       // Schedule-change warning
       const changed = scheduleChangedSince(customersCache, report.from, (ms) => malawiDate(new Date(ms)));
       if (changed.length) {
-        perfScheduleWarning.textContent = `Heads up: the visit day of ${changed.length} customer(s) was changed on or after ${formatDate(report.from)}. Scheduled and Still due figures for earlier days in this range use the schedule as it is now, so they may differ from what applied at the time. Visited, Orders and No order counts come from saved visits and are unaffected.`;
+        perfScheduleWarning.textContent = `Heads up: the visit day of ${changed.length} customer(s) was changed on or after ${formatDate(report.from)}. Scheduled and Still due figures for earlier days in this range use the schedule as it is now, so they may differ from what applied at the time. Visited counts are also affected, because they count scheduled customers using the schedule as it is now. Orders and No order counts come from saved visits and are unaffected.`;
         perfScheduleWarning.style.display = 'block';
       } else {
         perfScheduleWarning.style.display = 'none';
       }
     }
 
-    async function runPerformance() {
-      const from = perfFrom.value, to = perfTo.value;
-      if (!from || !to || from > to) { showToast('Choose a valid From and To date (From must not be after To).', 'error'); return; }
-      await perfGuard.run({
+    const perfShownRange = document.getElementById('perfShownRange');
+    const perfRangeError = document.getElementById('perfRangeError');
+    const rangeText = (r) => (r.from === r.to ? formatDate(r.from) : `${formatDate(r.from)} to ${formatDate(r.to)}`);
+    // The line above the table says which dates the report on screen really covers, and warns
+    // when the date boxes have been changed since (so the boxes never look like the report).
+    function updateShownRange() {
+      if (!perfReport) { perfShownRange.textContent = ''; return; }
+      const shown = { from: perfReport.from, to: perfReport.to };
+      const differs = perfFrom.value !== shown.from || perfTo.value !== shown.to;
+      perfShownRange.textContent = `Showing: ${rangeText(shown)}` + (differs ? ' - the dates above have changed. Tap Show report to update.' : '');
+    }
+    // Latest request wins: requestReport() invalidates any older request, so a slow earlier
+    // answer can never replace the report for the dates now selected.
+    function runPerformance() {
+      return requestReport(perfGuard, {
+        from: perfFrom.value, to: perfTo.value,
         setLoading: (on) => (on ? setButtonLoading(perfRunBtn, 'Loading…') : clearButtonLoading(perfRunBtn)),
-        fetch: async () => {
+        onInvalid: (msg) => { perfRangeError.textContent = msg; perfRangeError.style.display = 'block'; },
+        fetch: async ({ from, to }) => {
+          perfRangeError.style.display = 'none';
           const [visits, reps] = await Promise.all([fetchVisitsInRange(from, to), fetchRepEmails()]);
           try { await loadProfilesCache(); await loadCustomersCache(); } catch (err) { /* names fall back to emails */ }
           return { visits, reps };
         },
-        apply: ({ visits, reps }) => {
+        apply: ({ visits, reps }, { from, to }) => {
           perfReps = reps;
           const prev = perfRepFilter.value;
           const all = [...new Set([...reps, ...visits.map(v => v.repEmail)].filter(Boolean).map(e => e.trim().toLowerCase()))].sort();
           perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${nameOf(r)}</option>`).join('');
           perfRepFilter.value = all.includes(prev) ? prev : 'all';
-          perfReport = { visits, from, to };
+          perfReport = { visits, from, to };      // the range that was FETCHED, not whatever the boxes say now
           drawPerformance();
         },
         onError: (err) => showToast('Could not load the report: ' + err.message, 'error'),
@@ -3922,6 +3965,7 @@ async function initApp(user, role) {
       const { visits, from, to } = perfReport;
       const report = buildPerformanceReport({ customers: customersCache, visits, reps: perfReps, from, to, repFilter: perfRepFilter.value });
       renderPerformance(report, visits);
+      updateShownRange();
     }
 
     window.loadPerformanceView = async function loadPerformanceView() {
@@ -3937,6 +3981,8 @@ async function initApp(user, role) {
       perfFrom.value = addDays(today, -offset); perfTo.value = today; runPerformance();
     });
     perfRepFilter.addEventListener('change', drawPerformance);
+    perfFrom.addEventListener('input', updateShownRange);
+    perfTo.addEventListener('input', updateShownRange);
     ordersTakenBody.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-view-order]');
       if (!btn) return;

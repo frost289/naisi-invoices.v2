@@ -109,3 +109,31 @@ describe('manager report', () => {
     expect(s.scheduleChangedSince(changed, '2026-10-16', toDate)).toEqual([]);
   });
 });
+
+describe('report range consistency (review finding 3)', () => {
+  const thursdayShop = [{ id: 'a', name: 'A', active: true, assignedDay: 'Thu' }];
+  const orderOn15Oct = [visit({ customerId: 'a', outcome: 'Order Placed', orderNo: 'ORD-1', orderId: 'o1', orderValue: 200 })];
+  it('a two-year range is refused: it never counts the order while showing zero visited', () => {
+    expect(() => s.buildPerformanceReport({ customers: thursdayShop, visits: orderOn15Oct, reps: ['r1@x'], from: '2025-01-01', to: '2026-12-31' })).toThrow(RangeError);
+  });
+  it('exactly 366 days covers scheduled, visited, orders and no-order over the SAME interval, including the last day', () => {
+    const from = '2025-10-15', to = '2026-10-15';             // 366 days inclusive; both ends are Wed/Thu
+    const visits = [visit({ date: '2026-10-15', customerId: 'a', outcome: 'Order Placed', orderId: 'o1', orderNo: 'ORD-1', orderValue: 200 }),
+                    visit({ date: '2025-10-16', customerId: 'a', outcome: 'No Order' })];     // 2025-10-16 is a Thursday
+    const r = s.buildPerformanceReport({ customers: thursdayShop, visits, reps: ['r1@x'], from, to }).rows[0];
+    expect(r.ordersTaken).toBe(1); expect(r.noOrderVisits).toBe(1);
+    expect(r.visitedCount).toBe(2);                              // both Thursdays are inside the interval
+    expect(r.scheduledCount).toBe(53);                           // Thursdays from 2025-10-16 to 2026-10-15 inclusive
+    expect(r.visitedCount + r.stillDueCount).toBe(r.scheduledCount);
+  });
+  it('a visit on the last day of a 366-day leap-year range is counted in every metric', () => {
+    const visits = [visit({ date: '2024-12-31', customerId: 'a', outcome: 'Order Placed', orderId: 'o9', orderNo: 'ORD-9', orderValue: 10 })];
+    const shop = [{ id: 'a', name: 'A', active: true, assignedDay: 'Tue' }];                  // 2024-12-31 is a Tuesday
+    const r = s.buildPerformanceReport({ customers: shop, visits, reps: ['r1@x'], from: '2024-01-01', to: '2024-12-31' }).rows[0];
+    expect(r.ordersTaken).toBe(1); expect(r.visitedCount).toBe(1);
+  });
+  it('the report states the interval it actually used', () => {
+    const rep = s.buildPerformanceReport({ customers: thursdayShop, visits: [], reps: [], from: '2026-10-14', to: '2026-10-16' });
+    expect(rep).toMatchObject({ from: '2026-10-14', to: '2026-10-16', days: 3 });
+  });
+});

@@ -17,6 +17,7 @@ export const stats = { txAttempts: 0, commits: 0 };
 // Test hooks (all reset by reset()):
 //  hooks.beforeCommit({ attempt, writes })  async; runs after the callback, before conflict check
 //  hooks.failCommit(writes) -> Error|null   thrown INSTEAD of committing (nothing written)
+//  hooks.holdQuery(query) -> ms to delay that query's answer (or 0)
 //  hooks.failAfterCommit(writes) -> Error|null  commit is applied, then the error is thrown (lost acknowledgement)
 export const hooks = {};
 
@@ -175,6 +176,10 @@ function runQuery(q) {
 }
 export async function getDocs(q) {
   await new Promise(r => setTimeout(r, 1));
+  // test hook: hold the ANSWER of a query for some milliseconds (slow network). The data is read when the
+  // answer is released, like a server that answers late.
+  const hold = hooks.holdQuery && hooks.holdQuery(q);
+  if (hold) await new Promise(r => setTimeout(r, hold));
   const docs = runQuery(q.kind === 'query' ? q : { path: q.path, cs: [] });
   return { docs, size: docs.length, empty: docs.length === 0, forEach: (fn) => docs.forEach(fn) };
 }

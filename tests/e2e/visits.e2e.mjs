@@ -316,7 +316,93 @@ try {
     expect(names.includes('Echo Friday'), 'Echo should now be on Thursday: ' + names);
     return names.join(', ');
   });
-  await R.check('E22', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
+  await R.check('E22', 'Changed retry (same request id): clear conflict, nothing saved, rep must choose; "Keep" and "New visit" both work', async () => {
+    const counts = async () => ({ o: (await store('orders')).length, v: (await store('visits')).length, c: (await doc('orderCounters/naisiOrder')).counter });
+    // --- order: quantity 3 saved, acknowledgement lost, rep changes quantity to 5 and retries ---
+    const b0 = await counts();
+    await fake(() => window.__fake.failNextAcks(1));
+    await placeOrder('c1');
+    await page.waitForFunction(() => /Could not submit/i.test(document.body.innerText));
+    eq(await counts(), { o: b0.o + 1, v: b0.v + 1, c: b0.c + 1 }, 'first attempt committed');
+    await page.fill('#lvOrderItemsBody tr .qty-input', '5');
+    await page.click('#lvSubmitOrderBtn');
+    await page.waitForSelector('#lvConflictBox', { state: 'visible' });
+    const text = await page.locator('#lvConflictBox').innerText();
+    expect(/already saved/i.test(text) && /not.*saved/i.test(text) && /Order/.test(text) && /3 x/.test(text), 'conflict box text: ' + text);
+    eq(await counts(), { o: b0.o + 1, v: b0.v + 1, c: b0.c + 1 }, 'conflict must not write anything');
+    const savedOrder = (await store('orders')).sort((a, b) => 0).find(o => o.visitId && o.items[0].qty === 3 && o.customerId === 'c1');
+    expect(savedOrder, 'saved order still has quantity 3');
+    expect(!(await page.evaluate(() => /Order .* submitted and visit logged/.test(document.body.innerText))), 'must not claim success');
+    await page.click('#lvSubmitOrderBtn');                         // pressing Submit again while the conflict is open
+    await page.waitForTimeout(200);
+    eq(await counts(), { o: b0.o + 1, v: b0.v + 1, c: b0.c + 1 }, 'second press must not write either');
+    await page.click('#lvConflictKeepBtn');
+    await page.waitForSelector('#lvOutcomeCard', { state: 'hidden' });
+    eq(await counts(), { o: b0.o + 1, v: b0.v + 1, c: b0.c + 1 }, 'keep saved: nothing new');
+    // --- no order: "Shop closed" saved, ack lost, rep changes reason, then deliberately records a NEW visit ---
+    const b1 = await counts();
+    await fake(() => window.__fake.failNextAcks(1));
+    await logNoOrder('c2', 'Shop closed', 'first');
+    await page.waitForFunction(() => /Could not save the visit/i.test(document.body.innerText));
+    await page.selectOption('#lvReason', 'Price too high');
+    await page.click('#lvSubmitNoOrderBtn');
+    await page.waitForSelector('#lvConflictBox', { state: 'visible' });
+    expect(/Shop closed/.test(await page.locator('#lvConflictBox').innerText()), 'conflict shows the saved reason');
+    eq((await counts()).v, b1.v + 1, 'conflict: still exactly one new visit');
+    await page.click('#lvConflictNewBtn');
+    await page.click('#lvSubmitNoOrderBtn');
+    await page.waitForFunction(() => /Visit logged/i.test(document.body.innerText));
+    const c2 = (await store('visits')).filter(v => v.customerId === 'c2' && v.repEmail === 'rep1@naisi.test' && /first|^$/.test(v.reasonNotes)).map(v => v.reasonNoOrder);
+    expect(c2.includes('Shop closed') && c2.includes('Price too high'), 'both visits kept: ' + c2);
+    eq((await counts()).v, b1.v + 2, 'deliberate new visit adds one more');
+    return 'order conflict + no-order conflict handled; nothing saved by the conflicting attempt';
+  });
+  await R.check('E23', 'Manager report: slow answer for the old dates cannot replace the newly selected dates', async () => {
+    await page.evaluate(() => {
+      const raw = JSON.parse(localStorage.getItem('naisi-fake-store'));
+      raw.push(['visits/old14', { customerId: 'c2', customerName: 'STALE-14-OCT-SHOP', repId: 'u_rep3', repEmail: 'rep3@naisi.test', date: '2026-10-14', outcome: 'No Order', reasonNoOrder: 'Shop closed', reasonNotes: '' }, {}]);
+      localStorage.setItem('naisi-fake-store', JSON.stringify(raw));
+    });
+    await page.reload(); await login('mgr@naisi.test'); await page.click('#navPerformanceBtn');
+    await page.waitForSelector('#repSummaryBody tr');
+    await page.waitForTimeout(400);
+    await fake(() => window.__fake.delayVisitRangeQueries([1800, 0]));     // first request is slow, second is fast
+    await page.fill('#perfFrom', '2026-10-14'); await page.fill('#perfTo', '2026-10-14'); await page.click('#perfRunBtn');
+    await page.waitForTimeout(100);
+    await page.click('#perfTodayBtn');                                       // 15 Oct, requested while 14 Oct is still loading
+    await page.waitForFunction(() => /Showing/.test(document.getElementById('perfShownRange').textContent) && !/14/.test(document.getElementById('perfShownRange').textContent), null, { timeout: 5000 });
+    await page.waitForTimeout(2300);                                         // let the stale answer arrive
+    const shown = await page.locator('#perfShownRange').innerText();
+    const all = await page.locator('#performanceView').innerText();
+    expect(!/STALE-14-OCT-SHOP/.test(all), 'the 14 Oct visit leaked into the 15 Oct report');
+    expect(/15/.test(shown) && !/14/.test(shown), 'range label: ' + shown);
+    eq([await page.inputValue('#perfFrom'), await page.inputValue('#perfTo')], ['2026-10-15', '2026-10-15'], 'controls');
+    const orders = await page.$$eval('#repSummaryBody tr', trs => trs.reduce((n, tr) => n + Number(tr.children[4].innerText), 0));
+    const expected = (await store('visits')).filter(v => v.date === '2026-10-15' && v.outcome === 'Order Placed').length;
+    eq(orders, expected, 'orders total for 15 Oct');
+    expect(!(await page.evaluate(() => document.getElementById('perfRunBtn').disabled)), 'button stuck in loading state');
+    // the date boxes changed after the report was shown: the label says so
+    await page.fill('#perfFrom', '2026-10-14');
+    expect(/changed/i.test(await page.locator('#perfShownRange').innerText()), 'should warn that the boxes no longer match the report');
+    return shown;
+  });
+  await R.check('E24', 'Report range limit: 366 days works, longer is refused with a message (no silent truncation)', async () => {
+    await page.fill('#perfFrom', '2025-01-01'); await page.fill('#perfTo', '2026-12-31'); await page.click('#perfRunBtn');
+    await page.waitForSelector('#perfRangeError', { state: 'visible' });
+    const msg = await page.locator('#perfRangeError').innerText();
+    expect(/366/.test(msg) && /shorter|split/i.test(msg), msg);
+    expect(!/Showing:.*2025/.test(await page.locator('#perfShownRange').innerText()), 'a refused range must not appear as shown');
+    await page.fill('#perfFrom', '2025-10-15'); await page.fill('#perfTo', '2026-10-15'); await page.click('#perfRunBtn');   // exactly 366 days
+    await page.waitForFunction(() => /2025/.test(document.getElementById('perfShownRange').textContent), null, { timeout: 5000 });
+    expect(!(await page.locator('#perfRangeError').isVisible()), 'error should clear for a valid range');
+    const orders = await page.$$eval('#repSummaryBody tr', trs => trs.reduce((n, tr) => n + Number(tr.children[4].innerText), 0));
+    const visited = await page.$$eval('#repSummaryBody tr', trs => trs.reduce((n, tr) => n + Number(tr.children[2].innerText), 0));
+    expect(orders > 0 && visited > 0, `orders ${orders} but visited ${visited}: totals must agree on the interval`);
+    await page.fill('#perfFrom', '2025-10-14');                       // 367 days
+    await page.click('#perfRunBtn'); await page.waitForSelector('#perfRangeError', { state: 'visible' });
+    return `366 days OK (orders ${orders}, visited ${visited}); 367 refused`;
+  });
+  await R.check('E25', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
 } finally {
   fs.writeFileSync(`${OUT}/e2e-results.json`, JSON.stringify(R.rows, null, 2));
   await browser.close(); server.close();

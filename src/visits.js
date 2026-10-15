@@ -87,6 +87,41 @@ function visitBase({ customerId, customer, uid, email, requestId, now }) {
   };
 }
 
+// ---- identical retry vs changed retry ----
+// The same request id may only be used again for the SAME submission (a double-click or a
+// retry after a lost acknowledgement). If anything differs - customer, outcome, products,
+// quantities, prices, order notes, reason, explanation - the old save stays exactly as it
+// was and the caller gets a 'visit-conflict' error that carries what WAS saved. The new
+// details are never merged, never saved, and no new request id is made behind the rep's back.
+const clean = (s) => String(s ?? '').trim();
+const lineKey = (it) => [it && it.productId, it && it.qty, it && it.price, it && it.total].join('|');
+const sameItems = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((it, i) => lineKey(it) === lineKey(b[i]));
+
+function savedSummary(visit, order) {
+  return {
+    outcome: visit.outcome, customerId: visit.customerId, customerName: visit.customerName, date: visit.date,
+    reasonNoOrder: visit.reasonNoOrder ?? null, reasonNotes: visit.reasonNotes ?? '',
+    orderId: visit.orderId ?? null, orderNo: visit.orderNo ?? null, orderValue: visit.orderValue ?? null,
+    items: order && Array.isArray(order.items) ? order.items.map(it => ({ ...it })) : null,
+    notes: order ? order.notes ?? '' : null,
+  };
+}
+
+function describeSaved(s) {
+  if (s.outcome === 'Order Placed') {
+    const lines = s.items ? s.items.map(it => `${it.qty} x ${it.desc || it.productId}`).join(', ') : 'items not available';
+    return `Order ${s.orderNo || ''} for ${s.customerName}: ${lines}`;
+  }
+  return `No Order at ${s.customerName}: ${s.reasonNoOrder || 'no reason recorded'}${s.reasonNotes ? ' (' + s.reasonNotes + ')' : ''}`;
+}
+
+function conflictError(saved) {
+  return makeError(
+    `This visit was already saved differently: ${describeSaved(saved)}. The new details you entered were NOT saved. ` +
+    'Review what was saved; if you really need another visit, start a new visit.',
+    { code: 'visit-conflict', saved });
+}
+
 // ---- "No Order" visit: one transaction, idempotent ----
 export async function recordNoOrderVisit({ customerId, reason, notes, requestId, uid, email, now = () => new Date() }) {
   checkBasics({ customerId, requestId, uid });
@@ -97,7 +132,13 @@ export async function recordNoOrderVisit({ customerId, reason, notes, requestId,
   return await runTransaction(db, async (tx) => {
     const visitSnap = await tx.get(visitRef);
     const customerSnap = await tx.get(doc(db, 'customers', customerId));
-    if (visitSnap.exists()) return { visitId: visitRef.id, alreadySaved: true };
+    if (visitSnap.exists()) {
+      const v = visitSnap.data();
+      const same = v.outcome === 'No Order' && v.customerId === customerId
+        && v.reasonNoOrder === reason && clean(v.reasonNotes) === clean(notes);
+      if (!same) throw conflictError(savedSummary(v, null));
+      return { visitId: visitRef.id, alreadySaved: true };
+    }
     const customer = requireActiveCustomer(customerSnap);
     tx.set(visitRef, {
       ...visitBase({ customerId, customer, uid, email, requestId, now }),
@@ -129,9 +170,13 @@ export async function submitOrderWithVisit({ customerId, items, notes, requestId
     const visitSnap = await tx.get(visitRef);
     const customerSnap = await tx.get(doc(db, 'customers', customerId));
     const counterSnap = await tx.get(ORDER_COUNTER_DOC);
+    const savedOrderSnap = await tx.get(orderRef);          // read for the comparison below (no writes on this path)
     if (visitSnap.exists()) {
       const v = visitSnap.data();
-      if (v.outcome !== 'Order Placed') throw makeError('This visit was already saved as "No Order".', { code: 'visit-conflict' });
+      const saved = savedOrderSnap.exists() ? savedOrderSnap.data() : null;
+      const same = v.outcome === 'Order Placed' && v.customerId === customerId && !!saved
+        && saved.customerId === customerId && sameItems(saved.items, items) && clean(saved.notes) === clean(notes);
+      if (!same) throw conflictError(savedSummary(v, saved));
       return { visitId: visitRef.id, orderId: v.orderId, orderNo: v.orderNo, alreadySaved: true };
     }
     const customer = requireActiveCustomer(customerSnap);

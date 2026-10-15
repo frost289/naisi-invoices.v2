@@ -156,3 +156,106 @@ describe('reading', () => {
     expect(mine.map(x => x.requestId)).toEqual(['req-11111111-aaaa', 'req-22222222-bbbb']);
   });
 });
+
+// ---- Review finding 1: a retry with the SAME request id must be an identical retry, ----
+// ---- otherwise it is a conflict that says what was already saved.                    ----
+describe('identical retry vs changed retry (same request id)', () => {
+  const counter = () => F.store.get('orderCounters/naisiOrder').counter;
+  const snapshot = () => JSON.stringify([[...F.store].map(([p, d]) => [p, d])]);
+  const lostAckOrder = async (over = {}) => {
+    F.hooks.failAfterCommit = () => new Error('ack lost');
+    await expect(order(over)).rejects.toThrow('ack lost');
+    F.hooks.failAfterCommit = null;
+  };
+  const lostAckNoOrder = async (over = {}) => {
+    F.hooks.failAfterCommit = () => new Error('ack lost');
+    await expect(noOrder(over)).rejects.toThrow('ack lost');
+    F.hooks.failAfterCommit = null;
+  };
+  const expectConflict = async (promise, savedCheck) => {
+    let err; try { await promise; } catch (e) { err = e; }
+    expect(err, 'a changed retry must be refused').toBeTruthy();
+    expect(err.code).toBe('visit-conflict');
+    expect(err.message).toMatch(/already saved/i);
+    expect(err.message).toMatch(/not saved|were not|was not/i);   // says the new details were NOT saved
+    expect(err.saved).toBeTruthy();
+    if (savedCheck) savedCheck(err.saved);
+  };
+
+  it('identical order retry (notes padded with spaces) returns the saved order and writes nothing', async () => {
+    await lostAckOrder();
+    const before = snapshot();
+    const again = await order({ notes: '  n  ' });
+    expect(again).toMatchObject({ alreadySaved: true, orderNo: ordersIn()[0].orderNo });
+    expect(snapshot()).toBe(before); expect(counter()).toBe(42);
+  });
+  it('identical no-order retry returns the saved visit and writes nothing', async () => {
+    await lostAckNoOrder({ reason: 'Other', notes: 'Owner away' });
+    const before = snapshot();
+    const again = await noOrder({ reason: 'Other', notes: ' Owner away ' });
+    expect(again.alreadySaved).toBe(true);
+    expect(snapshot()).toBe(before);
+  });
+
+  describe('order retries that differ', () => {
+    beforeEach(async () => { F.store.set('customers/c2', customer({ name: 'Shop B' })); await lostAckOrder(); });
+    const cases = {
+      'quantity 2 -> 5': { items: [{ ...orderItems[0], qty: 5, total: 500 }] },
+      'a different product': { items: [{ ...orderItems[0], productId: 'p9' }] },
+      'a different price': { items: [{ ...orderItems[0], price: 90, total: 180 }] },
+      'an extra line': { items: [...orderItems, { qty: 1, desc: 'Other', price: 50, total: 50, productId: 'p2' }] },
+      'a different customer': { customerId: 'c2' },
+      'different order notes': { notes: 'something else' },
+    };
+    for (const [name, over] of Object.entries(cases)) {
+      it(`${name}: conflict, shows what was saved, nothing changes`, async () => {
+        const before = snapshot();
+        await expectConflict(order(over), (s) => {
+          expect(s).toMatchObject({ outcome: 'Order Placed', customerName: 'Shop A', orderNo: ordersIn()[0].orderNo, orderValue: 200 });
+          expect(s.items).toEqual([expect.objectContaining({ productId: 'p1', qty: 2 })]);
+        });
+        expect(snapshot()).toBe(before);                 // no new or changed documents
+        expect(ordersIn()).toHaveLength(1); expect(visitsIn()).toHaveLength(1);
+        expect(ordersIn()[0].items[0].qty).toBe(2);      // the stored quantity is still 2
+        expect(counter()).toBe(42);                      // no extra order number used
+      });
+    }
+    it('the same request id saved as an order cannot be re-sent as No Order', async () => {
+      const before = snapshot();
+      await expectConflict(noOrder(), (s) => expect(s).toMatchObject({ outcome: 'Order Placed', orderNo: ordersIn()[0].orderNo }));
+      expect(snapshot()).toBe(before);
+    });
+  });
+
+  describe('no-order retries that differ', () => {
+    beforeEach(async () => { F.store.set('customers/c2', customer({ name: 'Shop B' })); await lostAckNoOrder({ reason: 'Price too high', notes: 'wants discount' }); });
+    const cases = {
+      'a different reason': { reason: 'Shop closed' },
+      'a different explanation': { notes: 'something else' },
+      'a different customer': { customerId: 'c2' },
+      'reason "Other" with an explanation': { reason: 'Other', notes: 'new text' },
+    };
+    for (const [name, over] of Object.entries(cases)) {
+      it(`${name}: conflict, shows what was saved, nothing changes`, async () => {
+        const before = snapshot();
+        await expectConflict(noOrder({ reason: 'Price too high', notes: 'wants discount', ...over }), (s) =>
+          expect(s).toMatchObject({ outcome: 'No Order', customerName: 'Shop A', reasonNoOrder: 'Price too high', reasonNotes: 'wants discount' }));
+        expect(snapshot()).toBe(before);
+        expect(visitsIn()).toHaveLength(1);
+      });
+    }
+    it('the same request id saved as No Order cannot be re-sent as an order', async () => {
+      const before = snapshot();
+      await expectConflict(order(), (s) => expect(s.outcome).toBe('No Order'));
+      expect(snapshot()).toBe(before); expect(ordersIn()).toHaveLength(0); expect(counter()).toBe(41);
+    });
+  });
+
+  it('a conflict never invents a new request id: only a deliberate new id saves a second visit', async () => {
+    await lostAckOrder();
+    await expect(order({ items: [{ ...orderItems[0], qty: 5, total: 500 }] })).rejects.toMatchObject({ code: 'visit-conflict' });
+    const r = await order({ items: [{ ...orderItems[0], qty: 5, total: 500 }], requestId: 'req-ffffffff-6666' });
+    expect(r.alreadySaved).toBe(false);
+    expect(ordersIn()).toHaveLength(2); expect(counter()).toBe(43);
+  });
+});
