@@ -3,16 +3,41 @@ import {
   doc, runTransaction, collection, serverTimestamp,
   query, where, orderBy, limit, startAfter, getDocs
 } from 'firebase/firestore';
+import { wholeNumber } from './numbers.js';
+import { makeError, orderItemsKey, orderRevisionKey } from './orderRevision.js';
 
 const PAGE_SIZE = 25;
 
-// Every stock change — manual or order-driven — is written to this
-// collection as an append-only ledger, alongside the product's new
-// stockOnHand. Nothing ever updates or deletes a stockMovements doc.
+// ---- Receiving supplier cases ----
+// Stock is always held in the product's own pack (strip, packet, box,
+// tin...). Suppliers deliver in cases, so this converts a delivery into
+// packs: 3 cases × 14 strips per case = 42 strips.
+//
+// Policy: cases and packs-per-case must both be WHOLE numbers above zero
+// (a part-case is recorded with "Adjust packs directly" instead), and a
+// single receipt may not exceed MAX_RECEIPT_PACKS — a larger figure is
+// almost certainly a typo. Returns null when the inputs are not usable.
+export const MAX_RECEIPT_PACKS = 1_000_000;
+const MAX_MANUAL_ADJUSTMENT = 1_000_000_000;
+
+export function casesToPacks(cases, unitsPerCase) {
+  const c = wholeNumber(cases), u = wholeNumber(unitsPerCase);
+  if (c === null || u === null) return null;
+  const packs = c * u;
+  return (Number.isSafeInteger(packs) && packs <= MAX_RECEIPT_PACKS) ? packs : null;
+}
+
+// Every stock change — manual or order-driven — is written to the
+// stockMovements collection as an append-only ledger, alongside the
+// product's new stockOnHand. Nothing ever updates or deletes a
+// stockMovements doc.
+
+function movementRef() { return doc(collection(db, 'stockMovements')); }
 
 // ---- Manual adjustment (receiving stock, corrections, stock counts) ----
 export async function adjustStockManually(productId, delta, { reason, uid, email }) {
-  if (!delta) throw new Error('Enter a non-zero adjustment.');
+  if (typeof delta !== 'number' || !Number.isFinite(delta) || delta === 0) throw new Error('Enter a non-zero adjustment.');
+  if (Math.abs(delta) > MAX_MANUAL_ADJUSTMENT) throw new Error('That adjustment is too large — check the number.');
   await runTransaction(db, async (tx) => {
     const productRef = doc(db, 'products', productId);
     const productSnap = await tx.get(productRef);
@@ -22,9 +47,7 @@ export async function adjustStockManually(productId, delta, { reason, uid, email
     const newStock = previousStock + delta;
 
     tx.update(productRef, { stockOnHand: newStock, updatedAt: serverTimestamp() });
-
-    const movementRef = doc(collection(db, 'stockMovements'));
-    tx.set(movementRef, {
+    tx.set(movementRef(), {
       productId, productName: product.productName, packLabel: product.packLabel,
       type: 'manual', delta, previousStock, newStock,
       reason: reason || '', orderId: null, orderNo: null,
@@ -33,51 +56,123 @@ export async function adjustStockManually(productId, delta, { reason, uid, email
   });
 }
 
+// ---- Receiving supplier cases: ONE transaction ----
+// Adds cases × packs-per-case to stock, writes the ledger entry (the
+// conversion is spelled out in its reason) and remembers packs-per-case
+// on the product — all together, so a failed receipt can never leave the
+// product's packs-per-case changed without the stock having moved.
+export async function receiveStockCases(productId, cases, unitsPerCase, { reason, uid, email }) {
+  const packs = casesToPacks(cases, unitsPerCase);
+  if (packs === null) {
+    throw new Error(`Enter whole numbers above 0 for cases received and packs per case (a single receipt can be at most ${MAX_RECEIPT_PACKS.toLocaleString('en-US')} packs).`);
+  }
+  const c = wholeNumber(cases), u = wholeNumber(unitsPerCase);
+  const note = `Received ${c} case(s) × ${u} = ${packs}` + (reason ? ` — ${reason}` : '');
+  return await runTransaction(db, async (tx) => {
+    const productRef = doc(db, 'products', productId);
+    const productSnap = await tx.get(productRef);
+    if (!productSnap.exists()) throw new Error('Product no longer exists.');
+    const product = productSnap.data();
+    const previousStock = product.stockOnHand || 0;
+    const newStock = previousStock + packs;
+
+    const patch = { stockOnHand: newStock, updatedAt: serverTimestamp() };
+    if ((product.unitsPerCase ?? null) !== u) patch.unitsPerCase = u; // only written when it actually changes
+    tx.update(productRef, patch);
+    tx.set(movementRef(), {
+      productId, productName: product.productName, packLabel: product.packLabel,
+      type: 'manual', delta: packs, previousStock, newStock,
+      reason: note, orderId: null, orderNo: null,
+      createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
+    });
+    return { packs, newStock };
+  });
+}
+
+// ---- Shared helpers for order-driven stock changes ----
+// An order can list the same product on several lines. Everything below
+// groups lines by productId so each product is read ONCE, checked against
+// the COMBINED quantity, updated ONCE, and the ledger shows a running
+// balance (previousStock -> newStock) that adds up line by line.
+function groupTrackedLines(items) {
+  const groups = new Map();
+  (items || []).forEach(it => {
+    if (!it.productId) return; // free-text / custom lines are not stock-tracked
+    if (!groups.has(it.productId)) groups.set(it.productId, []);
+    groups.get(it.productId).push({ desc: it.desc, qty: Number(it.qty) || 0 });
+  });
+  return groups;
+}
+
+async function readProducts(tx, productIds) {
+  const entries = await Promise.all(productIds.map(async (id) => {
+    const ref = doc(db, 'products', id);
+    return [id, { ref, snap: await tx.get(ref) }];
+  }));
+  return new Map(entries);
+}
+
+// sign: -1 = stock goes out (approval), +1 = stock comes back (cancel).
+function writeLineMovements(tx, products, groups, { sign, type, order, uid, email, reasonFor = () => '' }) {
+  for (const [productId, lines] of groups) {
+    const entry = products.get(productId);
+    if (!entry || !entry.snap.exists()) continue; // product was deleted since the order was placed — skip
+    const product = entry.snap.data();
+    let running = product.stockOnHand || 0;
+    for (const line of lines) {
+      if (!line.qty) continue;
+      const previousStock = running;
+      running = previousStock + sign * line.qty;
+      tx.set(movementRef(), {
+        productId, productName: product.productName, packLabel: product.packLabel,
+        type, delta: sign * line.qty, previousStock, newStock: running,
+        reason: reasonFor(running), orderId: order.id, orderNo: order.orderNo || null,
+        createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
+      });
+    }
+    tx.update(entry.ref, { stockOnHand: running, updatedAt: serverTimestamp() });
+  }
+}
+
 // ---- Approving a Submitted order: decrement stock + flip status ----
 // Runs as a single transaction so an order can never end up Approved
-// with only some of its stock decremented, or vice versa. Only items
-// with a productId (added via quick-add, tied to a real catalog
-// product) are tracked — free-text/custom line items are skipped.
+// with only some of its stock decremented, or vice versa.
 //
-// The status check below (must currently be 'Submitted') is what makes
-// this safe against double-clicks, page retries, or two people
-// approving the same order at once: Firestore transactions are
-// optimistic-concurrency-controlled, so if two approval attempts race,
-// the second one re-reads the order INSIDE its own transaction attempt
-// and sees the first attempt's committed 'Approved' status, and throws
-// here instead of decrementing stock a second time. This is not a
-// soft protection — it holds even across browser tabs/devices.
+// The items, quantities and order number are taken from the order document
+// READ INSIDE the transaction — never from the caller's cached copy. If the
+// caller's copy shows different items (the order was edited after the list
+// was loaded) the approval is refused so a manager never approves content
+// they have not seen. The status check (must currently be 'Submitted')
+// makes double-clicks, retries and two people approving at once safe.
 //
 // allowNegativeStock is a manager-only escape hatch (enforced in the
-// UI layer, not here) for the rare real-world case where you need to
-// approve anyway and reconcile stock later.
+// UI layer, not here) for approving anyway and reconciling stock later.
 export async function approveOrderWithStock(order, { uid, email, allowNegativeStock = false }) {
-  const trackedItems = (order.items || []).filter(it => it.productId);
-
   await runTransaction(db, async (tx) => {
     const orderRef = doc(db, 'orders', order.id);
     const orderSnap = await tx.get(orderRef);
     if (!orderSnap.exists()) throw new Error('Order no longer exists.');
-    if (orderSnap.data().status !== 'Submitted') {
+    const current = orderSnap.data();
+    if (current.status !== 'Submitted') {
       throw new Error('This order is no longer Submitted — someone else may have already processed it.');
     }
+    if (Array.isArray(order.items) && orderItemsKey(order.items) !== orderItemsKey(current.items)) {
+      throw makeError('This order was changed after you loaded it. Refresh the list and review it before approving.', { code: 'order-changed' });
+    }
 
+    const groups = groupTrackedLines(current.items);
     // Firestore transactions require all reads before any writes.
-    const productRefs = trackedItems.map(it => doc(db, 'products', it.productId));
-    const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
+    const products = await readProducts(tx, [...groups.keys()]);
 
-    // Hard stock check BEFORE any writes happen. Without this, stock
-    // could silently go negative on every over-committed approval —
-    // exactly the bug this replaces. A manager can still push through
-    // with allowNegativeStock, but by explicit choice, not by default.
     if (!allowNegativeStock) {
       const shortages = [];
-      trackedItems.forEach((it, i) => {
-        const snap = productSnaps[i];
-        if (!snap.exists()) return;
-        const available = snap.data().stockOnHand || 0;
-        if (it.qty > available) shortages.push({ desc: it.desc, needed: it.qty, available });
-      });
+      for (const [productId, lines] of groups) {
+        const entry = products.get(productId);
+        if (!entry.snap.exists()) continue;
+        const available = entry.snap.data().stockOnHand || 0;
+        const needed = lines.reduce((sum, l) => sum + l.qty, 0);
+        if (needed > available) shortages.push({ desc: [...new Set(lines.map(l => l.desc))].join(' + '), needed, available });
+      }
       if (shortages.length > 0) {
         const err = new Error('Insufficient stock for: ' + shortages.map(s => `${s.desc} (need ${s.needed}, have ${s.available})`).join(', '));
         err.isStockShortage = true;
@@ -90,161 +185,117 @@ export async function approveOrderWithStock(order, { uid, email, allowNegativeSt
       status: 'Approved', stockApplied: true,
       approvedAt: serverTimestamp(), updatedAt: serverTimestamp(),
     });
-
-    trackedItems.forEach((it, i) => {
-      const snap = productSnaps[i];
-      if (!snap.exists()) return; // product was deleted since the order was placed — skip
-      const product = snap.data();
-      const previousStock = product.stockOnHand || 0;
-      const newStock = previousStock - it.qty;
-
-      tx.update(productRefs[i], { stockOnHand: newStock, updatedAt: serverTimestamp() });
-
-      const movementRef = doc(collection(db, 'stockMovements'));
-      tx.set(movementRef, {
-        productId: it.productId, productName: product.productName, packLabel: product.packLabel,
-        type: 'order-approved', delta: -it.qty, previousStock, newStock,
-        reason: allowNegativeStock && newStock < 0 ? 'Manager override — approved despite insufficient stock' : '',
-        orderId: order.id, orderNo: order.orderNo,
-        createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
-      });
+    writeLineMovements(tx, products, groups, {
+      sign: -1, type: 'order-approved', order: { id: order.id, orderNo: current.orderNo }, uid, email,
+      reasonFor: (newStock) => (allowNegativeStock && newStock < 0 ? 'Manager override — approved despite insufficient stock' : ''),
     });
   });
 }
 
-// ---- Cancelling an Approved order: restore stock, then hard-delete it ----
-// Orders are permanently deleted on cancel (not soft-cancelled), so this
-// still restores stock and still writes a stockMovements entry — the
-// ledger is append-only and doesn't require the order doc to keep
-// existing, so the audit trail survives even though the order itself
-// is gone. Skipping this step would leave stockOnHand permanently
-// understated every time an approved order is cancelled.
+// ---- Cancelling an Approved order: restore stock ----
+// Restores what the order CURRENTLY holds (edits to an approved order
+// already reconciled stock, see editOrderWithStock), read inside the
+// transaction, with repeated product lines combined per product.
+async function cancelApproved(order, { uid, email, deleteOrder }) {
+  await runTransaction(db, async (tx) => {
+    const orderRef = doc(db, 'orders', order.id);
+    const orderSnap = await tx.get(orderRef);
+    if (!orderSnap.exists()) throw new Error('Order no longer exists.');
+    const current = orderSnap.data();
+    if (current.status !== 'Approved') {
+      throw new Error('This order is no longer Approved — someone else may have already processed it.');
+    }
+    const groups = groupTrackedLines(current.items);
+    const products = await readProducts(tx, [...groups.keys()]);
+
+    if (deleteOrder) tx.delete(orderRef);
+    else tx.update(orderRef, { status: 'Cancelled', stockApplied: false, cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() });
+
+    writeLineMovements(tx, products, groups, {
+      sign: +1, type: deleteOrder ? 'order-cancelled-deleted' : 'order-cancelled',
+      order: { id: order.id, orderNo: current.orderNo }, uid, email,
+    });
+  });
+}
+
+// Orders are permanently deleted on cancel (not soft-cancelled). Stock is
+// still restored and a stockMovements entry still written — the ledger is
+// append-only and survives the order document.
 export async function cancelApprovedOrderAndDelete(order, { uid, email }) {
-  const trackedItems = (order.items || []).filter(it => it.productId);
-
-  await runTransaction(db, async (tx) => {
-    const orderRef = doc(db, 'orders', order.id);
-    const orderSnap = await tx.get(orderRef);
-    if (!orderSnap.exists()) throw new Error('Order no longer exists.');
-    if (orderSnap.data().status !== 'Approved') {
-      throw new Error('This order is no longer Approved — someone else may have already processed it.');
-    }
-
-    const productRefs = trackedItems.map(it => doc(db, 'products', it.productId));
-    const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
-
-    tx.delete(orderRef);
-
-    trackedItems.forEach((it, i) => {
-      const snap = productSnaps[i];
-      if (!snap.exists()) return;
-      const product = snap.data();
-      const previousStock = product.stockOnHand || 0;
-      const newStock = previousStock + it.qty;
-
-      tx.update(productRefs[i], { stockOnHand: newStock, updatedAt: serverTimestamp() });
-
-      const movementRef = doc(collection(db, 'stockMovements'));
-      tx.set(movementRef, {
-        productId: it.productId, productName: product.productName, packLabel: product.packLabel,
-        type: 'order-cancelled-deleted', delta: it.qty, previousStock, newStock,
-        reason: '', orderId: order.id, orderNo: order.orderNo,
-        createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
-      });
-    });
-  });
+  await cancelApproved(order, { uid, email, deleteOrder: true });
 }
 
-// ---- Cancelling an Approved order: restore stock + flip status ----
-// Currently unused (cancel hard-deletes the order — see
-// cancelApprovedOrderAndDelete above) but kept in case that decision
-// changes later, since soft-cancel is the safer default for audit
-// trails and this is already written and tested against that model.
+// Currently unused (cancel hard-deletes the order) but kept in case that
+// decision changes: soft-cancel is the safer default for audit trails.
 export async function cancelApprovedOrderWithStock(order, { uid, email }) {
-  const trackedItems = (order.items || []).filter(it => it.productId);
-
-  await runTransaction(db, async (tx) => {
-    const orderRef = doc(db, 'orders', order.id);
-    const orderSnap = await tx.get(orderRef);
-    if (!orderSnap.exists()) throw new Error('Order no longer exists.');
-    if (orderSnap.data().status !== 'Approved') {
-      throw new Error('This order is no longer Approved — someone else may have already processed it.');
-    }
-
-    const productRefs = trackedItems.map(it => doc(db, 'products', it.productId));
-    const productSnaps = await Promise.all(productRefs.map(ref => tx.get(ref)));
-
-    tx.update(orderRef, {
-      status: 'Cancelled', stockApplied: false,
-      cancelledAt: serverTimestamp(), updatedAt: serverTimestamp(),
-    });
-
-    trackedItems.forEach((it, i) => {
-      const snap = productSnaps[i];
-      if (!snap.exists()) return;
-      const product = snap.data();
-      const previousStock = product.stockOnHand || 0;
-      const newStock = previousStock + it.qty;
-
-      tx.update(productRefs[i], { stockOnHand: newStock, updatedAt: serverTimestamp() });
-
-      const movementRef = doc(collection(db, 'stockMovements'));
-      tx.set(movementRef, {
-        productId: it.productId, productName: product.productName, packLabel: product.packLabel,
-        type: 'order-cancelled', delta: it.qty, previousStock, newStock,
-        reason: '', orderId: order.id, orderNo: order.orderNo,
-        createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
-      });
-    });
-  });
+  await cancelApproved(order, { uid, email, deleteOrder: false });
 }
 
-// ---- Editing an already-Approved order's items ----
-// Stock was already decremented once when it was approved. This
-// re-applies just the difference between old and new quantities per
-// product, instead of double-counting or leaving stock to drift.
-export async function reapplyStockForOrderEdit(order, newItems, { uid, email }) {
-  const oldByProduct = {};
-  (order.items || []).forEach(it => {
-    if (it.productId) oldByProduct[it.productId] = (oldByProduct[it.productId] || 0) + it.qty;
-  });
-  const newByProduct = {};
-  (newItems || []).forEach(it => {
-    if (it.productId) newByProduct[it.productId] = (newByProduct[it.productId] || 0) + it.qty;
-  });
+// ---- Editing a Submitted or Approved order: ONE transaction ----
+// Saves the order's new details AND reconciles stock together. The old
+// items are read from the order document inside the transaction (never from
+// the caller's cached copy), so:
+//   - repeating the same save (retry after a dropped connection, double
+//     click) finds the stored items already equal to the new ones and does
+//     nothing — stock is adjusted at most once;
+//   - an edit made on a screen that is out of date is refused
+//     (expectedRevision no longer matches) instead of overwriting someone
+//     else's change and applying a wrong stock difference;
+//   - an order that has meanwhile moved on (Invoicing, Invoiced, ...) is
+//     refused.
+// Stock is only touched for Approved orders (stock is deducted on approval);
+// as before, an edit that increases quantities is not blocked by low stock.
+export async function editOrderWithStock(orderId, { expectedRevision = null, details, items }, { uid, email }) {
+  const grandTotal = (items || []).reduce((sum, it) => sum + (it.total || 0), 0);
+  const next = {
+    customerId: details.customerId || null,
+    customerName: details.customerName, customerPhone: details.customerPhone, customerLocation: details.customerLocation,
+    notes: details.notes || '', items,
+  };
+  const newRevision = orderRevisionKey(next);
 
-  const productIds = new Set([...Object.keys(oldByProduct), ...Object.keys(newByProduct)]);
-  const deltas = {};
-  productIds.forEach(pid => {
-    const diff = (oldByProduct[pid] || 0) - (newByProduct[pid] || 0); // qty increased -> negative delta (more stock consumed)
-    if (diff !== 0) deltas[pid] = diff;
-  });
+  return await runTransaction(db, async (tx) => {
+    const orderRef = doc(db, 'orders', orderId);
+    const orderSnap = await tx.get(orderRef);
+    if (!orderSnap.exists()) throw new Error('Order no longer exists.');
+    const current = orderSnap.data();
+    if (current.status !== 'Submitted' && current.status !== 'Approved') {
+      throw makeError(`This order is now "${current.status}" and can no longer be edited.`, { code: 'order-status-changed' });
+    }
+    const currentRevision = orderRevisionKey(current);
+    if (currentRevision === newRevision) return { unchanged: true }; // already saved (retry) — nothing to do
+    if (expectedRevision !== null && currentRevision !== expectedRevision) {
+      throw makeError('This order was changed by someone else after you opened it. Close this window, reopen the order and make your edit again.', { code: 'order-changed' });
+    }
 
-  const ids = Object.keys(deltas);
-  if (ids.length === 0) return;
+    const deltas = new Map(); // productId -> change to stock (negative = more stock consumed)
+    if (current.status === 'Approved') {
+      const oldBy = new Map(), newBy = new Map();
+      for (const [pid, lines] of groupTrackedLines(current.items)) oldBy.set(pid, lines.reduce((s, l) => s + l.qty, 0));
+      for (const [pid, lines] of groupTrackedLines(items)) newBy.set(pid, lines.reduce((s, l) => s + l.qty, 0));
+      for (const pid of new Set([...oldBy.keys(), ...newBy.keys()])) {
+        const diff = (oldBy.get(pid) || 0) - (newBy.get(pid) || 0);
+        if (diff !== 0) deltas.set(pid, diff);
+      }
+    }
+    const products = await readProducts(tx, [...deltas.keys()]);
 
-  await runTransaction(db, async (tx) => {
-    const refs = ids.map(pid => doc(db, 'products', pid));
-    const snaps = await Promise.all(refs.map(ref => tx.get(ref)));
-
-    refs.forEach((ref, i) => {
-      const snap = snaps[i];
-      if (!snap.exists()) return;
-      const product = snap.data();
+    tx.update(orderRef, { ...next, grandTotal, updatedAt: serverTimestamp() });
+    for (const [pid, delta] of deltas) {
+      const entry = products.get(pid);
+      if (!entry.snap.exists()) continue;
+      const product = entry.snap.data();
       const previousStock = product.stockOnHand || 0;
-      const delta = deltas[ids[i]];
       const newStock = previousStock + delta;
-
-      tx.update(ref, { stockOnHand: newStock, updatedAt: serverTimestamp() });
-
-      const movementRef = doc(collection(db, 'stockMovements'));
-      tx.set(movementRef, {
-        productId: ids[i], productName: product.productName, packLabel: product.packLabel,
+      tx.update(entry.ref, { stockOnHand: newStock, updatedAt: serverTimestamp() });
+      tx.set(movementRef(), {
+        productId: pid, productName: product.productName, packLabel: product.packLabel,
         type: 'order-edited', delta, previousStock, newStock,
-        reason: '', orderId: order.id, orderNo: order.orderNo,
+        reason: '', orderId, orderNo: current.orderNo || null,
         createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
       });
-    });
+    }
+    return { unchanged: false };
   });
 }
 

@@ -4,6 +4,8 @@ import {
   serverTimestamp, query, orderBy, limit, startAfter, onSnapshot
 } from 'firebase/firestore';
 
+import { wholeNumber } from './numbers.js';
+
 const PAGE_SIZE = 25;
 
 // Your original hardcoded catalog, now used as one-time seed data instead
@@ -51,10 +53,30 @@ export function watchAllProducts(onChange) {
 // writes it directly rather than going through the stock ledger.
 // Every change after creation must go through adjustStockManually()
 // or an order approval/cancellation so it stays logged.
-export async function addProduct({ productName, packLabel, quantity, price, stockOnHand, uid }) {
+// unitsPerCase: how many of THIS pack arrive in one supplier case
+// (e.g. 1 case of Amanda 100g = 14 strips). Optional. Validated here, where
+// it is written, not only in the HTML form: blank/undefined/null means
+// "not set"; anything else must be a whole number above 0.
+export function normaliseUnitsPerCase(value) {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) return null;
+  const n = wholeNumber(value);
+  if (n === null) throw new Error('Packs per case must be a whole number above 0 (or left blank).');
+  return n;
+}
+
+// stockOnHand here is only ever the STARTING stock for a brand-new
+// product — there's no "previous" figure to log against, so this
+// writes it directly rather than going through the stock ledger.
+// Every change after creation must go through adjustStockManually(),
+// receiveStockCases() or an order approval/cancellation so it stays logged.
+export async function addProduct({ productName, packLabel, quantity, price, stockOnHand, unitsPerCase = null, uid }) {
+  const perCase = normaliseUnitsPerCase(unitsPerCase);
   await addDoc(collection(db, 'products'), {
     productName, packLabel,
     quantity: parseFloat(quantity) || 0,
+    // The field is only written when it is actually set, so the app keeps
+    // working against Firestore rules that do not yet know about it.
+    ...(perCase !== null ? { unitsPerCase: perCase } : {}),
     price: parseFloat(price) || 0,
     stockOnHand: parseFloat(stockOnHand) || 0,
     createdBy: uid,
@@ -66,13 +88,16 @@ export async function addProduct({ productName, packLabel, quantity, price, stoc
 // Deliberately does NOT touch stockOnHand — catalog edits (rename,
 // re-pack, reprice) should never silently change stock. Use
 // adjustStockManually() for that, so it's always logged.
-export async function updateProduct(id, { productName, packLabel, quantity, price }) {
-  await updateDoc(doc(db, 'products', id), {
+// unitsPerCase: undefined = leave as is; null/'' = clear; number = set.
+export async function updateProduct(id, { productName, packLabel, quantity, price, unitsPerCase }) {
+  const patch = {
     productName, packLabel,
     quantity: parseFloat(quantity) || 0,
     price: parseFloat(price) || 0,
     updatedAt: serverTimestamp(),
-  });
+  };
+  if (unitsPerCase !== undefined) patch.unitsPerCase = normaliseUnitsPerCase(unitsPerCase);
+  await updateDoc(doc(db, 'products', id), patch);
 }
 
 export async function deleteProduct(id) {

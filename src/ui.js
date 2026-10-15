@@ -82,3 +82,99 @@ export function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
+
+// Appends a freshly fetched page onto an already-loaded list, skipping
+// any record whose id is already present. Paged lists can otherwise
+// show the same row twice when two loads overlap (e.g. a filter change
+// while "Load more" is still in flight, or a refresh fired right after
+// a bulk action). This only affects what's displayed — it never touches
+// the database.
+export function mergeById(existing, incoming) {
+  const seen = new Set(existing.map(r => r.id));
+  const merged = existing.slice();
+  for (const r of incoming) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    merged.push(r);
+  }
+  return merged;
+}
+
+
+// ---- Paged lists: guard against overlapping / out-of-date loads ----
+// Every resettable "Load more" list (orders, invoices, products, stock
+// movements, customers, expenses, visits, deliveries) uses one of these.
+//
+//   guard.reset()   call whenever the list is cleared or its query changes
+//                   (filter, search, refresh after an action). Anything still
+//                   in flight from before is now obsolete.
+//   guard.run({fetch, apply, onError, setLoading})
+//       fetch()  is called immediately and synchronously, so it captures the
+//                CURRENT cursor and filter before anything is awaited.
+//       apply(result)  is only called if no reset happened meanwhile — an
+//                obsolete response never touches rows, cursor or hasMore.
+//       Only one load per list state runs at a time (a second click on
+//       "Load more" while one is loading is ignored).
+//       An obsolete request never changes the loading indicator or reports
+//       an error; reset() itself switches the indicator off so a new load
+//       starts from a clean state.
+export function createPagedLoadGuard() {
+  let generation = 0;
+  let runningGeneration = null;
+  let activeSetLoading = null;
+  return {
+    reset() {
+      generation++;
+      runningGeneration = null;
+      if (activeSetLoading) { activeSetLoading(false); activeSetLoading = null; }
+    },
+    async run({ fetch, apply, onError, setLoading }) {
+      if (runningGeneration === generation) return false;
+      const gen = generation;
+      runningGeneration = gen;
+      activeSetLoading = setLoading || null;
+      if (setLoading) setLoading(true);
+      try {
+        const result = await fetch();
+        if (gen !== generation) return false;
+        apply(result);
+        return true;
+      } catch (err) {
+        if (gen === generation && onError) onError(err);
+        return false;
+      } finally {
+        if (gen === generation) {
+          runningGeneration = null;
+          activeSetLoading = null;
+          if (setLoading) setLoading(false);
+        }
+      }
+    },
+  };
+}
+
+// ---- A notice that stays on screen until dismissed ----
+// Toasts disappear after a few seconds; "your invoice WAS saved but the PDF
+// failed" must not. actions: [{ label, onClick(api) }]; api = { setMessage, close }.
+export function showPersistentNotice({ message, actions = [] }) {
+  const box = document.createElement('div');
+  box.className = 'persist-notice';
+  box.setAttribute('role', 'alert');
+  const msg = document.createElement('div');
+  msg.className = 'persist-notice-msg';
+  msg.textContent = message;
+  const bar = document.createElement('div');
+  bar.className = 'persist-notice-actions';
+  const api = { setMessage(t) { msg.textContent = t; }, close() { box.remove(); } };
+  [...actions, { label: 'Dismiss', onClick: (a) => a.close() }].forEach(a => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'list-action-btn';
+    b.textContent = a.label;
+    b.addEventListener('click', () => a.onClick(api));
+    bar.appendChild(b);
+  });
+  box.append(msg, bar);
+  document.body.appendChild(box);
+  return api;
+}

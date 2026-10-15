@@ -1,7 +1,7 @@
 import { db } from './firebase.js';
 import { doc, getDoc, setDoc, runTransaction, onSnapshot } from 'firebase/firestore';
 
-const COUNTER_DOC = doc(db, 'counters', 'naisiInvoice');
+export const COUNTER_DOC = doc(db, 'counters', 'naisiInvoice');
 
 // Always the REAL current year — never stored, never manually editable.
 export function currentYear() {

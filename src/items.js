@@ -30,6 +30,16 @@ export function addItemRow(itemsBody, onChange, qty, desc, price, productName = 
   }
 }
 
+// Rebuilds rows from STORED items, keeping every field — including productId,
+// which stock tracking depends on. (The edit screen used to drop it, turning
+// tracked items into untracked ones on save.)
+export function fillItemRows(itemsBody, items, onChange = () => {}, locked = false) {
+  (items || []).forEach(it => addItemRow(
+    itemsBody, onChange, it.qty, it.desc, it.price,
+    it.productName ?? null, it.packLabel ?? null, it.packQuantity ?? null, it.productId ?? null, locked
+  ));
+}
+
 export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products, locked = false) {
   quickAddGrid.innerHTML = '';
 

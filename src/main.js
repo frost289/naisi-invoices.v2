@@ -3,7 +3,7 @@ import { LOGO_DATA_URI } from './logo.js';
 import { auth, db } from './firebase.js';
 import { watchAuth, login, logout } from './auth.js';
 import { getUserRole } from './roles.js';
-import { addItemRow, buildQuickAddGrid, getItems, mwk } from './items.js';
+import { addItemRow, fillItemRows, buildQuickAddGrid, getItems, mwk } from './items.js';
 import { updatePreview, formatDate } from './preview.js';
 import {
   loadCounterState, incrementCounterAtomically, watchCounterState,
@@ -35,13 +35,16 @@ import {
 } from './products.js';
 import {
   submitOrder, fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
-  fetchOrderById, setOrderStatus, markOrderInvoiced, updateOrderDetails,
-  beginInvoiceGeneration, revertInvoiceGeneration,
+  fetchOrderById, setOrderStatus,
+  issueInvoiceForOrder, issueStandaloneInvoice, newStandaloneInvoiceId,
   fetchOrdersReadyToDeliverPage, markOrderDelivered
 } from './orders.js';
+import { orderRevisionKey } from './orderRevision.js';
+import { invoiceOrderForBulk } from './invoiceFlow.js';
+import { wholeNumber } from './numbers.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
-  reapplyStockForOrderEdit, fetchAllStockMovementsPage, fetchStockMovementsForProduct
+  editOrderWithStock, receiveStockCases, fetchAllStockMovementsPage, fetchStockMovementsForProduct, casesToPacks
 } from './stock.js';
 import {
   fetchOrdersInRange, fetchExpensesInRange, fetchVisitsInRange, buildIntervalSummary
@@ -52,7 +55,8 @@ import {
 } from './visits.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
-  initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc
+  initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc, mergeById,
+  createPagedLoadGuard, showPersistentNotice
 } from './ui.js';
 import {
   FAIL_REASONS, OVERDUE_HOUR_OPTIONS, DEFAULT_OVERDUE_HOURS, markOrderDeliveryFailed,
@@ -61,6 +65,7 @@ import {
 } from './deliveries.js';
 import { orderStops, getStartPoint, startLabel, formatKm } from './routing.js';
 import { fetchDepot, saveDepot } from './depot.js';
+import { runBulkJob } from './bulkProgress.js';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
@@ -122,6 +127,27 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
     clearButtonLoading(btn);
   }
 });
+
+// An invoice that WAS saved but whose PDF could not be produced. Stays on
+// screen until dismissed. "Try PDF again" only regenerates the PDF from the
+// saved invoice data — it never saves another invoice or uses another number.
+function notifyInvoiceSavedPdfFailed(invoiceNo, pdfArgs, err) {
+  showPersistentNotice({
+    message: `Invoice ${invoiceNo} was saved, but its PDF could not be created (${err?.message || err}). Nothing was duplicated. Try the PDF again here, or use Invoices → Download later.`,
+    actions: [{
+      label: 'Try PDF again',
+      onClick: (api) => {
+        try {
+          generatePdf(pdfArgs);
+          api.close();
+          showToast(`PDF for ${invoiceNo} downloaded.`, 'success');
+        } catch (e) {
+          api.setMessage(`Invoice ${invoiceNo} is saved, but the PDF failed again (${e?.message || e}). Use Invoices → Download later.`);
+        }
+      },
+    }],
+  });
+}
 
 async function handleLogoutClick() {
   const confirmed = confirm('Log out of Naisi Foods?');
@@ -913,6 +939,7 @@ async function initApp(user, role) {
   const customerSearchInput = document.getElementById('customerSearchInput');
   const customerSearchHint = document.getElementById('customerSearchHint');
   let loadedCustomers = [], customersCursor = null, customersHasMore = true;
+  const customersGuard = createPagedLoadGuard();
 
   const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -987,6 +1014,7 @@ async function initApp(user, role) {
   document.getElementById('showNoPinOnlyToggle').addEventListener('change', applyCustomerSearchAndRender);
 
   async function resetAndLoadCustomers() {
+    customersGuard.reset();
     loadedCustomers = []; customersCursor = null; customersHasMore = true;
     customerSearchInput.value = '';
     await loadNextCustomerPage();
@@ -994,19 +1022,19 @@ async function initApp(user, role) {
 
   async function loadNextCustomerPage() {
     if (!customersHasMore) return;
-    setButtonLoading(loadMoreCustomersBtn, 'Loading…');
-    try {
-      const result = await fetchCustomersPage(customersCursor);
-      loadedCustomers = loadedCustomers.concat(result.items);
-      customersCursor = result.lastDoc;
-      customersHasMore = result.hasMore;
-      applyCustomerSearchAndRender();
-      loadMoreCustomersBtn.style.display = customersHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load customers: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(loadMoreCustomersBtn);
-    }
+    const cursor = customersCursor;
+    await customersGuard.run({
+      setLoading: (on) => (on ? setButtonLoading(loadMoreCustomersBtn, 'Loading…') : clearButtonLoading(loadMoreCustomersBtn)),
+      fetch: () => fetchCustomersPage(cursor),
+      apply: (result) => {
+        loadedCustomers = mergeById(loadedCustomers, result.items);
+        customersCursor = result.lastDoc;
+        customersHasMore = result.hasMore;
+        applyCustomerSearchAndRender();
+        loadMoreCustomersBtn.style.display = customersHasMore ? 'block' : 'none';
+      },
+      onError: (err) => showToast('Could not load customers: ' + err.message, 'error'),
+    });
   }
 
   loadMoreCustomersBtn.addEventListener('click', loadNextCustomerPage);
@@ -1360,7 +1388,9 @@ async function initApp(user, role) {
     const prodQuantity = document.getElementById('prodQuantity');
     const prodPrice = document.getElementById('prodPrice');
     const prodStock = document.getElementById('prodStock');
+    const prodUnitsPerCase = document.getElementById('prodUnitsPerCase');
     let loadedProducts = [], productsCursor = null, productsHasMore = true;
+    const productsGuard = createPagedLoadGuard();
 
     function renderProductRows(list) {
       productListBody.innerHTML = '';
@@ -1373,6 +1403,7 @@ async function initApp(user, role) {
           <td>${p.productName}</td>
           <td>${p.packLabel}</td>
           <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${p.unitsPerCase ?? '—'}</td>
           <td style="font-family:'JetBrains Mono',monospace; ${stock <= 0 ? 'color:#b3261e; font-weight:700;' : ''}">${stock}</td>
           <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
           <td>
@@ -1385,24 +1416,25 @@ async function initApp(user, role) {
     }
 
     async function resetAndLoadProducts() {
+      productsGuard.reset();
       loadedProducts = []; productsCursor = null; productsHasMore = true;
       await loadNextProductPage();
     }
 
     async function loadNextProductPage() {
       if (!productsHasMore) return;
-      setButtonLoading(loadMoreProductsBtn, 'Loading…');
-      try {
-        const result = await fetchProductsPage(productsCursor);
-        loadedProducts = loadedProducts.concat(result.items);
-        productsCursor = result.lastDoc; productsHasMore = result.hasMore;
-        renderProductRows(loadedProducts);
-        loadMoreProductsBtn.style.display = productsHasMore ? 'block' : 'none';
-      } catch (err) {
-        showToast('Could not load products: ' + err.message, 'error');
-      } finally {
-        clearButtonLoading(loadMoreProductsBtn);
-      }
+      const cursor = productsCursor;
+      await productsGuard.run({
+        setLoading: (on) => (on ? setButtonLoading(loadMoreProductsBtn, 'Loading…') : clearButtonLoading(loadMoreProductsBtn)),
+        fetch: () => fetchProductsPage(cursor),
+        apply: (result) => {
+          loadedProducts = mergeById(loadedProducts, result.items);
+          productsCursor = result.lastDoc; productsHasMore = result.hasMore;
+          renderProductRows(loadedProducts);
+          loadMoreProductsBtn.style.display = productsHasMore ? 'block' : 'none';
+        },
+        onError: (err) => showToast('Could not load products: ' + err.message, 'error'),
+      });
     }
 
     loadMoreProductsBtn.addEventListener('click', loadNextProductPage);
@@ -1413,13 +1445,14 @@ async function initApp(user, role) {
       const quantity = parseFloat(prodQuantity.value);
       const price = parseFloat(prodPrice.value);
       const stockOnHand = parseFloat(prodStock.value) || 0;
+      const unitsPerCase = prodUnitsPerCase.value;
       if (!name || !pack) { showToast('Enter both a product name and a pack.', 'error'); return; }
-      if (!quantity || quantity <= 0) { showToast('Enter a quantity greater than 0.', 'error'); return; }
+      if (!quantity || quantity <= 0) { showToast('Enter the contents per pack (1 if the pack is a single item).', 'error'); return; }
       if (!price || price <= 0) { showToast('Enter a price greater than 0.', 'error'); return; }
       setButtonLoading(addProductBtn, 'Saving…');
       try {
-        await addProduct({ productName: name, packLabel: pack, quantity, price, stockOnHand, uid: user.uid });
-        prodName.value = ''; prodPack.value = ''; prodQuantity.value = ''; prodPrice.value = ''; prodStock.value = '';
+        await addProduct({ productName: name, packLabel: pack, quantity, price, stockOnHand, unitsPerCase, uid: user.uid });
+        prodName.value = ''; prodPack.value = ''; prodQuantity.value = ''; prodPrice.value = ''; prodStock.value = ''; prodUnitsPerCase.value = '';
         showToast('Product added to catalog.', 'success');
         await resetAndLoadProducts();
         await loadProductsCache();
@@ -1443,6 +1476,8 @@ async function initApp(user, role) {
           <td><input class="customer-edit-input" data-field="productName" value="${p.productName}"></td>
           <td><input class="customer-edit-input" data-field="packLabel" value="${p.packLabel}"></td>
           <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${p.quantity ?? 0}"></td>
+          <td><input class="customer-edit-input" data-field="unitsPerCase" type="number" min="0" step="1" value="${p.unitsPerCase ?? ''}" placeholder="—"></td>
+          <td style="font-family:'JetBrains Mono',monospace;">${p.stockOnHand ?? 0}</td>
           <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${p.price}"></td>
           <td>
             <button type="button" class="list-action-btn" data-action="save">Save</button>
@@ -1455,12 +1490,19 @@ async function initApp(user, role) {
         const packLabel = tr.querySelector('[data-field="packLabel"]').value.trim();
         const quantity = parseFloat(tr.querySelector('[data-field="quantity"]').value) || 0;
         const price = parseFloat(tr.querySelector('[data-field="price"]').value) || 0;
+        // Packs per case is only sent when it was actually changed, so nothing
+        // new is written for products that do not use it. Validated (whole
+        // number above 0, or blank to clear) inside updateProduct.
+        const enteredPerCase = tr.querySelector('[data-field="unitsPerCase"]').value.trim();
+        const existingPerCase = p?.unitsPerCase ?? null;
+        const perCaseChanged = String(enteredPerCase) !== String(existingPerCase ?? '');
         if (!productName || !packLabel) { showToast('Name and pack cannot be empty.', 'error'); return; }
         setButtonLoading(btn, 'Saving…');
         try {
-          await updateProduct(id, { productName, packLabel, quantity, price });
+          await updateProduct(id, { productName, packLabel, quantity, price, ...(perCaseChanged ? { unitsPerCase: enteredPerCase } : {}) });
           const idx = loadedProducts.findIndex(p => p.id === id);
-          if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], productName, packLabel, quantity, price };
+          const newPerCase = perCaseChanged ? (enteredPerCase === '' ? null : wholeNumber(enteredPerCase)) : existingPerCase;
+          if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], productName, packLabel, quantity, price, unitsPerCase: newPerCase ?? undefined };
           renderProductRows(loadedProducts);
           await loadProductsCache();
           showToast('Product updated.', 'success');
@@ -1497,16 +1539,47 @@ async function initApp(user, role) {
     const saSaveBtn = document.getElementById('saSaveBtn');
     const saCancelBtn = document.getElementById('saCancelBtn');
     const saCloseBtn = document.getElementById('saCloseBtn');
+    const saMode = document.getElementById('saMode');
+    const saCasesWrap = document.getElementById('saCasesWrap');
+    const saDeltaWrap = document.getElementById('saDeltaWrap');
+    const saCases = document.getElementById('saCases');
+    const saUnitsPerCase = document.getElementById('saUnitsPerCase');
+    const saCasePreview = document.getElementById('saCasePreview');
+    const saPackUnit = document.getElementById('saPackUnit');
 
     let adjustingProduct = null;
+
+    function applyStockAdjustMode() {
+      const cases = saMode.value === 'cases';
+      saCasesWrap.style.display = cases ? 'block' : 'none';
+      saDeltaWrap.style.display = cases ? 'none' : 'block';
+      updateCasePreview();
+    }
+
+    function updateCasePreview() {
+      if (!adjustingProduct) return;
+      const packs = casesToPacks(saCases.value, saUnitsPerCase.value);
+      saCasePreview.textContent = packs === null
+        ? 'Enter whole numbers: cases received, and packs in one case.'
+        : `${saCases.value} case(s) × ${saUnitsPerCase.value} = adds ${packs} × ${adjustingProduct.packLabel} · new stock ${(adjustingProduct.stockOnHand || 0) + packs}`;
+    }
+
+    saMode.addEventListener('change', applyStockAdjustMode);
+    saCases.addEventListener('input', updateCasePreview);
+    saUnitsPerCase.addEventListener('input', updateCasePreview);
 
     function openStockAdjustModal(product) {
       adjustingProduct = product;
       saErrorNote.style.display = 'none';
       saProductLabel.textContent = `${product.productName} — ${product.packLabel}`;
       saCurrentStock.textContent = product.stockOnHand ?? 0;
+      saPackUnit.textContent = `× ${product.packLabel}`;
       saDelta.value = '';
       saReason.value = '';
+      saCases.value = '';
+      saUnitsPerCase.value = product.unitsPerCase ?? '';
+      saMode.value = 'cases';
+      applyStockAdjustMode();
       stockAdjustModal.style.display = 'flex';
     }
 
@@ -1523,12 +1596,23 @@ async function initApp(user, role) {
 
     saSaveBtn.addEventListener('click', async () => {
       if (!adjustingProduct) return;
-      const delta = parseFloat(saDelta.value);
+      const receivingCases = saMode.value === 'cases';
       const reason = saReason.value.trim();
-      if (!delta) {
-        saErrorNote.textContent = 'Enter a non-zero adjustment.';
-        saErrorNote.style.display = 'block';
-        return;
+      let delta = null;
+      if (receivingCases) {
+        delta = casesToPacks(saCases.value, saUnitsPerCase.value);
+        if (delta === null) {
+          saErrorNote.textContent = 'Enter whole numbers above 0 for the cases received and the packs per case.';
+          saErrorNote.style.display = 'block';
+          return;
+        }
+      } else {
+        delta = parseFloat(saDelta.value);
+        if (!delta || !Number.isFinite(delta)) {
+          saErrorNote.textContent = 'Enter a non-zero adjustment.';
+          saErrorNote.style.display = 'block';
+          return;
+        }
       }
       if (!reason) {
         saErrorNote.textContent = 'Enter a reason for this adjustment.';
@@ -1538,12 +1622,20 @@ async function initApp(user, role) {
       saErrorNote.style.display = 'none';
       setButtonLoading(saSaveBtn, 'Saving…');
       try {
-        await adjustStockManually(adjustingProduct.id, delta, { reason, uid: user.uid, email: user.email });
+        let newUnitsPerCase = adjustingProduct.unitsPerCase ?? null;
+        if (receivingCases) {
+          // ONE transaction: stock balance, ledger entry (the conversion is
+          // spelled out in its reason) and packs-per-case are saved together.
+          await receiveStockCases(adjustingProduct.id, saCases.value, saUnitsPerCase.value, { reason, uid: user.uid, email: user.email });
+          newUnitsPerCase = wholeNumber(saUnitsPerCase.value);
+        } else {
+          await adjustStockManually(adjustingProduct.id, delta, { reason, uid: user.uid, email: user.email });
+        }
         const idx = loadedProducts.findIndex(p => p.id === adjustingProduct.id);
-        if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], stockOnHand: (loadedProducts[idx].stockOnHand || 0) + delta };
+        if (idx !== -1) loadedProducts[idx] = { ...loadedProducts[idx], unitsPerCase: newUnitsPerCase ?? undefined, stockOnHand: (loadedProducts[idx].stockOnHand || 0) + delta };
         renderProductRows(loadedProducts);
         await loadProductsCache();
-        showToast('Stock adjusted.', 'success');
+        showToast(receivingCases ? `Added ${delta} × ${adjustingProduct.packLabel} to stock.` : 'Stock adjusted.', 'success');
         closeStockAdjustModal();
       } catch (err) {
         saErrorNote.textContent = 'Could not save: ' + err.message;
@@ -1567,6 +1659,7 @@ async function initApp(user, role) {
     const loadMoreStockMovementsBtn = document.getElementById('loadMoreStockMovementsBtn');
     const stockMovementProductFilter = document.getElementById('stockMovementProductFilter');
     let loadedMovements = [], movementsCursor = null, movementsHasMore = true, currentMovementProductFilter = 'all';
+    const movementsGuard = createPagedLoadGuard();
 
     function formatMovementTimestamp(ts) {
       if (!ts || typeof ts.toDate !== 'function') return '—';
@@ -1595,26 +1688,27 @@ async function initApp(user, role) {
     }
 
     async function resetAndLoadMovements() {
+      movementsGuard.reset();
       loadedMovements = []; movementsCursor = null; movementsHasMore = true;
       await loadNextMovementPage();
     }
 
     async function loadNextMovementPage() {
       if (!movementsHasMore) return;
-      setButtonLoading(loadMoreStockMovementsBtn, 'Loading…');
-      try {
-        const result = currentMovementProductFilter === 'all'
-          ? await fetchAllStockMovementsPage(movementsCursor)
-          : await fetchStockMovementsForProduct(currentMovementProductFilter, movementsCursor);
-        loadedMovements = loadedMovements.concat(result.items);
-        movementsCursor = result.lastDoc; movementsHasMore = result.hasMore;
-        renderMovementRows(loadedMovements);
-        loadMoreStockMovementsBtn.style.display = movementsHasMore ? 'block' : 'none';
-      } catch (err) {
-        showToast('Could not load stock movements: ' + err.message, 'error');
-      } finally {
-        clearButtonLoading(loadMoreStockMovementsBtn);
-      }
+      // filter and cursor are captured together, synchronously, so a response can never be
+      // applied under a different filter than the one it was requested for.
+      const cursor = movementsCursor, filter = currentMovementProductFilter;
+      await movementsGuard.run({
+        setLoading: (on) => (on ? setButtonLoading(loadMoreStockMovementsBtn, 'Loading…') : clearButtonLoading(loadMoreStockMovementsBtn)),
+        fetch: () => (filter === 'all' ? fetchAllStockMovementsPage(cursor) : fetchStockMovementsForProduct(filter, cursor)),
+        apply: (result) => {
+          loadedMovements = mergeById(loadedMovements, result.items);
+          movementsCursor = result.lastDoc; movementsHasMore = result.hasMore;
+          renderMovementRows(loadedMovements);
+          loadMoreStockMovementsBtn.style.display = movementsHasMore ? 'block' : 'none';
+        },
+        onError: (err) => showToast('Could not load stock movements: ' + err.message, 'error'),
+      });
     }
 
     function refreshMovementProductFilterOptions() {
@@ -1713,7 +1807,7 @@ async function initApp(user, role) {
       els.providerPhone.value = inv.providerPhone || '';
       els.notes.value = inv.notes || '';
       itemsBody.innerHTML = '';
-      (inv.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
+      fillItemRows(itemsBody, inv.items, refreshPreview);
       editingInvoiceId = inv.id;
       editingInvoiceNoLabel.textContent = inv.invoiceNo;
       editingBanner.style.display = 'block';
@@ -1747,7 +1841,7 @@ async function initApp(user, role) {
     // ---- Generate invoice from an approved order ----
     function loadOrderIntoInvoiceForm(order) {
       exitEditMode();
-      generatingFromOrder = { id: order.id, orderNo: order.orderNo };
+      generatingFromOrder = { id: order.id, orderNo: order.orderNo, revision: orderRevisionKey(order) };
       fromOrderNoLabel.textContent = order.orderNo;
       fromOrderBanner.style.display = 'block';
 
@@ -1758,7 +1852,7 @@ async function initApp(user, role) {
       els.notes.value = order.notes || '';
 
       itemsBody.innerHTML = '';
-      (order.items || []).forEach(it => addItemRow(itemsBody, refreshPreview, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity));
+      fillItemRows(itemsBody, order.items, refreshPreview);
 
       showView('form');
       refreshPreview();
@@ -1777,34 +1871,19 @@ async function initApp(user, role) {
       showView('orders');
     });
 
+    // A stand-alone invoice gets a client-chosen id, kept until a save is
+    // confirmed. Pressing Generate again after a lost acknowledgement then
+    // finds the invoice that was already saved instead of creating another.
+    let pendingStandaloneInvoiceId = null;
+
     generateBtn.addEventListener('click', async () => {
       const wasEditing = !!editingInvoiceId;
       const fromOrder = generatingFromOrder; // capture now — cleared partway through on success
       setButtonLoading(generateBtn, wasEditing ? 'Saving…' : 'Generating…');
 
-      let lockAcquired = false;
       try {
-        // Lock BEFORE any other work: a double-click, a second browser
-        // tab open on the same order, or a retry after a dropped
-        // connection all hit this and fail here instead of quietly
-        // creating a second invoice for the same order. See
-        // beginInvoiceGeneration in orders.js for how the guarantee works.
-        if (!wasEditing && fromOrder) {
-          await beginInvoiceGeneration(fromOrder.id);
-          lockAcquired = true;
-        }
-
         const items = getItems(itemsBody);
-        let invoiceNo = els.invoiceNo.value;
-        let reservation = null;
-
-        if (!wasEditing) {
-          reservation = await incrementCounterAtomically();
-          invoiceNo = reservation.usedNo;
-        }
-
         const meta = {
-          invoiceNo,
           date: els.invoiceDate.value,
           customer: els.custName.value || '-',
           customerId: document.getElementById('custCustomerId').value || null,
@@ -1816,43 +1895,68 @@ async function initApp(user, role) {
           items,
         };
 
-        const { grandTotal } = generatePdf(meta);
-
         if (wasEditing) {
-          await updateInvoice(editingInvoiceId, { ...meta, grandTotal });
-          exitEditMode();
-          showToast('Invoice updated.', 'success');
-          showView('invoices');
-        } else {
-          const docRef = await addDoc(collection(db, 'invoices'), {
-            ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
-          });
-          els.invoiceNo.value = buildInvoiceNo(reservation.next.prefix, reservation.next.counter);
+          try {
+            const invoiceNo = els.invoiceNo.value;
+            const { grandTotal } = generatePdf({ ...meta, invoiceNo });
+            await updateInvoice(editingInvoiceId, { ...meta, invoiceNo, grandTotal });
+            exitEditMode();
+            showToast('Invoice updated.', 'success');
+            showView('invoices');
+          } catch (err) {
+            console.error(err);
+            showToast('Could not save the invoice: ' + err.message, 'error');
+          }
+          return;
+        }
 
+        // ---- Step 1: save. Only a failure HERE means "not saved". ----
+        // Lock + number + invoice + order status are saved together (see
+        // issueInvoiceForOrder in orders.js); nothing is written on failure.
+        let committed;
+        try {
           if (fromOrder) {
-            await markOrderInvoiced(fromOrder.id, { invoiceId: docRef.id, invoiceNo });
-            showToast(`Invoice saved. Order ${fromOrder.orderNo} marked as Invoiced.`, 'success');
+            committed = await issueInvoiceForOrder({ orderId: fromOrder.id, meta, expectedRevision: fromOrder.revision ?? null, uid: user.uid });
+          } else {
+            pendingStandaloneInvoiceId = pendingStandaloneInvoiceId || newStandaloneInvoiceId();
+            committed = await issueStandaloneInvoice({ invoiceId: pendingStandaloneInvoiceId, meta, uid: user.uid });
+          }
+        } catch (err) {
+          console.error(err);
+          if (err.alreadyInvoiced) {
+            showToast(`This order was already invoiced as ${err.invoiceNo}. Nothing new was created — use Invoices → Download if you need the PDF.`, 'error');
             exitFromOrderMode();
-            if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
             showView('orders');
           } else {
-            showToast('Invoice saved and downloaded.', 'success');
+            showToast('Could not save the invoice: ' + err.message, 'error');
           }
+          return;
         }
-      } catch (err) {
-        console.error(err);
-        if (err.alreadyInvoiced) {
-          showToast(`This order was already invoiced as ${err.invoiceNo}.`, 'error');
-          exitFromOrderMode();
-          showView('orders');
-        } else {
-          showToast('Could not save the invoice: ' + err.message, 'error');
-        }
-        // If the lock was acquired but something after it failed, put
-        // the order back to Approved instead of leaving it stuck in
-        // "Invoicing" forever with no way to retry.
-        if (lockAcquired && fromOrder) {
-          try { await revertInvoiceGeneration(fromOrder.id); } catch (revertErr) { console.error(revertErr); }
+
+        // ---- Step 2: the invoice IS saved. Nothing below may report a save
+        // failure or create another invoice. ----
+        pendingStandaloneInvoiceId = null;
+        const invoiceNo = committed.invoiceNo;
+        const pdfArgs = { ...meta, invoiceNo };
+        els.invoiceNo.value = buildInvoiceNo(committed.next.prefix, committed.next.counter);
+
+        let pdfError = null, refreshError = null;
+        try { generatePdf(pdfArgs); } catch (err) { pdfError = err; console.error(err); }
+
+        try {
+          if (fromOrder) {
+            exitFromOrderMode();
+            if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+          }
+        } catch (err) { refreshError = err; console.error(err); }
+        if (fromOrder) showView('orders');
+
+        if (pdfError) notifyInvoiceSavedPdfFailed(invoiceNo, pdfArgs, pdfError);
+        if (refreshError) {
+          showToast(`Invoice ${invoiceNo} was saved, but the list could not refresh (${refreshError.message}). Reload the page to see it. Nothing was duplicated.`, 'info', 8000);
+        } else if (!pdfError) {
+          if (committed.alreadySaved) showToast(`Invoice ${invoiceNo} had already been saved — no new invoice was created.`, 'info');
+          else showToast(fromOrder ? `Invoice ${invoiceNo} saved. Order ${fromOrder.orderNo} marked as Invoiced.` : 'Invoice saved and downloaded.', 'success');
         }
       } finally {
         clearButtonLoading(generateBtn);
@@ -1869,6 +1973,7 @@ async function initApp(user, role) {
     var invoiceSearchHint = document.getElementById('invoiceSearchHint');
     var invoiceListMode = 'default', invoiceRangeFrom = null, invoiceRangeTo = null;
     var loadedInvoices = [], invoicesCursor = null, invoicesHasMore = true;
+    var invoicesGuard = createPagedLoadGuard();
 
     function renderInvoiceRows(list) {
       listBody.innerHTML = '';
@@ -1903,6 +2008,7 @@ async function initApp(user, role) {
     }
 
     window.resetAndLoadInvoices = async function resetAndLoadInvoices() {
+      invoicesGuard.reset();
       invoiceListMode = 'default'; loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true;
       invoiceSearchInput.value = '';
       listTitle.textContent = 'All Invoices';
@@ -1913,20 +2019,18 @@ async function initApp(user, role) {
 
     async function loadNextInvoicePage() {
       if (!invoicesHasMore) return;
-      setButtonLoading(loadMoreInvoicesBtn, 'Loading…');
-      try {
-        let result;
-        if (invoiceListMode === 'range') result = await fetchInvoicesByDateRangePage(invoiceRangeFrom, invoiceRangeTo, invoicesCursor);
-        else result = await fetchAllInvoicesPage(invoicesCursor);
-        loadedInvoices = loadedInvoices.concat(result.items);
-        invoicesCursor = result.lastDoc; invoicesHasMore = result.hasMore;
-        applyInvoiceSearchAndRender();
-        loadMoreInvoicesBtn.style.display = invoicesHasMore ? 'block' : 'none';
-      } catch (err) {
-        showToast('Could not load invoices: ' + err.message, 'error');
-      } finally {
-        clearButtonLoading(loadMoreInvoicesBtn);
-      }
+      const cursor = invoicesCursor, mode = invoiceListMode, from = invoiceRangeFrom, to = invoiceRangeTo;
+      await invoicesGuard.run({
+        setLoading: (on) => (on ? setButtonLoading(loadMoreInvoicesBtn, 'Loading…') : clearButtonLoading(loadMoreInvoicesBtn)),
+        fetch: () => (mode === 'range' ? fetchInvoicesByDateRangePage(from, to, cursor) : fetchAllInvoicesPage(cursor)),
+        apply: (result) => {
+          loadedInvoices = mergeById(loadedInvoices, result.items);
+          invoicesCursor = result.lastDoc; invoicesHasMore = result.hasMore;
+          applyInvoiceSearchAndRender();
+          loadMoreInvoicesBtn.style.display = invoicesHasMore ? 'block' : 'none';
+        },
+        onError: (err) => showToast('Could not load invoices: ' + err.message, 'error'),
+      });
     }
 
     loadMoreInvoicesBtn.addEventListener('click', loadNextInvoicePage);
@@ -1937,6 +2041,7 @@ async function initApp(user, role) {
       const to = document.getElementById('filterTo').value;
       if (!from || !to) { showToast('Pick both a From and To date.', 'error'); return; }
       invoiceListMode = 'range'; invoiceRangeFrom = from; invoiceRangeTo = to;
+      invoicesGuard.reset();
       loadedInvoices = []; invoicesCursor = null; invoicesHasMore = true; invoiceSearchInput.value = '';
       listTitle.textContent = `Invoices: ${from} to ${to}`;
       listHead.innerHTML = `<tr><th>Invoice No.</th><th>Date</th><th>Customer</th><th>Products</th><th>Total</th><th></th></tr>`;
@@ -2025,10 +2130,12 @@ async function initApp(user, role) {
     const giNoPhoneNote = document.getElementById('giNoPhoneNote');
     const giDoneBtn = document.getElementById('giDoneBtn');
     let generatingOrder = null;
+    let generatingOrderRevision = null; // what the manager saw when this window opened
     let lastGeneratedInvoice = null; // { pdfDoc, filename, phone, customerName, invoiceNo, grandTotal }
 
     function openGenerateInvoiceModal(order) {
       generatingOrder = order;
+      generatingOrderRevision = orderRevisionKey(order);
       giErrorNote.style.display = 'none';
       giMainActions.style.display = 'flex';
       giMainHint.style.display = 'block';
@@ -2042,9 +2149,7 @@ async function initApp(user, role) {
       giCustLocation.value = order.customerLocation === '-' ? '' : (order.customerLocation || '');
       giNotes.value = order.notes || '';
       giItemsBody.innerHTML = '';
-      (order.items || []).forEach(it =>
-        addItemRow(giItemsBody, () => {}, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity)
-      );
+      fillItemRows(giItemsBody, order.items);
       buildQuickAddGrid(giQuickAddGrid, giItemsBody, () => {}, productsCache);
       generateInvoiceModal.style.display = 'flex';
     }
@@ -2075,6 +2180,7 @@ async function initApp(user, role) {
     giGenerateBtn.addEventListener('click', async () => {
       if (!generatingOrder) return;
       const order = generatingOrder;
+      const expectedRevision = generatingOrderRevision;
       const customerName = giCustName.value.trim();
       const items = getItems(giItemsBody);
       giErrorNote.style.display = 'none';
@@ -2091,20 +2197,9 @@ async function initApp(user, role) {
       }
 
       setButtonLoading(giGenerateBtn, 'Generating…');
-      let lockAcquired = false;
       try {
-        // Same duplicate-invoice lock as the full-page flow — a
-        // double-click or a retry after a dropped connection fails
-        // here instead of quietly creating a second invoice.
-        await beginInvoiceGeneration(order.id);
-        lockAcquired = true;
-
-        const reservation = await incrementCounterAtomically();
-        const invoiceNo = reservation.usedNo;
         const custPhone = giCustPhone.value.trim();
-
         const meta = {
-          invoiceNo,
           date: giDate.value,
           customer: customerName,
           customerId: order.customerId || null,
@@ -2116,46 +2211,55 @@ async function initApp(user, role) {
           items,
         };
 
-        // generatePdf() calls jsPDF's doc.save() internally, which
-        // triggers a normal browser download — no navigation, no page
-        // change, the manager stays exactly where they were. It also
-        // hands back the jsPDF doc object itself (aliased to pdfDoc
-        // here — 'doc' is already the imported Firestore doc() function
-        // in this file) so it can be re-packaged as a file for WhatsApp
-        // sharing without generating the PDF a second time.
-        const { grandTotal, filename, doc: pdfDoc } = generatePdf(meta);
+        // ---- Step 1: save. Only a failure HERE means "not saved". ----
+        // A double-click, a second tab or a retry after a dropped connection
+        // fails here instead of creating a second invoice (see
+        // issueInvoiceForOrder in orders.js). Nothing is written on failure.
+        let committed;
+        try {
+          committed = await issueInvoiceForOrder({ orderId: order.id, meta, expectedRevision, uid: user.uid });
+        } catch (err) {
+          console.error(err);
+          giErrorNote.textContent = err.alreadyInvoiced
+            ? `This order was already invoiced as ${err.invoiceNo}. Nothing new was created.`
+            : 'Could not generate the invoice: ' + err.message;
+          giErrorNote.style.display = 'block';
+          return;
+        }
 
-        const docRef = await addDoc(collection(db, 'invoices'), {
-          ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
-        });
+        // ---- Step 2: the invoice IS saved. Nothing below may report a save
+        // failure or create another invoice. ----
+        const invoiceNo = committed.invoiceNo;
+        const pdfArgs = { ...meta, invoiceNo };
+        // generatePdf() triggers a normal browser download (no navigation) and
+        // hands back the jsPDF doc object (aliased pdfDoc — 'doc' is already the
+        // imported Firestore doc() function in this file) so it can be re-packaged
+        // for WhatsApp without generating the PDF a second time.
+        let pdf = null, pdfError = null, refreshError = null;
+        try { pdf = generatePdf(pdfArgs); } catch (err) { pdfError = err; console.error(err); }
+        try {
+          await resetAndLoadOrders();
+          if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+        } catch (err) { refreshError = err; console.error(err); }
 
-        await markOrderInvoiced(order.id, { invoiceId: docRef.id, invoiceNo });
+        if (pdfError) notifyInvoiceSavedPdfFailed(invoiceNo, pdfArgs, pdfError);
+        if (refreshError) {
+          showToast(`Invoice ${invoiceNo} was saved, but the list could not refresh (${refreshError.message}). Reload the page to see it. Nothing was duplicated.`, 'info', 8000);
+        } else if (!pdfError) {
+          showToast(`Invoice ${invoiceNo} downloaded. Order ${order.orderNo} marked as Invoiced.`, 'success');
+        }
 
-        showToast(`Invoice ${invoiceNo} downloaded. Order ${order.orderNo} marked as Invoiced.`, 'success');
-        await resetAndLoadOrders();
-        if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
-
-        // Switch to the post-generate state instead of closing —
-        // offering WhatsApp only when there's a phone number that
-        // actually resolves to a valid Malawi WhatsApp number.
-        lastGeneratedInvoice = { pdfDoc, filename, phone: custPhone, customerName, invoiceNo, grandTotal };
+        // Switch to the post-generate state instead of closing — offering
+        // WhatsApp only when the PDF exists and the phone number resolves to
+        // a valid Malawi WhatsApp number.
         const hasValidPhone = !!toWhatsAppNumber(custPhone);
-        giSendWhatsAppBtn.style.display = hasValidPhone ? 'block' : 'none';
-        giNoPhoneNote.style.display = hasValidPhone ? 'none' : 'block';
+        if (pdf) lastGeneratedInvoice = { pdfDoc: pdf.doc, filename: pdf.filename, phone: custPhone, customerName, invoiceNo, grandTotal: pdf.grandTotal };
+        else lastGeneratedInvoice = null;
+        giSendWhatsAppBtn.style.display = (pdf && hasValidPhone) ? 'block' : 'none';
+        giNoPhoneNote.style.display = (pdf && !hasValidPhone) ? 'block' : 'none';
         giMainActions.style.display = 'none';
         giMainHint.style.display = 'none';
         giPostGenerateActions.style.display = 'block';
-      } catch (err) {
-        console.error(err);
-        if (err.alreadyInvoiced) {
-          giErrorNote.textContent = `This order was already invoiced as ${err.invoiceNo}.`;
-        } else {
-          giErrorNote.textContent = 'Could not generate the invoice: ' + err.message;
-        }
-        giErrorNote.style.display = 'block';
-        if (lockAcquired) {
-          try { await revertInvoiceGeneration(order.id); } catch (revertErr) { console.error(revertErr); }
-        }
       } finally {
         clearButtonLoading(giGenerateBtn);
       }
@@ -2286,6 +2390,7 @@ async function initApp(user, role) {
   }
 
   let loadedExpenses = [], expensesCursor = null, expensesHasMore = true;
+  const expensesGuard = createPagedLoadGuard();
 
   function badgeHtml(cat) { return `<span class="exp-badge exp-badge-${cat}">${cat}</span>`; }
 
@@ -2346,6 +2451,7 @@ async function initApp(user, role) {
   }
 
   async function resetAndLoadExpenses() {
+    expensesGuard.reset();
     loadedExpenses = []; expensesCursor = null; expensesHasMore = true;
     expenseSearchInput.value = '';
     await loadNextExpensePage();
@@ -2425,20 +2531,18 @@ async function initApp(user, role) {
 
   async function loadNextExpensePage() {
     if (!expensesHasMore) return;
-    setButtonLoading(loadMoreExpensesBtn, 'Loading…');
-    try {
-      const result = isManager
-        ? await fetchAllExpensesPage(expensesCursor)
-        : await fetchMyExpensesPage(user.uid, expensesCursor);
-      loadedExpenses = loadedExpenses.concat(result.items);
-      expensesCursor = result.lastDoc; expensesHasMore = result.hasMore;
-      applyExpenseSearchAndRender();
-      loadMoreExpensesBtn.style.display = expensesHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load expenses: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(loadMoreExpensesBtn);
-    }
+    const cursor = expensesCursor, manager = isManager;
+    await expensesGuard.run({
+      setLoading: (on) => (on ? setButtonLoading(loadMoreExpensesBtn, 'Loading…') : clearButtonLoading(loadMoreExpensesBtn)),
+      fetch: () => (manager ? fetchAllExpensesPage(cursor) : fetchMyExpensesPage(user.uid, cursor)),
+      apply: (result) => {
+        loadedExpenses = mergeById(loadedExpenses, result.items);
+        expensesCursor = result.lastDoc; expensesHasMore = result.hasMore;
+        applyExpenseSearchAndRender();
+        loadMoreExpensesBtn.style.display = expensesHasMore ? 'block' : 'none';
+      },
+      onError: (err) => showToast('Could not load expenses: ' + err.message, 'error'),
+    });
   }
 
   loadMoreExpensesBtn.addEventListener('click', loadNextExpensePage);
@@ -2541,6 +2645,10 @@ async function initApp(user, role) {
   const orderStatusFilter = document.getElementById('orderStatusFilter');
 
   let loadedOrders = [], ordersCursor = null, ordersHasMore = true;
+  // Every paged list uses createPagedLoadGuard: reset() on each filter change /
+  // refresh; a page that arrives after a reset is discarded before it touches rows,
+  // cursor or hasMore; only one "Load more" per list state runs at a time.
+  const ordersGuard = createPagedLoadGuard();
   let currentOrderStatusFilter = 'Submitted';
   const selectedOrderIds = new Set();
   const bulkApproveBar = document.getElementById('bulkApproveBar');
@@ -2562,7 +2670,9 @@ async function initApp(user, role) {
 
     const statuses = new Set([...selectedOrderIds].map(id => {
       const o = loadedOrders.find(oo => oo.id === id);
-      return o ? o.status : null;
+      // 'Invoicing' = left mid-invoice by an interrupted run; it is
+      // processed exactly like Approved so a retry resumes it.
+      return o ? (o.status === 'Invoicing' ? 'Approved' : o.status) : null;
     }));
 
     if (statuses.size === 1 && statuses.has('Submitted')) {
@@ -2775,7 +2885,7 @@ async function initApp(user, role) {
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
       const checkboxCell = isManager
-        ? `<td>${(o.status === 'Submitted' || o.status === 'Approved') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
+        ? `<td>${(o.status === 'Submitted' || o.status === 'Approved' || o.status === 'Invoicing') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
         : '';
       const baseCells = `
         ${checkboxCell}
@@ -2808,6 +2918,7 @@ async function initApp(user, role) {
   }
 
   async function resetAndLoadOrders() {
+    ordersGuard.reset();
     loadedOrders = []; ordersCursor = null; ordersHasMore = true;
     selectedOrderIds.clear();
     updateBulkApproveBar();
@@ -2822,25 +2933,21 @@ async function initApp(user, role) {
 
   async function loadNextOrderPage() {
     if (!ordersHasMore) return;
-    setButtonLoading(loadMoreOrdersBtn, 'Loading…');
-    try {
-      let result;
-      if (isManager) {
-        result = currentOrderStatusFilter === 'all'
-          ? await fetchAllOrdersPage(ordersCursor)
-          : await fetchOrdersByStatusPage(currentOrderStatusFilter, ordersCursor);
-      } else {
-        result = await fetchMyOrdersPage(user.uid, ordersCursor);
-      }
-      loadedOrders = loadedOrders.concat(result.items);
-      ordersCursor = result.lastDoc; ordersHasMore = result.hasMore;
-      renderOrderRows(loadedOrders);
-      loadMoreOrdersBtn.style.display = ordersHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load orders: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(loadMoreOrdersBtn);
-    }
+    // Query inputs are captured synchronously, before any await.
+    const cursor = ordersCursor, status = currentOrderStatusFilter, manager = isManager;
+    await ordersGuard.run({
+      setLoading: (on) => (on ? setButtonLoading(loadMoreOrdersBtn, 'Loading…') : clearButtonLoading(loadMoreOrdersBtn)),
+      fetch: () => (manager
+        ? (status === 'all' ? fetchAllOrdersPage(cursor) : fetchOrdersByStatusPage(status, cursor))
+        : fetchMyOrdersPage(user.uid, cursor)),
+      apply: (result) => {
+        loadedOrders = mergeById(loadedOrders, result.items);
+        ordersCursor = result.lastDoc; ordersHasMore = result.hasMore;
+        renderOrderRows(loadedOrders);
+        loadMoreOrdersBtn.style.display = ordersHasMore ? 'block' : 'none';
+      },
+      onError: (err) => showToast('Could not load orders: ' + err.message, 'error'),
+    });
   }
 
   loadMoreOrdersBtn.addEventListener('click', loadNextOrderPage);
@@ -2866,141 +2973,79 @@ async function initApp(user, role) {
     // reported at the end; use the single-order Approve flow with its
     // manager override if one of those genuinely needs pushing through.
     async function runBulkApprove(ids) {
-      const confirmed = confirm(`Approve ${ids.length} selected order(s)?\n\nAny that are short on stock will be skipped and reported, not forced through.`);
-      if (!confirmed) return;
+      const orders = ids.map(id => loadedOrders.find(o => o.id === id)).filter(Boolean);
+      if (!orders.length) return;
 
-      setButtonLoading(bulkApproveBtn, `Approving 0 / ${ids.length}…`);
-      let succeeded = 0;
-      const failures = [];
-      for (let i = 0; i < ids.length; i++) {
-        const order = loadedOrders.find(o => o.id === ids[i]);
-        const labelSpan = bulkApproveBtn.querySelector('span:last-child');
-        if (labelSpan) labelSpan.textContent = `Approving ${i + 1} / ${ids.length}…`;
-        if (!order) { failures.push({ id: ids[i], orderNo: ids[i], reason: 'No longer in this list', isStockShortage: false }); continue; }
+      // Safe to repeat: approveOrderWithStock reads the order INSIDE its
+      // transaction and only acts while it is still Submitted, so a retry (or a
+      // second tab) can never deduct stock twice, and it refuses an order whose
+      // items changed since this list was loaded.
+      async function approveOne(order, allowNegativeStock) {
         try {
-          await approveOrderWithStock(order, { uid: user.uid, email: user.email });
-          succeeded++;
+          await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock });
+          return { state: 'done', text: allowNegativeStock ? 'Approved with stock override' : 'Approved · stock deducted' };
         } catch (err) {
-          failures.push({ id: order.id, orderNo: order.orderNo, reason: err.isStockShortage ? 'Insufficient stock' : err.message, isStockShortage: !!err.isStockShortage });
-        }
-      }
-      clearButtonLoading(bulkApproveBtn);
-
-      if (failures.length === 0) {
-        showToast(`Approved all ${succeeded} selected order(s).`, 'success');
-      } else {
-        showToast(
-          `Approved ${succeeded} of ${ids.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
-          'error'
-        );
-      }
-
-      // If everything that failed was a stock shortage (not some other
-      // error), offer a one-time bulk override — mainly for unblocking
-      // a backlog when stock levels haven't been set up yet, so the
-      // manager isn't forced to override each one individually.
-      const shortageFailures = failures.filter(f => f.isStockShortage);
-      if (shortageFailures.length > 0) {
-        const forceConfirm = confirm(
-          `${shortageFailures.length} order(s) were skipped for insufficient stock:\n\n${shortageFailures.map(f => f.orderNo).join(', ')}\n\n` +
-          `Force-approve these anyway? Stock will go negative for the short items — you'll need to set correct starting stock afterward (Products → Adjust Stock) to reconcile it.`
-        );
-        if (forceConfirm) {
-          setButtonLoading(bulkApproveBtn, `Force-approving 0 / ${shortageFailures.length}…`);
-          let forced = 0;
-          for (let i = 0; i < shortageFailures.length; i++) {
-            const order = loadedOrders.find(o => o.id === shortageFailures[i].id);
-            const labelSpan = bulkApproveBtn.querySelector('span:last-child');
-            if (labelSpan) labelSpan.textContent = `Force-approving ${i + 1} / ${shortageFailures.length}…`;
-            if (!order) continue;
-            try {
-              await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock: true });
-              forced++;
-            } catch (err) {
-              console.error(err);
-            }
+          if (err.isStockShortage) {
+            return { state: 'failed', isStockShortage: true, text: 'Short on stock: ' + err.shortages.map(s => `${s.desc} (need ${s.needed}, have ${s.available})`).join(', ') };
           }
-          clearButtonLoading(bulkApproveBtn);
-          showToast(`Force-approved ${forced} of ${shortageFailures.length} skipped order(s).`, forced === shortageFailures.length ? 'success' : 'error');
+          const fresh = await fetchOrderById(order.id).catch(() => null);
+          if (fresh && fresh.status !== 'Submitted' && err.code !== 'order-changed') return { state: 'skipped', text: `Already ${fresh.status}` };
+          return { state: 'failed', text: err.message };
         }
       }
 
+      const result = await runBulkJob({
+        title: `Approve ${orders.length} order(s)`,
+        intro: 'Each order is approved one at a time and its stock deducted once. Orders short on stock are skipped and listed — you can force them through at the end if needed.',
+        startLabel: `Approve ${orders.length} order(s)`,
+        orders,
+        lockButtons: [bulkApproveBtn],
+        runOne: order => approveOne(order, false),
+        followUp: {
+          rows: r => r.isStockShortage,
+          label: n => `Force-approve ${n} short on stock`,
+          confirmText: n => `Force-approve ${n} order(s) anyway?\n\nStock will go negative for the short items — set correct stock afterwards (Products → Adjust Stock) to reconcile it.`,
+          runOne: order => approveOne(order, true),
+        },
+      });
+
+      if (!result.started) return;
       selectedOrderIds.clear();
       await resetAndLoadOrders();
       await loadProductsCache();
     }
 
-    // Generates and downloads an invoice for each selected Approved
-    // order exactly as submitted — no per-invoice editing popup, by
-    // Shared by both the Orders tab (bulk-generate for selected
-    // Approved orders) and the Invoices tab's "Orders Ready to
-    // Invoice" list (its own separate selection) — takes actual order
-    // objects rather than ids, so each caller resolves them from
-    // whichever list it's tracking. progressBtn is whichever bulk
-    // button triggered this, purely for the "N / total" label.
+    // Generates and downloads an invoice for each selected Approved order —
+    // no per-invoice editing popup. Shared by the Orders tab (selected
+    // Approved orders) and the Invoices tab's "Orders Ready to Invoice" list,
+    // so it takes order objects; progressBtn is whichever button opened it.
     async function generateInvoicesForOrders(orders, progressBtn) {
-      const confirmed = confirm(
-        `Generate and download invoices for ${orders.length} selected order(s)?\n\n` +
-        `Each one downloads as its own PDF — your browser may ask permission to download multiple files, please allow it to continue.`
-      );
-      if (!confirmed) return;
-
-      setButtonLoading(progressBtn, `Generating 0 / ${orders.length}…`);
-      let succeeded = 0;
-      const failures = [];
+      if (!orders.length) return;
       const today = new Date().toISOString().slice(0, 10);
 
-      for (let i = 0; i < orders.length; i++) {
-        const order = orders[i];
-        const labelSpan = progressBtn.querySelector('span:last-child');
-        if (labelSpan) labelSpan.textContent = `Generating ${i + 1} / ${orders.length}…`;
+      // Safe to repeat (see invoiceFlow.js): the invoice content comes from the order exactly
+      // as it was when this list was loaded; if the order changed since, the commit is refused
+      // (order-changed). A PDF problem after saving is "saved, PDF failed", never a failed
+      // invoice, and "Download PDF" never saves another.
+      const invoiceOne = (order) => invoiceOrderForBulk({ order, today, uid: user.uid, issue: issueInvoiceForOrder, makePdf: generatePdf });
 
-        let lockAcquired = false;
-        try {
-          await beginInvoiceGeneration(order.id);
-          lockAcquired = true;
+      const result = await runBulkJob({
+        title: `Generate ${orders.length} invoice(s)`,
+        intro: 'Each invoice is saved and downloaded as its own PDF. If your browser asks to allow multiple downloads, choose Allow. Keep this page open until it finishes.',
+        startLabel: `Generate ${orders.length} invoice(s)`,
+        orders,
+        lockButtons: [progressBtn],
+        runOne: invoiceOne,
+      });
 
-          const reservation = await incrementCounterAtomically();
-          const invoiceNo = reservation.usedNo;
-          const meta = {
-            invoiceNo,
-            date: today,
-            customer: order.customerName || '-',
-            customerId: order.customerId || null,
-            phone: order.customerPhone === '-' ? '-' : (order.customerPhone || '-'),
-            location: order.customerLocation === '-' ? '-' : (order.customerLocation || '-'),
-            terms: 'CASH ON DELIVERY (COD)',
-            providerPhone: '',
-            notes: order.notes || '',
-            items: order.items || [],
-          };
-          const { grandTotal } = generatePdf(meta);
-
-          const docRef = await addDoc(collection(db, 'invoices'), {
-            ...meta, grandTotal, createdBy: user.uid, createdAt: serverTimestamp(),
-          });
-          await markOrderInvoiced(order.id, { invoiceId: docRef.id, invoiceNo });
-          succeeded++;
-        } catch (err) {
-          failures.push({ orderNo: order.orderNo, reason: err.alreadyInvoiced ? 'Already invoiced' : err.message });
-          if (lockAcquired) {
-            try { await revertInvoiceGeneration(order.id); } catch (revertErr) { console.error(revertErr); }
-          }
-        }
+      if (!result.started) return;
+      try {
+        await resetAndLoadOrders();
+        if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
+      } catch (err) {
+        console.error(err);
+        showToast('The invoices were saved, but the list could not refresh. Reload the page to see them.', 'info', 8000);
       }
-      clearButtonLoading(progressBtn);
-
-      if (failures.length === 0) {
-        showToast(`Generated and downloaded ${succeeded} invoice(s).`, 'success');
-      } else {
-        showToast(
-          `Generated ${succeeded} of ${orders.length}. Skipped: ${failures.map(f => `${f.orderNo} (${f.reason})`).join(', ')}`,
-          'error'
-        );
-      }
-
-      await resetAndLoadOrders();
-      if (window.loadPendingInvoiceOrders) await window.loadPendingInvoiceOrders();
     }
     window.__generateInvoicesForOrders = generateInvoicesForOrders;
 
@@ -3011,7 +3056,6 @@ async function initApp(user, role) {
         await runBulkApprove(ids);
       } else if (bulkMode === 'generate') {
         const orders = ids.map(id => loadedOrders.find(o => o.id === id)).filter(Boolean);
-        selectedOrderIds.clear();
         await generateInvoicesForOrders(orders, bulkApproveBtn);
       }
     });
@@ -3114,9 +3158,11 @@ async function initApp(user, role) {
     const eoCloseBtn = document.getElementById('eoCloseBtn');
 
     let editingOrder = null;
+    let editingOrderRevision = null; // content fingerprint captured when the modal opened
 
     function openEditOrderModal(order) {
       editingOrder = order;
+      editingOrderRevision = orderRevisionKey(order);
       eoErrorNote.style.display = 'none';
       editOrderNoLabel.textContent = order.orderNo;
       eoCustName.value = order.customerName || '';
@@ -3124,9 +3170,7 @@ async function initApp(user, role) {
       eoCustLocation.value = order.customerLocation || '';
       eoNotes.value = order.notes || '';
       eoItemsBody.innerHTML = '';
-      (order.items || []).forEach(it =>
-        addItemRow(eoItemsBody, () => {}, it.qty, it.desc, it.price, it.productName, it.packLabel, it.packQuantity)
-      );
+      fillItemRows(eoItemsBody, order.items); // keeps productId, so stock tracking survives an edit
       // Quick-add grid uses whatever's currently in productsCache (loaded on app init).
       buildQuickAddGrid(eoQuickAddGrid, eoItemsBody, () => {}, productsCache);
       editOrderModal.style.display = 'flex';
@@ -3135,6 +3179,7 @@ async function initApp(user, role) {
     function closeEditOrderModal() {
       editOrderModal.style.display = 'none';
       editingOrder = null;
+      editingOrderRevision = null;
       eoItemsBody.innerHTML = '';
     }
 
@@ -3166,17 +3211,15 @@ async function initApp(user, role) {
       eoErrorNote.style.display = 'none';
       setButtonLoading(eoSaveBtn, 'Saving…');
       try {
-        await updateOrderDetails(editingOrder.id, {
-          customerId: editingOrder.customerId || null,
-          customerName, customerPhone, customerLocation,
-          items, notes,
-        });
-        // Stock was already decremented once when this order was Approved —
-        // re-apply just the difference so it doesn't double-count or drift.
-        if (editingOrder.status === 'Approved') {
-          await reapplyStockForOrderEdit(editingOrder, items, { uid: user.uid, email: user.email });
-          await loadProductsCache();
-        }
+        // One transaction: reads the CURRENT order, checks status and revision, writes the
+        // order, the product balances and the ledger together. Saving identical content
+        // again (retry) changes nothing.
+        await editOrderWithStock(editingOrder.id, {
+          expectedRevision: editingOrderRevision,
+          details: { customerId: editingOrder.customerId || null, customerName, customerPhone, customerLocation, notes },
+          items,
+        }, { uid: user.uid, email: user.email });
+        if (editingOrder.status === 'Approved') await loadProductsCache();
         const idx = loadedOrders.findIndex(o => o.id === editingOrder.id);
         if (idx !== -1) {
           const grandTotal = items.reduce((sum, it) => sum + (it.total || 0), 0);
@@ -3489,6 +3532,7 @@ async function initApp(user, role) {
     var myVisitsEmpty = document.getElementById('myVisitsEmpty');
     var loadMoreMyVisitsBtn = document.getElementById('loadMoreMyVisitsBtn');
     var loadedMyVisits = [], myVisitsCursor = null, myVisitsHasMore = true;
+    var myVisitsGuard = createPagedLoadGuard();
 
     function renderMyVisitsRows(list) {
       myVisitsBody.innerHTML = '';
@@ -3507,24 +3551,25 @@ async function initApp(user, role) {
     }
 
     window.resetAndLoadMyVisits = async function resetAndLoadMyVisits() {
+      myVisitsGuard.reset();
       loadedMyVisits = []; myVisitsCursor = null; myVisitsHasMore = true;
       await loadNextMyVisitsPage();
     };
 
     async function loadNextMyVisitsPage() {
       if (!myVisitsHasMore) return;
-      setButtonLoading(loadMoreMyVisitsBtn, 'Loading…');
-      try {
-        const result = await fetchMyVisitsPage(user.uid, myVisitsCursor);
-        loadedMyVisits = loadedMyVisits.concat(result.items);
-        myVisitsCursor = result.lastDoc; myVisitsHasMore = result.hasMore;
-        renderMyVisitsRows(loadedMyVisits);
-        loadMoreMyVisitsBtn.style.display = myVisitsHasMore ? 'block' : 'none';
-      } catch (err) {
-        showToast('Could not load visits: ' + err.message, 'error');
-      } finally {
-        clearButtonLoading(loadMoreMyVisitsBtn);
-      }
+      const cursor = myVisitsCursor;
+      await myVisitsGuard.run({
+        setLoading: (on) => (on ? setButtonLoading(loadMoreMyVisitsBtn, 'Loading…') : clearButtonLoading(loadMoreMyVisitsBtn)),
+        fetch: () => fetchMyVisitsPage(user.uid, cursor),
+        apply: (result) => {
+          loadedMyVisits = mergeById(loadedMyVisits, result.items);
+          myVisitsCursor = result.lastDoc; myVisitsHasMore = result.hasMore;
+          renderMyVisitsRows(loadedMyVisits);
+          loadMoreMyVisitsBtn.style.display = myVisitsHasMore ? 'block' : 'none';
+        },
+        onError: (err) => showToast('Could not load visits: ' + err.message, 'error'),
+      });
     }
 
     loadMoreMyVisitsBtn.addEventListener('click', loadNextMyVisitsPage);
@@ -3844,6 +3889,7 @@ async function initDeliveryApp(user) {
   const deliveryLoadMoreBtn = document.getElementById('deliveryLoadMoreBtn');
 
   let loadedDeliveries = [], deliveriesCursor = null, deliveriesHasMore = true;
+  const deliveriesGuard = createPagedLoadGuard();
   const deliverySortBtn = document.getElementById('deliverySortBtn');
   const deliveryRouteSummary = document.getElementById('deliveryRouteSummary');
   const deliveryPinCache = new Map();     // orderId -> { lat, lng } | null
@@ -3983,30 +4029,33 @@ async function initDeliveryApp(user) {
   }
 
   async function loadNextDeliveryPage() {
-    if (!deliveriesHasMore) return;
-    setButtonLoading(deliveryLoadMoreBtn, 'Loading…');
-    try {
-      const result = await fetchOrdersReadyToDeliverPage(deliveriesCursor);
-      loadedDeliveries = loadedDeliveries.concat(result.items);
-      deliveriesCursor = result.lastDoc;
-      deliveriesHasMore = result.hasMore;
-      deliveryReadyCount.textContent = loadedDeliveries.length;
-      renderDeliveryEmpty();
-      for (const order of result.items) {
-        const card = await renderDeliveryCard(order);
-        deliveryList.appendChild(card);
-      }
-      deliveryLoadMoreBtn.style.display = deliveriesHasMore ? 'block' : 'none';
-    } catch (err) {
-      showToast('Could not load deliveries: ' + err.message, 'error');
-    } finally {
-      clearButtonLoading(deliveryLoadMoreBtn);
-    }
+    if (!deliveriesHasMore) return false;
+    const cursor = deliveriesCursor;
+    return await deliveriesGuard.run({
+      setLoading: (on) => (on ? setButtonLoading(deliveryLoadMoreBtn, 'Loading…') : clearButtonLoading(deliveryLoadMoreBtn)),
+      // Cards are built BEFORE apply, so a superseded response is discarded without touching the DOM.
+      fetch: async () => {
+        const result = await fetchOrdersReadyToDeliverPage(cursor);
+        const cards = [];
+        for (const order of result.items) cards.push(await renderDeliveryCard(order));
+        return { result, cards };
+      },
+      apply: ({ result, cards }) => {
+        loadedDeliveries = mergeById(loadedDeliveries, result.items);
+        deliveriesCursor = result.lastDoc;
+        deliveriesHasMore = result.hasMore;
+        deliveryReadyCount.textContent = loadedDeliveries.length;
+        renderDeliveryEmpty();
+        for (const card of cards) deliveryList.appendChild(card);
+        deliveryLoadMoreBtn.style.display = deliveriesHasMore ? 'block' : 'none';
+      },
+      onError: (err) => showToast('Could not load deliveries: ' + err.message, 'error'),
+    });
   }
 
   async function loadAllDeliveryPages() {
     let guard = 0;
-    while (deliveriesHasMore && guard++ < 10) await loadNextDeliveryPage();
+    while (deliveriesHasMore && guard++ < 10) { if (!(await loadNextDeliveryPage())) break; }
   }
 
   async function rerenderDeliveryList() {
@@ -4061,6 +4110,7 @@ async function initDeliveryApp(user) {
   });
 
   async function resetAndLoadDeliveries() {
+    deliveriesGuard.reset();
     loadedDeliveries = []; deliveriesCursor = null; deliveriesHasMore = true;
     deliveryList.innerHTML = '';
     await loadNextDeliveryPage();

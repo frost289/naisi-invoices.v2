@@ -1,0 +1,82 @@
+// =====================================================================
+// PROPOSAL ONLY - NOT TESTED, NOT DEPLOYED, NOT MERGED WITH YOUR REAL RULES.
+// The deployed firestore.rules are not in the repository, so this cannot be
+// dropped in as-is. Whoever owns the real rules should merge these conditions
+// into the existing match blocks, then run tests/rules/invoicing.rules.test.js
+// against the merged file in the Firestore emulator.
+//
+// Purpose: make the BACKEND enforce "one invoice per order", so that browser
+// tabs still running the previous version of the app cannot bypass it.
+//
+// Replace isManagerOrSubmitter() etc. with whatever helper your rules already use.
+// =====================================================================
+
+// ---- Invoices ----------------------------------------------------------
+// New-version clients ALWAYS write an `orderId` field (null for stand-alone invoices).
+// The previous version never wrote that field, so requiring its presence blocks the
+// old "addDoc with an automatic id" path.
+function invoiceIsNewShape() {
+  return request.resource.data.keys().hasAll(['orderId', 'invoiceNo', 'items', 'createdBy'])
+      && request.resource.data.createdBy == request.auth.uid;
+}
+function orderInvoiceIdOk(db) {
+  // invoice for an order: deterministic id, and the order must be marked Invoiced to THIS invoice in the same commit
+  let orderPath = /databases/$(db)/documents/orders/$(request.resource.data.orderId);
+  return request.resource.id == 'ord_' + request.resource.data.orderId
+      && getAfter(orderPath).data.status == 'Invoiced'
+      && getAfter(orderPath).data.invoiceId == request.resource.id
+      && getAfter(orderPath).data.invoiceNo == request.resource.data.invoiceNo
+      && get(orderPath).data.status == 'Invoicing';
+}
+// match /invoices/{id} {
+//   allow create: if isManager() && invoiceIsNewShape()
+//                 && (request.resource.data.orderId == null || orderInvoiceIdOk(db));
+//   // `create` on an id that exists is already refused (that is an update), so ord_<id> cannot be created twice.
+// }
+
+// ---- Counter -----------------------------------------------------------
+// match /counters/naisiInvoice {
+//   allow update: if isManager()
+//     && request.resource.data.counter == resource.data.counter + 1
+//     && request.resource.data.prefix == resource.data.prefix;
+//   // In the same commit an invoice must be created (checked from the invoice side above via getAfter on the order).
+// }
+
+// ---- Orders ------------------------------------------------------------
+// Lock:    Approved -> Invoicing  : needs an attempt token and a lease start equal to request.time
+// Resume:  Invoicing -> Invoicing : only after the lease has expired (server time, not the browser's clock)
+// Commit:  Invoicing -> Invoiced  : invoiceId must be 'ord_' + order id, and that invoice must exist after the commit
+// Release: Invoicing -> Approved  : only clears the token/lease fields
+//
+// function lockFieldsOk() {
+//   return request.resource.data.invoicingAttempt is string
+//       && request.resource.data.invoicingLeaseStartedAt == request.time;
+// }
+// match /orders/{orderId} {
+//   allow update: if isManager() && (
+//        // ... your existing branches for other transitions ...
+//        (resource.data.status == 'Approved'  && request.resource.data.status == 'Invoicing' && lockFieldsOk())
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Invoicing' && lockFieldsOk()
+//           && request.time > resource.data.invoicingLeaseStartedAt + duration.value(10, 'm'))   // keep in step with INVOICING_LEASE_MS
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Invoiced'
+//           && request.resource.data.invoiceId == 'ord_' + orderId
+//           && existsAfter(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId))
+//           && !exists(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)))
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Approved'
+//           && request.resource.data.invoicingAttempt == null)
+//   );
+// }
+// Old clients write status 'Invoiced' with an automatic invoice id (not 'ord_<orderId>'), so the Commit branch refuses them.
+//
+// Note on get()/getAfter(): each counts as a document read toward the rules limit (10 per request,
+// 20 per transaction/batch). The proposal above uses up to 2 per write.
+
+// ---- Products ----------------------------------------------------------
+// The new app writes `unitsPerCase` (a positive integer) on create only when it is set, and on edit only
+// when the manager changed it; clearing the field writes null (updateProduct in src/products.js).
+// If your rules use a field allowlist for products, add:
+//   !('unitsPerCase' in request.resource.data) || request.resource.data.unitsPerCase == null
+//     || (request.resource.data.unitsPerCase is int && request.resource.data.unitsPerCase > 0)
+// and add 'unitsPerCase' to the allowed key list.
+// Receiving stock now writes products (stockOnHand [+ unitsPerCase]) and stockMovements in ONE transaction;
+// if your rules validate the movement against the product with getAfter(), that still holds.
