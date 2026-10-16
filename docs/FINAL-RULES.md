@@ -18,7 +18,7 @@ authoring environment; the QA review ran an earlier copy of the tests there: 91 
 3. A customer's `active=false` and visit days can only be changed by managers. A rep who adds a shop gets it active with the app's automatic Mon-Sat day.
 4. `unitsPerCase` is checked only when it is written or changed, so products already holding an odd old value can still have stock updated. Upper bound 1,000,000.
 5. Order counter: the order counter now stores `lastOrderId`; managers keep the original +1 behaviour. Invoice counter manual override (`setCounterStart`) is still allowed for managers; the invoice rule requires the NEXT invoice to use the counter value read before its commit.
-6. `config/depot` has no rule in the supplied file (the "set depot" screen is therefore denied for everyone). Not changed here; decide separately.
+6. RC3: the depot screen, navigation and its reads/writes were removed (owner decision 5). No `config/depot` rule exists or is needed; routes start from the phone GPS.
 
 ## Known limits / risks (unverified until the emulator run)
 * Document-access limit: the order and visit rules use several `get/exists/getAfter` calls. Firestore allows 20 per multi-document write and caches repeats of the same document; if the emulator counts differently the rep order save will fail and the rules need trimming.
@@ -33,7 +33,7 @@ authoring environment; the QA review ran an earlier copy of the tests there: 91 
 | 2 | Legacy clients / mandatory visit record | A rep order without its visit and counter step in the same commit is refused; old browser tabs must reload. | Confirm reps have no other way to enter orders (no manager-entered orders on their behalf). |
 | 3 | Manager order creation and counter overrides | Managers can create orders with any content and can step the order counter +1; the invoice counter can be set by hand (`setCounterStart`). | A manager could create an order with a duplicate number. Decide whether managers should be limited like reps. |
 | 4 | Standalone invoices | Allowed (automatic id, `orderId: null`) but must move the invoice counter by one in the same commit. | Confirm they stay. |
-| 5 | Depot settings | No rule exists for `config/depot`: the depot-pin screen cannot read or save for anyone (test J). | Add a manager-write / staff-read rule, or retire the screen. |
+| 5 | Depot settings | No rule exists for `config/depot`: the depot-pin screen cannot read or save for anyone (test J). | RESOLVED in RC3: screen retired. |
 | 6 | Manager "cancel and delete" of an Approved order | Refused: the supplied rules forbid deleting orders (test J). The whole transaction fails, so stock and order stay unchanged. | Either allow manager delete of Approved orders in the rules, or change the app to cancel without deleting. |
 | 7 | Historical performance targets after schedule changes | Reports measure past dates against the CURRENT schedule and say so on screen. | Decide whether history should be frozen per week. |
 | 8 | A merge while an order is being invoiced | Merging customers fails (safe) if one of their orders is locked "Invoicing"; retry after it finishes. | Informational. |
