@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { baselineHistory, change } from '../helpers/history.js';
 const s = await import('../../src/visitSchedule.js');
+const H = await import('../../src/scheduleHistory.js');
+// Reports take targets from the dated schedule history. This stand-in history starts long before the dates used here
+// and records each customer's schedule as given, so the figures below mean what they always meant.
+const idx = (customers, extra = {}) => { const h = baselineHistory(customers); return H.buildScheduleIndex({ ...h, changes: [...h.changes, ...(extra.changes || [])], merges: extra.merges || [] }); };
 
 // 2026-10-15 is a Thursday, 2026-10-16 Friday.
 const cust = [
@@ -53,7 +58,7 @@ describe('manager report', () => {
     visit({ repEmail: 'r1@x', date: '2026-10-16', customerId: 'e' }),
   ];
   const reps = ['r1@x', 'r2@x', 'r3@x'];
-  const report = (over = {}) => s.buildPerformanceReport({ customers: cust, visits, reps, from: '2026-10-15', to: '2026-10-16', ...over });
+  const report = (over = {}) => s.buildPerformanceReport({ index: idx(cust), visits, reps, from: '2026-10-15', to: '2026-10-16', ...over });
 
   it('includes reps with no visits', () => {
     const r3 = report().rows.find(r => r.rep === 'r3@x');
@@ -82,31 +87,26 @@ describe('manager report', () => {
     expect(r1.valueTotal).toBe(500); expect(r1.valuedOrders).toBe(1); expect(r1.unvaluedOrders).toBe(1);
     const r3 = report().rows.find(r => r.rep === 'r3@x');
     expect(r3.valueTotal).toBeNull();
-    const none = s.buildPerformanceReport({ customers: cust, visits: [visits[1]], reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
+    const none = s.buildPerformanceReport({ index: idx(cust), visits: [visits[1]], reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
     expect(none.valueTotal).toBeNull();
   });
   it('percentages are blank (null) when the divisor is zero', () => {
-    const r = s.buildPerformanceReport({ customers: [], visits: [], reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
+    const r = s.buildPerformanceReport({ index: idx([]), visits: [], reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
     expect(r.coveragePct).toBeNull(); expect(r.conversionPct).toBeNull();
   });
   it('a visit by an email not in the rep list still appears', () => {
-    const r = s.buildPerformanceReport({ customers: cust, visits: [visit({ repEmail: 'Old@X' })], reps: [], from: '2026-10-15', to: '2026-10-15' });
+    const r = s.buildPerformanceReport({ index: idx(cust), visits: [visit({ repEmail: 'Old@X' })], reps: [], from: '2026-10-15', to: '2026-10-15' });
     expect(r.rows.map(x => x.rep)).toEqual(['old@x']);
   });
-  it('historical scheduled totals follow the CURRENT schedule (documented behaviour)', () => {
-    const before = report().rows.find(r => r.rep === 'r1@x').scheduledCount;
-    const moved = cust.map(c => (c.id === 'c' ? { ...c, assignedDay: 'Fri' } : c));
-    const after = s.buildPerformanceReport({ customers: moved, visits, reps, from: '2026-10-15', to: '2026-10-16' }).rows.find(r => r.rep === 'r1@x');
-    expect(before).toBe(5);
-    expect(after.scheduledCount).toBe(5);                       // moved shop now counts on Friday instead of Thursday
-    expect(after.due.map(d => d.customer.id + '@' + d.date)).toContain('c@2026-10-16');
-  });
-  it('schedule-change warning detection', () => {
-    const ts = (ms) => ({ toMillis: () => ms });
-    const changed = [{ id: 'x', assignedDayChangedAt: ts(Date.parse('2026-10-15T10:00:00Z')) }, { id: 'y' }];
-    const toDate = (ms) => new Date(ms).toISOString().slice(0, 10);
-    expect(s.scheduleChangedSince(changed, '2026-10-01', toDate).map(c => c.id)).toEqual(['x']);
-    expect(s.scheduleChangedSince(changed, '2026-10-16', toDate)).toEqual([]);
+  it('historical targets follow the schedule that applied AT THE TIME, not the current one (owner decision 7)', () => {
+    // Shop c is moved from Thursday to Friday on Friday 2026-10-16. Thursday's target must stay on Thursday.
+    const moved = idx(cust, { changes: [change('x1', 'c', 'schedule', { assignedDay: 'Fri', date: '2026-10-16', name: 'C' })] });
+    const r1 = s.buildPerformanceReport({ index: moved, visits, reps, from: '2026-10-15', to: '2026-10-16' }).rows.find(r => r.rep === 'r1@x');
+    expect(r1.scheduledCount).toBe(6);                                   // Thu: a,b,c,g  + Fri: e and the moved c
+    expect(r1.due.map(d => d.customer.id + '@' + d.date)).toEqual(['c@2026-10-15', 'g@2026-10-15', 'c@2026-10-16']);
+    // and a report for Thursday alone is exactly what it was before the change
+    const thu = s.buildPerformanceReport({ index: moved, visits, reps, from: '2026-10-15', to: '2026-10-15' }).rows.find(r => r.rep === 'r1@x');
+    expect(thu.scheduledCount).toBe(4);
   });
 });
 
@@ -114,13 +114,13 @@ describe('report range consistency (review finding 3)', () => {
   const thursdayShop = [{ id: 'a', name: 'A', active: true, assignedDay: 'Thu' }];
   const orderOn15Oct = [visit({ customerId: 'a', outcome: 'Order Placed', orderNo: 'ORD-1', orderId: 'o1', orderValue: 200 })];
   it('a two-year range is refused: it never counts the order while showing zero visited', () => {
-    expect(() => s.buildPerformanceReport({ customers: thursdayShop, visits: orderOn15Oct, reps: ['r1@x'], from: '2025-01-01', to: '2026-12-31' })).toThrow(RangeError);
+    expect(() => s.buildPerformanceReport({ index: idx(thursdayShop), visits: orderOn15Oct, reps: ['r1@x'], from: '2025-01-01', to: '2026-12-31' })).toThrow(RangeError);
   });
   it('exactly 366 days covers scheduled, visited, orders and no-order over the SAME interval, including the last day', () => {
     const from = '2025-10-15', to = '2026-10-15';             // 366 days inclusive; both ends are Wed/Thu
     const visits = [visit({ date: '2026-10-15', customerId: 'a', outcome: 'Order Placed', orderId: 'o1', orderNo: 'ORD-1', orderValue: 200 }),
                     visit({ date: '2025-10-16', customerId: 'a', outcome: 'No Order' })];     // 2025-10-16 is a Thursday
-    const r = s.buildPerformanceReport({ customers: thursdayShop, visits, reps: ['r1@x'], from, to }).rows[0];
+    const r = s.buildPerformanceReport({ index: idx(thursdayShop), visits, reps: ['r1@x'], from, to }).rows[0];
     expect(r.ordersTaken).toBe(1); expect(r.noOrderVisits).toBe(1);
     expect(r.visitedCount).toBe(2);                              // both Thursdays are inside the interval
     expect(r.scheduledCount).toBe(53);                           // Thursdays from 2025-10-16 to 2026-10-15 inclusive
@@ -129,11 +129,11 @@ describe('report range consistency (review finding 3)', () => {
   it('a visit on the last day of a 366-day leap-year range is counted in every metric', () => {
     const visits = [visit({ date: '2024-12-31', customerId: 'a', outcome: 'Order Placed', orderId: 'o9', orderNo: 'ORD-9', orderValue: 10 })];
     const shop = [{ id: 'a', name: 'A', active: true, assignedDay: 'Tue' }];                  // 2024-12-31 is a Tuesday
-    const r = s.buildPerformanceReport({ customers: shop, visits, reps: ['r1@x'], from: '2024-01-01', to: '2024-12-31' }).rows[0];
+    const r = s.buildPerformanceReport({ index: idx(shop), visits, reps: ['r1@x'], from: '2024-01-01', to: '2024-12-31' }).rows[0];
     expect(r.ordersTaken).toBe(1); expect(r.visitedCount).toBe(1);
   });
   it('the report states the interval it actually used', () => {
-    const rep = s.buildPerformanceReport({ customers: thursdayShop, visits: [], reps: [], from: '2026-10-14', to: '2026-10-16' });
+    const rep = s.buildPerformanceReport({ index: idx(thursdayShop), visits: [], reps: [], from: '2026-10-14', to: '2026-10-16' });
     expect(rep).toMatchObject({ from: '2026-10-14', to: '2026-10-16', days: 3 });
   });
 });

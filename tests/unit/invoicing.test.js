@@ -166,20 +166,45 @@ describe('stale bulk data', () => {
   });
 });
 
-describe('standalone invoice idempotency', () => {
+describe('standalone invoice idempotency (explicit identity, owner decision 4)', () => {
+  const rid = () => o.newStandaloneRequestId();
   it('retry of the same click after a lost acknowledgement does not create a second invoice or number', async () => {
-    const id = o.newStandaloneInvoiceId();
+    const requestId = rid();
     F.hooks.failAfterCommit = (writes) => (isInvoiceWrite(writes) ? new Error('ack lost') : null);
-    await expect(o.issueStandaloneInvoice({ invoiceId: id, meta: meta(), uid: 'u1' })).rejects.toThrow('ack lost');
+    await expect(o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' })).rejects.toThrow('ack lost');
     F.hooks.failAfterCommit = null;
-    const r = await o.issueStandaloneInvoice({ invoiceId: id, meta: meta(), uid: 'u1' });
+    const r = await o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' });
     expect(r.alreadySaved).toBe(true);
     expect(invoices()).toHaveLength(1);
     expect(F.store.get('counters/naisiInvoice').counter).toBe(371);
   });
-  it('a different click (new id) makes a new invoice', async () => {
-    await o.issueStandaloneInvoice({ invoiceId: o.newStandaloneInvoiceId(), meta: meta(), uid: 'u1' });
-    await o.issueStandaloneInvoice({ invoiceId: o.newStandaloneInvoiceId(), meta: meta(), uid: 'u1' });
+  it('a different click (new request id) makes a new invoice with the next number', async () => {
+    await o.issueStandaloneInvoice({ requestId: rid(), meta: meta(), uid: 'u1' });
+    await o.issueStandaloneInvoice({ requestId: rid(), meta: meta(), uid: 'u1' });
     expect(invoices()).toHaveLength(2);
+    expect(F.store.get('counters/naisiInvoice').counter).toBe(372);
+  });
+  it('the saved invoice carries kind "standalone", orderId null, its request id and the id sa_<uid>_<requestId>', async () => {
+    const requestId = rid();
+    const r = await o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' });
+    expect(r.invoiceId).toBe(`sa_u1_${requestId}`);
+    expect(F.store.get('invoices/' + r.invoiceId)).toMatchObject({ kind: 'standalone', orderId: null, requestId });
+  });
+  it('double click (two overlapping saves with the same request id) creates one invoice and one number', async () => {
+    const requestId = rid();
+    await Promise.allSettled([o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' }), o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' })]);
+    expect(invoices()).toHaveLength(1);
+    expect(F.store.get('counters/naisiInvoice').counter).toBe(371);
+  });
+  it('a retry with DIFFERENT details is refused (invoice-conflict) and changes nothing', async () => {
+    const requestId = rid();
+    await o.issueStandaloneInvoice({ requestId, meta: meta(), uid: 'u1' });
+    await expect(o.issueStandaloneInvoice({ requestId, meta: meta([line(7)]), uid: 'u1' })).rejects.toMatchObject({ code: 'invoice-conflict' });
+    expect(invoices()).toHaveLength(1);
+    expect(F.store.get('counters/naisiInvoice').counter).toBe(371);
+  });
+  it('an id that is not the caller\'s own sa_<uid>_ identity cannot be committed', async () => {
+    await expect(o.commitInvoice({ invoiceId: 'auto123', meta: meta(), uid: 'u1' })).rejects.toThrow(/request id/);
+    expect(invoices()).toHaveLength(0);
   });
 });

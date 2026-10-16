@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 const { requestReport } = await import('../../src/reportLoader.js');
 const { createPagedLoadGuard } = await import('../../src/ui.js');
 const { buildPerformanceReport } = await import('../../src/visitSchedule.js');
+const { buildScheduleIndex } = await import('../../src/scheduleHistory.js');
+const { baselineHistory } = await import('../helpers/history.js');
 
 // A tiny stand-in for the report screen: controls, the report on screen, the loading flag.
 function screen() {
@@ -118,7 +120,7 @@ describe('manager report always matches the selected range', () => {
     s.setRange('2026-10-15', '2026-10-15'); const b = s.run();      // Thursday
     s.answer(0, day('2026-10-14')); await a;
     s.answer(1, [{ date: '2026-10-15', repEmail: 'r1@x', customerId: 'b', customerName: 'B', outcome: 'Order Placed', orderId: 'o1', orderNo: '1', orderValue: 5 }]); await b;
-    const rep = buildPerformanceReport({ customers, visits: s.shown.visits, reps: ['r1@x'], ...s.shown.range }).rows[0];
+    const rep = buildPerformanceReport({ index: buildScheduleIndex(baselineHistory(customers)), visits: s.shown.visits, reps: ['r1@x'], ...s.shown.range }).rows[0];
     expect(s.shown.range).toEqual(s.controls);
     expect(rep).toMatchObject({ scheduledCount: 1, visitedCount: 1, ordersTaken: 1, noOrderVisits: 0 });
   });

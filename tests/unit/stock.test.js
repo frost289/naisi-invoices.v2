@@ -26,11 +26,12 @@ describe('approval with repeated product lines', () => {
     await Promise.allSettled([stock.approveOrderWithStock(withId('o1'), user), stock.approveOrderWithStock(withId('o1'), user)]);
     expect(F.store.get('products/p1').stockOnHand).toBe(95);
   });
-  it('cancel restores the combined quantity once', async () => {
+  it('cancel restores the combined quantity once and KEEPS the order (owner decision 2)', async () => {
     seedProduct(95); seedOrder('o1', 'Approved', { items: [line(2), line(3)] });
-    await stock.cancelApprovedOrderAndDelete(withId('o1'), user);
+    await stock.cancelOrder(withId('o1'), { reason: 'Customer changed mind', ...user });
     expect(F.store.get('products/p1').stockOnHand).toBe(100);
     expect(ledger().reduce((s, m) => s + m.delta, 0)).toBe(5);
+    expect(F.store.get('orders/o1')).toMatchObject({ status: 'Cancelled', stockApplied: false, cancelReason: 'Customer changed mind', cancelledBy: 'u1' });
   });
 });
 
