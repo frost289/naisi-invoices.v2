@@ -7,6 +7,8 @@ import { makeError } from './orderRevision.js';
 export const SCHEDULE_CONFIG_DOC = () => doc(db, 'config', 'scheduleHistory');
 // Baselines must be finished within this window after the history is started (also enforced by the rules).
 export const BASELINE_WINDOW_MS = 60 * 60 * 1000;
+// Each baseline entry makes the rules look up the roles and the history config document: 8 x 2 = 16 of the 20 lookups a batched write may use.
+export const BASELINE_CHUNK = 8;
 
 export async function fetchScheduleHistory() {
   const [cfgSnap, changesSnap, mergesSnap] = await Promise.all([
@@ -27,7 +29,7 @@ export const baselineIdFor = (customerId) => `base_${customerId}`;
 // config document, all within one hour. Safe to run again within that hour (it only adds missing baselines).
 // A manager does this once, after RC3 is released. It does not invent anything: the baseline is today's real state,
 // effective from today; earlier dates stay "no reliable history".
-export async function startScheduleHistory({ customers, uid, email, now = () => Date.now(), chunk = 300 }) {
+export async function startScheduleHistory({ customers, uid, email, now = () => Date.now(), chunk = BASELINE_CHUNK }) {
   const cfgRef = SCHEDULE_CONFIG_DOC();
   const cfgSnap = await getDoc(cfgRef);
   const startedMs = cfgSnap.exists() && cfgSnap.data().startedAt && typeof cfgSnap.data().startedAt.toMillis === 'function' ? cfgSnap.data().startedAt.toMillis() : null;

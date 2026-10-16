@@ -509,7 +509,7 @@ describe('decision 8 - merges and invoicing', () => {
     F.store.set('customers/keep', pinned({ name: 'Keep' })); F.store.set('customers/away', pinned({ name: 'Away' }));
     for (let i = 0; i < 650; i++) F.store.set('orders/o' + i, { orderNo: 'ORD-' + i, status: 'Approved', customerId: 'away', grandTotal: 10 });
     for (let i = 0; i < 400; i++) F.store.set('visits/v' + i, { customerId: 'away', date: '2026-10-01', repEmail: 'r@x', outcome: 'No Order' });
-    const t = await merge({ chunk: 200 });
+    const t = await merge();                       // default chunk (8): about 130 commits
     expect(t).toMatchObject({ orders: 650, visits: 400, invoices: 0 });
     expect(at(F.store, 'orders/').filter(o => o.customerId === 'keep')).toHaveLength(650);
     expect(F.store.has('customers/away')).toBe(false);

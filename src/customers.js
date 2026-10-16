@@ -240,7 +240,10 @@ export async function countCustomerActivity(customerId) {
   return { orders: ordersSnap.size, visits: visitsSnap.size, invoices: invoicesSnap.size, invoicing };
 }
 
-export const MERGE_CHUNK = 200;
+// Why 8: the security rules look up the customer and the roles document for every moved record, and Firestore allows
+// 20 rule-lookups per batched write. 8 records x 2 lookups = 16, inside the limit even if lookups are not shared between
+// the writes of one batch. (Shared lookups would allow more; tests/rules group M checks a full-size merge on the emulator.)
+export const MERGE_CHUNK = 8;
 
 function mergeBlocked(orderNos) {
   return makeError(
