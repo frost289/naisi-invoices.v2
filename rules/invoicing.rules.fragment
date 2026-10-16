@@ -1,3 +1,5 @@
+// NOTE 2026-10-16: the REAL rules were supplied and reviewed. This fragment's DAILY VISITS text is SUPERSEDED by
+// docs/RULES-REVIEW.md and rules/proposed/*.diff. Kept only for history. Not the real rules.
 // =====================================================================
 // PROPOSAL ONLY - NOT TESTED, NOT DEPLOYED, NOT MERGED WITH YOUR REAL RULES.
 // The deployed firestore.rules are not in the repository, so this cannot be

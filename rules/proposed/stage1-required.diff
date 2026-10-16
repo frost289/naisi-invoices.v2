@@ -1,0 +1,33 @@
+--- stage0.rules	2026-10-16 04:50:11.293328314 +0200
++++ stage1.rules	2026-10-16 04:50:19.751360966 +0200
+@@ -98,7 +98,14 @@
+           request.resource.data.createdBy == request.auth.uid &&
+           request.resource.data.status == 'Submitted' &&
+           validPin(request.resource.data.get('customerLat', null), request.resource.data.get('customerLng', null)));
+-      allow read: if isManager() ||
++      // A rep's order save first reads the order at its own fixed id (o_<uid>_<requestId>) to
++      // detect a retry; on a first save that document does not exist (resource == null).
++      allow get: if isManager() ||
++        (isSubmitter() && (
++          (resource != null && ownsCreatedBy()) ||
++          (resource == null && orderId.matches('o_' + request.auth.uid + '_.*')))) ||
++        (isDeliverer() && resource.data.status == 'Invoiced');
++      allow list: if isManager() ||
+         (isSubmitter() && ownsCreatedBy()) ||
+         (isDeliverer() && resource.data.status == 'Invoiced');
+       // Deliverers can do exactly two things to an Invoiced order, touching
+@@ -124,7 +131,13 @@
+       // inflate success rates) under another rep's name.
+       allow create: if isManager() ||
+         (isSubmitter() && request.resource.data.repId == request.auth.uid);
+-      allow read: if isManager() ||
++      // get: a rep's save first reads the visit at its own fixed id (v_<uid>_<requestId>) to detect
++      // a retry; on a first save that document does not exist (resource == null).
++      allow get: if isManager() ||
++        (isSubmitter() && (
++          (resource != null && resource.data.repId == request.auth.uid) ||
++          (resource == null && visitId.matches('v_' + request.auth.uid + '_.*'))));
++      allow list: if isManager() ||
+         (isSubmitter() && resource.data.repId == request.auth.uid);
+       // Visit reports are a record: no edits by anyone (the apps never update them).
+       allow update, delete: if false;

@@ -1,8 +1,8 @@
 # Daily sales-rep visits
 
-VERDICT: NOT SAFE TO DEPLOY - rules unverified. The real `firestore.rules` has not been supplied, so everything that depends on it is BLOCKED (section 6).
+VERDICT: NOT SAFE TO DEPLOY - rules unverified. The real `firestore.rules` was supplied on 2026-10-16 and read against the app (see `docs/RULES-REVIEW.md`): a rep's first save is predicted to be refused until a small rules change (stage 1) is made. Nothing has been run on the emulator, so every rules result is still BLOCKED/NOT RUN (section 6).
 
-Patch order: (1) revision-2 patch (commit e1131f3), (2) daily-visits patch `0001-Add-daily-sales-rep-visit-workflow...`, (3) corrective patch `0002-Fix-changed-retries-stale-report-dates-and-range-limit.patch`.
+Patch order: (1) revision-2 patch (commit e1131f3), (2) daily-visits patch `0001-Add-daily-sales-rep-visit-workflow...`, (3) corrective patch `0002-...`, (4) rules review patch `0003-Add-rules-review-...` (docs and rules tests only; no app change).
 
 ## 1. How a rep uses it
 1. Log in. "Today's Visits" opens automatically and lists active customers whose weekly visit day is today (Malawi time, Africa/Blantyre, whatever the phone's clock zone says). All reps see the same list.
@@ -37,13 +37,13 @@ New/changed fields:
 - `customers`: new field `assignedDayChangedAt`.
 - Transaction needs: create order + create visit + update order counter (+1) in one commit; the order transaction also READS the order document at its deterministic id (it does not exist on a first save; on a retry it is compared with the incoming details), so rules must allow `get` of that path for the rep who owns it, including when it does not exist; read of `config/roles` submitters (manager report rep list); read of all visits by managers; reps read own visits by `repId`+`date`.
 - Indexes: none new expected (equality-only queries for reps; manager report filters by date range, check whether a composite index is needed if combined with `repId`).
-- Proposed rules: `rules/invoicing.rules.fragment` ("DAILY VISITS"), UNVERIFIED proposal only. Emulator tests in `tests/rules` are written but NOT RUN.
+- Rules: the supplied rules were reviewed in `docs/RULES-REVIEW.md`; proposed changes are in `rules/proposed/` (stage 1 required, stage 2 optional) and are UNVERIFIED. The older `rules/invoicing.rules.fragment` text is superseded. Emulator tests in `tests/rules` are written but NOT RUN.
 
 ## 5b. Retry rules (same request id)
 Identical = same customer, outcome, products, quantities, prices, totals, order notes (trimmed), and for No Order the same reason and explanation (trimmed). Identical: returns the saved result, writes nothing, uses no number. Different: error code `visit-conflict`, nothing written, the error carries what was saved. Product names are not compared (only product id, quantity, price, total). Line order matters.
 
 ## 6. Limitations
-- Real rules unverified: BLOCKED. No server-side enforcement of reason/explanation, deterministic ids, or order+visit pairing is confirmed. Old open browser tabs can still write unvalidated visits/orders until rules enforce the shape.
+- Rules: a rep's first save is predicted to be refused by the supplied rules until stage 1 is deployed (RULES-REVIEW.md section 1); not run on the emulator: BLOCKED. No server-side enforcement of reason/explanation, deterministic ids, or order+visit pairing is confirmed. Old open browser tabs can still write unvalidated visits/orders until rules enforce the shape.
 - `date` comes from the device clock (Malawi-converted); `createdAt` is the authoritative server time. A wrong phone clock can file a visit under the wrong date.
 - Historical Scheduled, Visited and Still due follow the current schedule (section 4).
 - Maximum report range is 366 days; longer needs two reports.
