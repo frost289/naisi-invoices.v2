@@ -264,13 +264,10 @@ async function initApp(user, role) {
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
   submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
 
-  // "New Invoice" is hidden from the nav entirely — the form behind it
-  // is still very much alive, just reached two other ways instead:
-  // editing an existing invoice (Invoices list) and generating one
-  // from an approved order (Order Preview / Orders list). Manually
-  // starting a blank invoice with no order behind it isn't a workflow
-  // this business uses anymore.
-  navBtns.form.style.display = 'none';
+  // Managers get a "Walk-in Invoice" tab (decision 4: stand-alone invoices from the same number sequence). Invoices for an
+  // order are still reached from the Orders list, and editing from the Invoices list. Reps never see this tab.
+  navBtns.form.style.display = isManager ? 'inline-flex' : 'none';
+  navBtns.form.textContent = 'Walk-in Invoice';
 
   navBtns.orders.textContent = isManager ? 'Orders' : 'My Orders';
   document.getElementById('orderFilterCard').style.display = isManager ? 'block' : 'none';
@@ -1991,6 +1988,9 @@ async function initApp(user, role) {
       generatingFromOrder = null;
       fromOrderBanner.style.display = 'none';
     }
+
+    // Opening the tab by hand always starts a blank walk-in invoice (never half of an order or an edit).
+    navBtns.form.addEventListener('click', () => { exitFromOrderMode(); exitEditMode(); }, true);
 
     cancelFromOrderBtn.addEventListener('click', (e) => {
       e.preventDefault();

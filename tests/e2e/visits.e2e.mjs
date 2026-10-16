@@ -298,19 +298,26 @@ try {
   });
   await R.check('E20', 'Report explains percentages and how a later schedule change affects history', async () => {
     const txt = await page.locator('#performanceView details').innerText();
-    expect(/Coverage/.test(txt) && /Conversion/.test(txt) && /as it is now/i.test(txt) && /Still due/.test(txt), txt.slice(0, 200));
+    expect(/Coverage/.test(txt) && /Conversion/.test(txt) && /applies from the start of the Malawi day/i.test(txt) && /no reliable record/i.test(txt) && /Still due/.test(txt), txt.slice(0, 200));
     return 'definitions present on screen';
   });
-  await R.check('E21', 'Manager changes a weekly visit day; rep sees it; report warns about history', async () => {
+  await R.check('E21', 'Manager changes a weekly visit day (dated); rep sees it; history keeps earlier days unchanged (was: report warned that history changes)', async () => {
     await page.click('#navCustomersBtn'); await page.waitForSelector('#weeklyScheduleCard', { state: 'visible' });
     await page.click('.schedule-day-tab[data-day="Fri"]');
     await page.selectOption('#scheduleDayList .customer-day-select >> nth=0', 'Thu');   // Echo Friday -> Thursday
     await page.waitForFunction(() => /Visit day updated/.test(document.body.innerText));
-    eq((await doc('customers/c5')).assignedDay, 'Thu', 'saved day');
-    expect((await doc('customers/c5')).assignedDayChangedAt, 'change time not recorded');
+    const c5 = await doc('customers/c5');
+    eq(c5.assignedDay, 'Thu', 'saved day');
+    expect(c5.lastScheduleChangeId, 'no history entry id on the customer');
+    const entry = await doc('scheduleChanges/' + c5.lastScheduleChangeId);
+    eq([entry.customerId, entry.kind, entry.assignedDay, entry.active], ['c5', 'schedule', 'Thu', true], 'history entry');
+    expect(entry.changedByEmail === 'mgr@naisi.test' && entry.createdAt, 'actor/time missing');
+    // earlier Thursday (8 Oct): Echo was NOT a target; the changed Thursday (15 Oct, effective that day): it is
     await page.click('#navPerformanceBtn'); await page.waitForTimeout(300);
-    await page.fill('#perfFrom', '2026-10-15'); await page.fill('#perfTo', '2026-10-15'); await page.click('#perfRunBtn'); await page.waitForTimeout(300);
-    expect(await page.locator('#perfScheduleWarning').isVisible(), 'no schedule-change warning');
+    const scheduledFor = async (d) => { await page.fill('#perfFrom', d); await page.fill('#perfTo', d); await page.click('#perfRunBtn'); await page.waitForTimeout(300); return page.$$eval('#repSummaryBody tr', trs => Number(trs[0].children[1].innerText)); };
+    eq(await scheduledFor('2026-10-08'), 4, 'earlier Thursday keeps its 4 targets');
+    eq(await scheduledFor('2026-10-15'), 5, 'changed Thursday has Echo as a 5th target (a change applies from the start of the day it was saved)');
+    expect(!(await page.locator('#perfScheduleWarning').isVisible()), 'no schedule warning expected: history is dated');
     await logout(); await login('rep1@naisi.test'); await repReady();
     const names = (await shops()).map(s => s.text.split(' To visit')[0].split(' ✓')[0]);
     expect(names.includes('Echo Friday'), 'Echo should now be on Thursday: ' + names);
