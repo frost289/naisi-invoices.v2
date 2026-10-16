@@ -192,43 +192,78 @@ export async function approveOrderWithStock(order, { uid, email, allowNegativeSt
   });
 }
 
-// ---- Cancelling an Approved order: restore stock ----
-// Restores what the order CURRENTLY holds (edits to an approved order
-// already reconciled stock, see editOrderWithStock), read inside the
-// transaction, with repeated product lines combined per product.
-async function cancelApproved(order, { uid, email, deleteOrder }) {
-  await runTransaction(db, async (tx) => {
-    const orderRef = doc(db, 'orders', order.id);
+// ---- Cancelling an order (manager): the order is KEPT, stock comes back exactly once ----
+// Cancelling does NOT delete anything. The order stays in the system with status "Cancelled", the reason, who cancelled
+// it and the SERVER time; an append-only record orderCancellations/{orderId} is written with it; and for an Approved
+// order whose stock was deducted, the stock is restored and a stockMovements entry is written per line (the ledger is
+// append-only and is never touched).
+//
+// Exactly once, three ways:
+//   1. The transaction reads the order and the cancellation record, and acts only on a Submitted/Approved order with no
+//      record. A second click, a retry after a lost acknowledgement, or a second person cancelling at the same moment
+//      finds "Cancelled" / the record, changes nothing and gets { alreadyCancelled: true } (the Firestore transaction
+//      conflict check re-runs the loser against the winner's result).
+//   2. The record's document id IS the order id, so it can exist only once; the security rules refuse a second one.
+//   3. The rules refuse any change to a Cancelled order, and refuse "Cancelled" for anything that is not Submitted/Approved.
+//
+// Not allowed here (by design, enforced by the rules too): Invoicing (an invoice is being created), Invoiced, Dispatched,
+// Delivered. Those already carry financial and delivery consequences; they need a returns / credit-note process
+// (docs/CANCELLATION-AND-RETURNS.md) that this release does not provide. Rejected orders are final.
+export const MIN_CANCEL_REASON = 3;
+export const MAX_CANCEL_REASON = 300;
+export function validateCancelReason(reason) {
+  const r = String(reason ?? '').trim();
+  if (r.length < MIN_CANCEL_REASON) return 'Enter the reason for cancelling this order (at least 3 characters).';
+  if (r.length > MAX_CANCEL_REASON) return `The reason must be ${MAX_CANCEL_REASON} characters or fewer.`;
+  return null;
+}
+
+export async function cancelOrder(order, { reason, uid, email }) {
+  const problem = validateCancelReason(reason);
+  if (problem) throw new Error(problem);
+  if (!uid) throw new Error('Not signed in.');
+  const cleanReason = String(reason).trim();
+  const orderId = order.id;
+  return await runTransaction(db, async (tx) => {
+    const orderRef = doc(db, 'orders', orderId);
+    const cancelRef = doc(db, 'orderCancellations', orderId);
     const orderSnap = await tx.get(orderRef);
+    const cancelSnap = await tx.get(cancelRef);
     if (!orderSnap.exists()) throw new Error('Order no longer exists.');
     const current = orderSnap.data();
-    if (current.status !== 'Approved') {
-      throw new Error('This order is no longer Approved — someone else may have already processed it.');
+    if (cancelSnap.exists() || current.status === 'Cancelled') {
+      return { alreadyCancelled: true, stockRestored: cancelSnap.exists() ? !!cancelSnap.data().stockRestored : false };
     }
-    const groups = groupTrackedLines(current.items);
-    const products = await readProducts(tx, [...groups.keys()]);
+    if (current.status === 'Invoicing') {
+      throw makeError('This order is being invoiced right now and cannot be cancelled. Wait for invoicing to finish or be released.', { code: 'cancel-not-allowed', status: current.status });
+    }
+    if (['Invoiced', 'Dispatched', 'Delivered'].includes(current.status)) {
+      throw makeError(`This order is ${current.status}${current.invoiceNo ? ' (invoice ' + current.invoiceNo + ')' : ''} and can no longer be cancelled here. Use the returns / credit process instead; the order, invoice and stock are unchanged.`, { code: 'cancel-not-allowed', status: current.status });
+    }
+    if (current.status !== 'Submitted' && current.status !== 'Approved') {
+      throw makeError(`This order is ${current.status} and cannot be cancelled.`, { code: 'cancel-not-allowed', status: current.status });
+    }
+    // Stock was deducted only when an order was approved (stockApplied false = it was explicitly released already).
+    const restoreStock = current.status === 'Approved' && current.stockApplied !== false;
+    const groups = restoreStock ? groupTrackedLines(current.items) : new Map();
+    const products = await readProducts(tx, [...groups.keys()]);     // reads before writes
 
-    if (deleteOrder) tx.delete(orderRef);
-    else tx.update(orderRef, { status: 'Cancelled', stockApplied: false, cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() });
-
-    writeLineMovements(tx, products, groups, {
-      sign: +1, type: deleteOrder ? 'order-cancelled-deleted' : 'order-cancelled',
-      order: { id: order.id, orderNo: current.orderNo }, uid, email,
+    tx.update(orderRef, {
+      status: 'Cancelled', stockApplied: false,
+      cancelReason: cleanReason, cancelledBy: uid, cancelledByEmail: email, cancelPriorStatus: current.status,
+      cancelledAt: serverTimestamp(), updatedAt: serverTimestamp(),
     });
+    tx.set(cancelRef, {
+      orderId, orderNo: current.orderNo || null, priorStatus: current.status, stockRestored: restoreStock,
+      reason: cleanReason, cancelledBy: uid, cancelledByEmail: email, cancelledAt: serverTimestamp(),
+    });
+    writeLineMovements(tx, products, groups, {
+      sign: +1, type: 'order-cancelled',
+      order: { id: orderId, orderNo: current.orderNo }, uid, email,
+      reasonFor: () => `Order cancelled: ${cleanReason}`,
+    });
+    return { alreadyCancelled: false, stockRestored: restoreStock, priorStatus: current.status };
   });
-}
-
-// Orders are permanently deleted on cancel (not soft-cancelled). Stock is
-// still restored and a stockMovements entry still written — the ledger is
-// append-only and survives the order document.
-export async function cancelApprovedOrderAndDelete(order, { uid, email }) {
-  await cancelApproved(order, { uid, email, deleteOrder: true });
-}
-
-// Currently unused (cancel hard-deletes the order) but kept in case that
-// decision changes: soft-cancel is the safer default for audit trails.
-export async function cancelApprovedOrderWithStock(order, { uid, email }) {
-  await cancelApproved(order, { uid, email, deleteOrder: false });
 }
 
 // ---- Editing a Submitted or Approved order: ONE transaction ----

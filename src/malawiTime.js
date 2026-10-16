@@ -32,6 +32,10 @@ export function weekdayOfDate(dateStr) {
   return WEEKDAYS[new Date(dateStr + 'T00:00:00Z').getUTCDay()];
 }
 
+// The 4-digit year in Malawi at the given instant. Invoice and order numbers use this (not the phone's own
+// year), so 00:30 on 1 January in Lilongwe is already the new year even though it is still 31 December in UTC.
+export function malawiYear(instant = new Date()) { return malawiDate(instant).slice(0, 4); }
+
 export function malawiWeekday(instant = new Date()) { return weekdayOfDate(malawiDate(instant)); }
 
 export function addDays(dateStr, n) {

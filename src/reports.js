@@ -7,11 +7,12 @@ import { collection, query, where, orderBy, getDocs, Timestamp } from 'firebase/
 // If your order volume grows very large, switch this to a paginated
 // or server-aggregated approach instead.
 
+// Dates are MALAWI calendar dates (UTC+2, no daylight saving), whatever time zone the device is set to.
 function startOfDayTimestamp(dateStr) {
-  return Timestamp.fromDate(new Date(dateStr + 'T00:00:00'));
+  return Timestamp.fromDate(new Date(dateStr + 'T00:00:00+02:00'));
 }
 function endOfDayTimestamp(dateStr) {
-  return Timestamp.fromDate(new Date(dateStr + 'T23:59:59.999'));
+  return Timestamp.fromDate(new Date(dateStr + 'T23:59:59.999+02:00'));
 }
 
 // Orders don't carry a plain date string (only createdAt/approvedAt/etc.

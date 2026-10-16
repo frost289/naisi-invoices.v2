@@ -6,8 +6,8 @@ import { getUserRole } from './roles.js';
 import { addItemRow, fillItemRows, buildQuickAddGrid, getItems, mwk } from './items.js';
 import { updatePreview, formatDate } from './preview.js';
 import {
-  loadCounterState, incrementCounterAtomically, watchCounterState,
-  buildInvoiceNo, currentYear, setCounterStart
+  loadCounterState, watchCounterState, fetchCounterAdjustments,
+  buildInvoiceNo, currentYear, adjustInvoiceCounter, validateCounterAdjustment
 } from './numbering.js';
 import { generatePdf } from './pdf.js';
 import {
@@ -18,7 +18,7 @@ import { buildAndDownloadInvoiceReport, buildAndDownloadExpenseReport, buildAndD
 import {
   fetchAllCustomers, fetchCustomersPage, addCustomer, updateCustomer, updateCustomerLocation,
   fetchCustomerById, deactivateCustomer, reactivateCustomer, setCustomerVisitDay, hasPin, isValidPin,
-  normalizeText, normalizePhone, formatPhoneForDisplay, toWhatsAppNumber, findPossibleDuplicates, countCustomerActivity, mergeCustomers
+  normalizeText, normalizePhone, formatPhoneForDisplay, toWhatsAppNumber, findPossibleDuplicates, countCustomerActivity, mergeCustomers, cancelMergeLock
 } from './customers.js';
 import {
   fetchAllLocations, addLocation, deleteLocation, markLocationReviewed, findLocationByName, googleMapsSearchUrlForLocation
@@ -35,15 +35,15 @@ import {
 } from './products.js';
 import {
   fetchMyOrdersPage, fetchOrdersByStatusPage, fetchAllOrdersPage,
-  fetchOrderById, setOrderStatus,
-  issueInvoiceForOrder, issueStandaloneInvoice, newStandaloneInvoiceId,
+  fetchOrderById, rejectOrder,
+  issueInvoiceForOrder, issueStandaloneInvoice, newStandaloneRequestId,
   fetchOrdersReadyToDeliverPage, markOrderDelivered
 } from './orders.js';
 import { orderRevisionKey } from './orderRevision.js';
 import { invoiceOrderForBulk } from './invoiceFlow.js';
 import { wholeNumber } from './numbers.js';
 import {
-  adjustStockManually, approveOrderWithStock, cancelApprovedOrderAndDelete,
+  adjustStockManually, approveOrderWithStock, cancelOrder, validateCancelReason,
   editOrderWithStock, receiveStockCases, fetchAllStockMovementsPage, fetchStockMovementsForProduct, casesToPacks
 } from './stock.js';
 import {
@@ -55,7 +55,10 @@ import {
 } from './visits.js';
 import { requestReport } from './reportLoader.js';
 import { malawiDate, malawiWeekday, weekdayOfDate, addDays } from './malawiTime.js';
-import { repDayProgress, scheduledForDate, buildPerformanceReport, scheduleChangedSince } from './visitSchedule.js';
+import { repDayProgress, scheduledForDate, buildPerformanceReport } from './visitSchedule.js';
+import { buildScheduleIndex, awaitingScheduling, findScheduleMismatches } from './scheduleHistory.js';
+import { fetchScheduleHistory, startScheduleHistory } from './scheduleStore.js';
+import { submitOrderAsManager } from './managerOrders.js';
 import { fetchRepEmails } from './roles.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
@@ -68,9 +71,7 @@ import {
   earliestNeededStart, buildDeliveryStats, toDate, formatAge
 } from './deliveries.js';
 import { orderStops, getStartPoint, startLabel, formatKm } from './routing.js';
-import { fetchDepot, saveDepot } from './depot.js';
 import { runBulkJob } from './bulkProgress.js';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 initOfflineBanner();
 
@@ -300,16 +301,18 @@ async function initApp(user, role) {
   });
 
 
-  // ============= NUMBERING (manager-only screen, but always init so PDF/no. logic works) =============
+  // ============= NUMBERING (invoice numbers are automatic; managers can change the next number with a reason) =============
   const invPrefixInput = document.getElementById('invPrefix');
   const invCounterInput = document.getElementById('invCounter');
   const invYearDisplay = document.getElementById('invYearDisplay');
   invYearDisplay.value = currentYear();
+  let counterStateNow = null;
 
   if (isManager) {
     try {
       await loadCounterState(true);
       watchCounterState((data) => {
+        counterStateNow = data;
         invPrefixInput.value = data.prefix;
         invCounterInput.value = data.counter;
         invYearDisplay.value = currentYear();
@@ -318,19 +321,72 @@ async function initApp(user, role) {
     } catch (err) {
       showToast(err.message, 'error');
     }
-    [invPrefixInput, invCounterInput].forEach(input => {
-      input.addEventListener('change', async () => {
-        const prefix = invPrefixInput.value.trim() || 'NF-INV';
-        const counter = parseInt(invCounterInput.value, 10) || 1;
-        try {
-          await setCounterStart(prefix, counter);
-          showToast('Numbering settings updated.', 'success');
-        } catch (err) {
-          showToast('Could not update numbering: ' + err.message, 'error');
-        }
-      });
+
+    const adjustBtn = document.getElementById('adjustNumberingBtn');
+    const adjustModal = document.getElementById('adjustNumberModal');
+    const adjustErr = document.getElementById('adjustNumberError');
+    const adjustSaveBtn = document.getElementById('adjustNumberSaveBtn');
+    const adjustPrefix = document.getElementById('adjustPrefix');
+    const adjustCounter = document.getElementById('adjustCounter');
+    const adjustReason = document.getElementById('adjustReason');
+    let adjustRequestId = null, adjustSaving = false;
+    adjustBtn.style.display = 'inline-block';
+    const closeAdjust = () => { adjustModal.style.display = 'none'; };
+
+    adjustBtn.addEventListener('click', () => {
+      if (!counterStateNow) { showToast('Numbering is still loading.', 'info'); return; }
+      adjustRequestId = newRequestId();                     // one id per opened dialog: a retry cannot apply twice
+      adjustPrefix.value = counterStateNow.prefix;
+      adjustCounter.value = counterStateNow.counter;
+      adjustReason.value = '';
+      adjustErr.style.display = 'none';
+      document.getElementById('adjustNumberCurrent').textContent = `${counterStateNow.prefix}-${currentYear()}-${String(counterStateNow.counter).padStart(4, '0')}`;
+      adjustModal.style.display = 'flex';
     });
+    document.getElementById('adjustNumberCloseBtn').addEventListener('click', closeAdjust);
+    document.getElementById('adjustNumberBackBtn').addEventListener('click', closeAdjust);
+
+    async function loadNumberingAudit() {
+      const wrap = document.getElementById('numberingAuditWrap');
+      const body = document.getElementById('numberingAuditBody');
+      try {
+        const rows = await fetchCounterAdjustments(20);
+        wrap.style.display = rows.length ? 'block' : 'none';
+        body.innerHTML = rows.map(r => `<tr>
+          <td>${esc(r.adjustedAt && r.adjustedAt.toDate ? r.adjustedAt.toDate().toLocaleString('en-GB', { timeZone: 'Africa/Blantyre' }) : '')}</td>
+          <td>${esc(r.adjustedByEmail || '')}</td>
+          <td>${esc(r.previousPrefix)} / ${esc(r.previousCounter)}</td>
+          <td>${esc(r.newPrefix)} / ${esc(r.newCounter)}</td>
+          <td>${esc(r.reason || '')}</td></tr>`).join('');
+      } catch (err) { wrap.style.display = 'none'; }
+    }
+
+    adjustSaveBtn.addEventListener('click', async () => {
+      if (adjustSaving) return;
+      const prefix = adjustPrefix.value.trim();
+      const counter = Number(adjustCounter.value);
+      const problem = validateCounterAdjustment({ prefix, counter, reason: adjustReason.value });
+      if (problem) { adjustErr.textContent = problem; adjustErr.style.display = 'block'; return; }
+      if (counterStateNow && prefix === counterStateNow.prefix && counter < counterStateNow.counter &&
+          !confirm(`The new number (${counter}) is LOWER than the current next number (${counterStateNow.counter}).\n\nThe system refuses any number that was already issued, but check the invoice list first. Continue?`)) return;
+      adjustSaving = true;
+      setButtonLoading(adjustSaveBtn, 'Saving…');
+      try {
+        const res = await adjustInvoiceCounter({ prefix, counter, reason: adjustReason.value, requestId: adjustRequestId, uid: user.uid, email: user.email });
+        showToast(res.alreadyApplied ? 'That change had already been saved.' : `Next invoice number changed to ${prefix}-${currentYear()}-${String(counter).padStart(4, '0')}.`, 'success');
+        closeAdjust();
+        await loadNumberingAudit();
+      } catch (err) {
+        adjustErr.textContent = 'Could not change the numbering: ' + err.message;
+        adjustErr.style.display = 'block';
+      } finally {
+        adjustSaving = false;
+        clearButtonLoading(adjustSaveBtn);
+      }
+    });
+    loadNumberingAudit();
   }
+
 
   function refreshPreview() { updatePreview(els); }
 
@@ -369,22 +425,9 @@ async function initApp(user, role) {
   async function loadCustomersCache() { customersCache = await fetchAllCustomers(); }
   await loadCustomersCache();
 
-  // Auto-balances new customers across Mon-Fri (never Sat — that stays
-  // manual-only) so each rep visit day ends up with roughly the same
-  // number of stops over time, without a manager having to think about
-  // it for every single new customer. Counts against the already-
-  // loaded customersCache rather than firing a fresh Firestore query
-  // per customer — cheap, and customersCache is always current since
-  // every customer-creating flow reloads it right after saving.
-  const AUTO_ASSIGN_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+  // New customers are NOT given a weekday automatically. A manager chooses the visit day; until then the customer
+  // is listed as "awaiting scheduling" for managers and is not on any rep's list.
   const VISIT_DAY_FULL_NAMES = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
-  function pickBalancedVisitDay() {
-    const counts = Object.fromEntries(AUTO_ASSIGN_DAYS.map(d => [d, 0]));
-    customersCache.forEach(c => {
-      if (c.active !== false && AUTO_ASSIGN_DAYS.includes(c.assignedDay)) counts[c.assignedDay]++;
-    });
-    return AUTO_ASSIGN_DAYS.reduce((best, d) => (counts[d] < counts[best] ? d : best), AUTO_ASSIGN_DAYS[0]);
-  }
 
   // ============= LOCATIONS: approved list cache (shared) =============
   let locationsCache = [];
@@ -825,11 +868,10 @@ async function initApp(user, role) {
       try {
         const lat = custLatInput.value ? parseFloat(custLatInput.value) : null;
         const lng = custLngInput.value ? parseFloat(custLngInput.value) : null;
-        const assignedDay = pickBalancedVisitDay();
-        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, assignedDay });
+        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
         custCustomerIdInput.value = newId;
-        customerSaveNote.textContent = `Saved to customer list. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`;
-        showToast(`Customer saved. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`, 'success');
+        customerSaveNote.textContent = 'Saved to customer list. Awaiting scheduling: choose a visit day under Customers.';
+        showToast('Customer saved. Awaiting scheduling.', 'success');
         custLatInput.value = ''; custLngInput.value = ''; custPinNote.textContent = '';
         await loadCustomersCache();
       } catch (err) {
@@ -906,14 +948,14 @@ async function initApp(user, role) {
     try {
       const lat = newCustLat.value ? parseFloat(newCustLat.value) : null;
       const lng = newCustLng.value ? parseFloat(newCustLng.value) : null;
-      const assignedDay = pickBalancedVisitDay();
-      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, assignedDay });
+      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
       newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
       newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
-      addCustomerNote.textContent = `Customer added. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`;
-      showToast(`Customer added. Visit day: ${VISIT_DAY_FULL_NAMES[assignedDay]}.`, 'success');
+      addCustomerNote.textContent = 'Customer added. Awaiting scheduling: a manager chooses the visit day.';
+      showToast('Customer added. Awaiting scheduling.', 'success');
       await loadCustomersCache();
       await resetAndLoadCustomers();
+      if (window.__refreshWeeklySchedule) window.__refreshWeeklySchedule();
     } catch (err) {
       showToast('Could not add customer: ' + err.message, 'error');
     } finally {
@@ -949,6 +991,8 @@ async function initApp(user, role) {
   const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   function customerDayCellHtml(c) {
+    // Only managers choose or change a visit day. Reps (and a manager previewing the rep screen) see it as text.
+    if (!isManager) return c.assignedDay ? esc(VISIT_DAY_FULL_NAMES[c.assignedDay] || c.assignedDay) : '<span style="color:var(--muted);">Awaiting scheduling</span>';
     const options = ['<option value="">—</option>'].concat(
       VISIT_DAYS.map(d => `<option value="${d}" ${c.assignedDay === d ? 'selected' : ''}>${d}</option>`)
     ).join('');
@@ -987,7 +1031,7 @@ async function initApp(user, role) {
         <td>${customerStatusCellHtml(c)}</td>
         <td>
           <button type="button" class="list-action-btn" data-action="edit">Edit</button>
-          <button type="button" class="list-action-btn ${isActive ? 'exp-delete-btn' : ''}" data-action="${isActive ? 'deactivate' : 'reactivate'}">${isActive ? 'Deactivate' : 'Reactivate'}</button>
+          ${isManager ? `<button type="button" class="list-action-btn ${isActive ? 'exp-delete-btn' : ''}" data-action="${isActive ? 'deactivate' : 'reactivate'}">${isActive ? 'Deactivate' : 'Reactivate'}</button>` : ''}
         </td>
       `;
       customerListBody.appendChild(tr);
@@ -1081,7 +1125,7 @@ async function initApp(user, role) {
       if (!confirmed) return;
       setButtonLoading(btn, '…');
       try {
-        await deactivateCustomer(id);
+        await deactivateCustomer(id, { uid: user.uid, email: user.email });
         const idx = loadedCustomers.findIndex(cc => cc.id === id);
         if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], active: false, assignedDay: null };
         await loadCustomersCache();
@@ -1095,12 +1139,13 @@ async function initApp(user, role) {
     } else if (btn.dataset.action === 'reactivate') {
       setButtonLoading(btn, '…');
       try {
-        await reactivateCustomer(id);
+        await reactivateCustomer(id, { uid: user.uid, email: user.email });
         const idx = loadedCustomers.findIndex(cc => cc.id === id);
-        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], active: true };
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], active: true, assignedDay: null };
         await loadCustomersCache();
         applyCustomerSearchAndRender();
-        showToast('Customer reactivated.', 'success');
+        showToast('Customer reactivated. It is awaiting scheduling: choose a visit day.', 'success');
+        if (window.__refreshWeeklySchedule) window.__refreshWeeklySchedule();
       } catch (err) {
         showToast('Could not reactivate: ' + err.message, 'error');
         clearButtonLoading(btn);
@@ -1164,12 +1209,12 @@ async function initApp(user, role) {
 
   customerListBody.addEventListener('change', async (e) => {
     const select = e.target.closest('.customer-day-select');
-    if (!select) return;
+    if (!select || !isManager) return;
     const id = select.dataset.id;
     const day = select.value || null;
     select.disabled = true;
     try {
-      await setCustomerVisitDay(id, day);
+      await setCustomerVisitDay(id, day, { uid: user.uid, email: user.email });
       const idx = loadedCustomers.findIndex(c => c.id === id);
       if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
       await loadCustomersCache();
@@ -1209,9 +1254,43 @@ async function initApp(user, role) {
         : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${scheduleDayLabels[currentScheduleDay]} yet — set a day per customer in the Manage Customers table above.</p>`;
     }
 
+    // Customers with no visit day yet: shown to managers so none is forgotten. They are not on any rep's list and not targets.
+    const awaitingBox = document.getElementById('awaitingSchedulingBox');
+    const awaitingList = document.getElementById('awaitingSchedulingList');
+    function renderAwaitingScheduling() {
+      const list = awaitingScheduling(customersCache);
+      awaitingBox.style.display = list.length ? 'block' : 'none';
+      document.getElementById('awaitingSchedulingTitle').textContent = `Awaiting scheduling (${list.length})`;
+      awaitingList.innerHTML = list.map(c => `
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line);">
+          <span>${esc(c.name)}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${esc(c.location)}</span>` : ''}</span>
+          ${customerDayCellHtml(c)}
+        </div>`).join('');
+    }
+    awaitingList.addEventListener('change', async (e) => {
+      const select = e.target.closest('.customer-day-select');
+      if (!select) return;
+      const id = select.dataset.id, day = select.value || null;
+      if (!day) return;
+      select.disabled = true;
+      try {
+        await setCustomerVisitDay(id, day, { uid: user.uid, email: user.email });
+        await loadCustomersCache();
+        const idx = loadedCustomers.findIndex(c => c.id === id);
+        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
+        applyCustomerSearchAndRender();
+        showToast('Visit day set.', 'success');
+      } catch (err) {
+        showToast('Could not set the visit day: ' + err.message, 'error');
+      } finally {
+        refreshWeeklySchedule();
+      }
+    });
+
     function refreshWeeklySchedule() {
       renderScheduleDayTabs();
       renderScheduleDayList();
+      renderAwaitingScheduling();
     }
 
     scheduleDayTabs.addEventListener('click', (e) => {
@@ -1228,7 +1307,7 @@ async function initApp(user, role) {
       const id = select.dataset.id, day = select.value || null;
       select.disabled = true;
       try {
-        await setCustomerVisitDay(id, day);
+        await setCustomerVisitDay(id, day, { uid: user.uid, email: user.email });
         await loadCustomersCache();
         const idx = loadedCustomers.findIndex(c => c.id === id);
         if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
@@ -1367,10 +1446,15 @@ async function initApp(user, role) {
       mergePreview.innerHTML = 'Checking activity to move…';
       try {
         const counts = await countCustomerActivity(mergeAwayCustomer.id);
+        const blockedNote = counts.invoicing.length
+          ? `<br><span style="color:#b3261e;"><strong>Cannot merge yet:</strong> order(s) ${counts.invoicing.map(esc).join(', ')} are being invoiced right now. Wait until invoicing finishes, then try again.</span>`
+          : '';
         mergePreview.innerHTML = `
-          <strong>${mergeAwayCustomer.name}</strong> will be deleted. Its
+          <strong>${esc(mergeAwayCustomer.name)}</strong> will be removed as a customer. Its
           <strong>${counts.orders}</strong> order(s), <strong>${counts.visits}</strong> visit(s), and
-          <strong>${counts.invoices}</strong> invoice(s) will move onto <strong>${mergeKeepCustomer.name}</strong>.
+          <strong>${counts.invoices}</strong> invoice(s) will move onto <strong>${esc(mergeKeepCustomer.name)}</strong>
+          (amounts, numbers, statuses and invoice links are not changed; its schedule history is kept).
+          ${blockedNote}
           <br><span style="color:var(--muted); font-size:0.78rem;">Note: only invoices created since this merge feature shipped carry the link needed to move — older invoices won't be found by this count.</span>
         `;
         mergeConfirmBtn.style.display = 'block';
@@ -1388,15 +1472,32 @@ async function initApp(user, role) {
       if (!confirmed) return;
       setButtonLoading(mergeConfirmBtn, 'Merging…');
       try {
-        const result = await mergeCustomers(mergeKeepCustomer.id, mergeAwayCustomer.id);
+        const result = await mergeCustomers(mergeKeepCustomer.id, mergeAwayCustomer.id, { uid: user.uid, email: user.email });
         showToast(`Merged. Moved ${result.orders} order(s), ${result.visits} visit(s), ${result.invoices} invoice(s).`, 'success');
         mergeKeepSearch.value = ''; mergeAwaySearch.value = '';
         mergeKeepCustomer = null; mergeAwayCustomer = null;
         mergePreview.style.display = 'none'; mergeConfirmBtn.style.display = 'none';
         await loadCustomersCache();
         await resetAndLoadCustomers();
+        if (window.__refreshWeeklySchedule) window.__refreshWeeklySchedule();
       } catch (err) {
-        showToast('Could not merge: ' + err.message, 'error');
+        if (err.code === 'merge-blocked-invoicing') {
+          // Clear message; nothing was moved or deleted; the manager simply tries again later (no automatic queue).
+          mergePreview.style.display = 'block';
+          mergePreview.innerHTML = `<span style="color:#b3261e;" role="alert">${esc(err.message)}</span>`;
+          showToast('The merge was not done: an order is being invoiced. Try again after invoicing finishes.', 'error', 8000);
+        } else {
+          mergePreview.style.display = 'block';
+          mergePreview.innerHTML = `<span style="color:#b3261e;" role="alert">${esc(err.message)}</span>
+            <br><span style="font-size:0.8rem;">If the merge stopped part-way, press Confirm Merge again to finish it, or
+            <button type="button" class="list-action-btn" id="mergeCancelLockBtn">Cancel the unfinished merge</button></span>`;
+          const cancelBtn = document.getElementById('mergeCancelLockBtn');
+          if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+            try { await cancelMergeLock(mergeAwayCustomer.id); showToast('The unfinished merge was cancelled.', 'success'); mergePreview.style.display = 'none'; }
+            catch (e2) { showToast('Could not cancel: ' + e2.message, 'error'); }
+          });
+          showToast('Could not merge: ' + err.message, 'error', 8000);
+        }
       } finally {
         clearButtonLoading(mergeConfirmBtn);
       }
@@ -1677,7 +1778,8 @@ async function initApp(user, role) {
     const stockMovementTypeLabels = {
       manual: 'Manual Adjustment',
       'order-approved': 'Order Approved',
-      'order-cancelled-deleted': 'Order Cancelled',
+      'order-cancelled': 'Order Cancelled (stock restored)',
+      'order-cancelled-deleted': 'Order Cancelled',   // older entries from when cancelling deleted the order
       'order-edited': 'Order Edited',
     };
     const stockMovementBody = document.getElementById('stockMovementBody');
@@ -1944,11 +2046,12 @@ async function initApp(user, role) {
           if (fromOrder) {
             committed = await issueInvoiceForOrder({ orderId: fromOrder.id, meta, expectedRevision: fromOrder.revision ?? null, uid: user.uid });
           } else {
-            pendingStandaloneInvoiceId = pendingStandaloneInvoiceId || newStandaloneInvoiceId();
-            committed = await issueStandaloneInvoice({ invoiceId: pendingStandaloneInvoiceId, meta, uid: user.uid });
+            pendingStandaloneInvoiceId = pendingStandaloneInvoiceId || newStandaloneRequestId();
+            committed = await issueStandaloneInvoice({ requestId: pendingStandaloneInvoiceId, meta, uid: user.uid });
           }
         } catch (err) {
           console.error(err);
+          if (!fromOrder && err.code === 'invoice-conflict') pendingStandaloneInvoiceId = null;   // the next save is a NEW invoice
           if (err.alreadyInvoiced) {
             showToast(`This order was already invoiced as ${err.invoiceNo}. Nothing new was created — use Invoices → Download if you need the PDF.`, 'error');
             exitFromOrderMode();
@@ -2933,9 +3036,13 @@ async function initApp(user, role) {
           actions = `
             <button type="button" class="list-action-btn" data-action="edit">Edit</button>
             <button type="button" class="list-action-btn" data-action="generate-invoice">Generate Invoice</button>
-            <button type="button" class="list-action-btn exp-delete-btn" data-action="cancel">Cancel</button>
+            <button type="button" class="list-action-btn exp-delete-btn" data-action="cancel">Cancel order</button>
           `;
+        } else if (o.status === 'Cancelled') {
+          actions = `<span style="font-size:0.75rem; color:var(--muted);">Cancelled${o.cancelledByEmail ? ' by ' + esc(o.cancelledByEmail) : ''}${o.cancelReason ? ': ' + esc(o.cancelReason) : ''}</span>`;
         }
+      } else if (o.status === 'Cancelled') {
+        actions = `<span style="font-size:0.75rem; color:var(--muted);">Cancelled${o.cancelReason ? ': ' + esc(o.cancelReason) : ''}</span>`;
       }
       // Reps: no actions — only managers change order status now.
       tr.innerHTML = baseCells + `<td>${actions}</td>`;
@@ -3134,7 +3241,7 @@ async function initApp(user, role) {
       const reason = prompt(`Reason for rejecting order ${order.orderNo} (optional):`) || '';
       setButtonLoading(btn, '…');
       try {
-        await setOrderStatus(id, 'Rejected', reason);
+        await rejectOrder(id, reason);
         showToast(`Order ${order.orderNo} rejected.`, 'success');
         await resetAndLoadOrders();
       } catch (err) {
@@ -3142,30 +3249,54 @@ async function initApp(user, role) {
         clearButtonLoading(btn);
       }
     } else if (btn.dataset.action === 'cancel') {
-      // Approved orders already had stock decremented, so cancelling
-      // one must restore it — cancelApprovedOrderAndDelete does that
-      // and hard-deletes the order in the same transaction, logging a
-      // stockMovements entry so the stock change is still auditable
-      // even though the order record itself is gone.
-      const confirmed = confirm(`Cancel and permanently delete order ${order.orderNo}?\n\nThis restores the stock that was reserved when it was approved. This cannot be undone.`);
-      if (!confirmed) return;
-      setButtonLoading(btn, '…');
-      try {
-        await cancelApprovedOrderAndDelete(order, { uid: user.uid, email: user.email });
-        loadedOrders = loadedOrders.filter(o => o.id !== id);
-        renderOrderRows(loadedOrders);
-        showToast('Order cancelled, deleted, and stock restored.', 'success');
-        await loadProductsCache();
-      } catch (err) {
-        showToast('Could not cancel: ' + err.message, 'error');
-        clearButtonLoading(btn);
-      }
+      // Cancelling KEEPS the order (status Cancelled, reason, who, server time). An Approved order's stock is
+      // restored exactly once (stock.js cancelOrder). Invoiced / delivered orders are refused there.
+      openCancelOrderModal(order, btn);
     } else if (btn.dataset.action === 'generate-invoice') {
       if (window.__openGenerateInvoiceModal) window.__openGenerateInvoiceModal(order);
     } else if (btn.dataset.action === 'edit') {
       if (window.__openEditOrderModal) window.__openEditOrderModal(order);
     }
   });
+
+  // ============= CANCEL ORDER MODAL (manager only) =============
+  function openCancelOrderModal(order, triggerBtn) {
+    const modal = document.getElementById('cancelOrderModal');
+    const reason = document.getElementById('cancelOrderReason');
+    const err = document.getElementById('cancelOrderError');
+    const confirmBtn = document.getElementById('cancelOrderConfirmBtn');
+    document.getElementById('cancelOrderNoLabel').textContent = order.orderNo || '';
+    document.getElementById('cancelOrderHint').textContent = order.status === 'Approved'
+      ? 'The order is kept (marked Cancelled). The stock reserved when it was approved is returned to stock once, and the stock history records it.'
+      : 'The order is kept (marked Cancelled). No stock was reserved, so stock does not change.';
+    reason.value = ''; err.style.display = 'none';
+    modal.style.display = 'flex';
+    const close = () => { modal.style.display = 'none'; confirmBtn.onclick = null; };
+    document.getElementById('cancelOrderCloseBtn').onclick = close;
+    document.getElementById('cancelOrderBackBtn').onclick = close;
+    let busy = false;
+    confirmBtn.onclick = async () => {
+      if (busy) return;                                            // repeated clicks do nothing
+      const problem = validateCancelReason(reason.value);
+      if (problem) { err.textContent = problem; err.style.display = 'block'; reason.focus(); return; }
+      busy = true;
+      setButtonLoading(confirmBtn, 'Cancelling…');
+      try {
+        const res = await cancelOrder(order, { reason: reason.value, uid: user.uid, email: user.email });
+        close();
+        showToast(res.alreadyCancelled
+          ? `Order ${order.orderNo} was already cancelled. Nothing changed; stock was not restored again.`
+          : (res.stockRestored ? `Order ${order.orderNo} cancelled. Stock restored.` : `Order ${order.orderNo} cancelled.`), res.alreadyCancelled ? 'info' : 'success');
+        await resetAndLoadOrders();
+        await loadProductsCache();
+      } catch (e) {
+        err.textContent = e.message; err.style.display = 'block';
+      } finally {
+        busy = false;
+        clearButtonLoading(confirmBtn);
+      }
+    };
+  }
 
   // ============= EDIT ORDER MODAL (manager only) =============
   if (isManager) {
@@ -3266,6 +3397,83 @@ async function initApp(user, role) {
     });
 
     window.__openEditOrderModal = openEditOrderModal;
+  }
+
+  // ============= ENTER AN ORDER FOR A SALES REP (manager only) =============
+  // The order is credited to the chosen rep and recorded as entered by the manager. It creates NO visit and is not a
+  // completed shop visit (reports show it in its own column). Numbering and retries: managerOrders.js.
+  if (isManager) {
+    const moBtn = document.getElementById('enterOrderForRepBtn');
+    const moModal = document.getElementById('managerOrderModal');
+    const moRep = document.getElementById('moRep');
+    const moCustSearch = document.getElementById('moCustSearch');
+    const moCustSuggestions = document.getElementById('moCustSuggestions');
+    const moCustSelected = document.getElementById('moCustSelected');
+    const moItemsBody = document.getElementById('moItemsBody');
+    const moNotes = document.getElementById('moNotes');
+    const moError = document.getElementById('moError');
+    const moSaveBtn = document.getElementById('moSaveBtn');
+    let moCustomer = null, moRequestId = null, moSaving = false;
+    moBtn.style.display = 'inline-block';
+
+    const moClose = () => { moModal.style.display = 'none'; };
+    async function moOpen() {
+      let reps = [];
+      try { reps = await fetchRepEmails(); } catch (err) { showToast('Could not load the sales reps: ' + err.message, 'error'); return; }
+      if (!reps.length) { showToast('There are no sales reps set up.', 'error'); return; }
+      moRep.innerHTML = '<option value="">Choose a sales rep…</option>' + reps.map(r => `<option value="${esc(r)}">${esc(displayNameForEmail(r))}</option>`).join('');
+      moCustomer = null; moCustSearch.value = ''; moCustSelected.textContent = ''; moNotes.value = ''; moError.style.display = 'none';
+      moItemsBody.innerHTML = '';
+      buildQuickAddGrid(document.getElementById('moQuickAddGrid'), moItemsBody, () => {}, productsCache);
+      moRequestId = newRequestId();          // kept until the save succeeds or the dialog is reopened: a retry cannot create a second order
+      moModal.style.display = 'flex';
+    }
+    moBtn.addEventListener('click', moOpen);
+    document.getElementById('moCloseBtn').addEventListener('click', moClose);
+    document.getElementById('moBackBtn').addEventListener('click', moClose);
+
+    moCustSearch.addEventListener('input', () => {
+      const q = moCustSearch.value.trim().toLowerCase();
+      if (!q) { moCustSuggestions.style.display = 'none'; return; }
+      const matches = customersCache.filter(c => c.active !== false && !c.mergeLock && (c.name || '').toLowerCase().includes(q)).slice(0, 8);
+      moCustSuggestions.innerHTML = matches.map(c => `<div class="suggestion-item" data-id="${esc(c.id)}"><span class="sug-name">${esc(c.name)}</span><span class="sug-meta">${esc(c.location || '')}${hasPin(c) ? '' : ' · ⚠ no pin'}</span></div>`).join('');
+      moCustSuggestions.style.display = matches.length ? 'block' : 'none';
+    });
+    moCustSuggestions.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      const c = customersCache.find(cc => cc.id === item.dataset.id);
+      if (!c) return;
+      moCustomer = c; moCustSearch.value = c.name; moCustSuggestions.style.display = 'none';
+      moCustSelected.textContent = hasPin(c) ? `Selected: ${c.name}` : `Selected: ${c.name} — this customer has no pinned location; pin it first.`;
+    });
+
+    moSaveBtn.addEventListener('click', async () => {
+      if (moSaving) return;
+      const rep = moRep.value;
+      if (!rep) { moError.textContent = 'Choose the sales rep this order is for.'; moError.style.display = 'block'; return; }
+      if (!moCustomer) { moError.textContent = 'Choose a customer.'; moError.style.display = 'block'; return; }
+      if (!hasPin(moCustomer)) { moError.textContent = 'This customer has no pinned location. Pin it first.'; moError.style.display = 'block'; return; }
+      const items = getItems(moItemsBody);
+      const problem = validateOrderItems(items);
+      if (problem) { moError.textContent = problem; moError.style.display = 'block'; return; }
+      moError.style.display = 'none';
+      moSaving = true;
+      setButtonLoading(moSaveBtn, 'Saving…');
+      try {
+        const res = await submitOrderAsManager({ customerId: moCustomer.id, items, notes: moNotes.value, attributedRepEmail: rep, requestId: moRequestId, uid: user.uid, email: user.email });
+        showToast(res.alreadySaved ? `Order ${res.orderNo} had already been saved. No duplicate was created.` : `Order ${res.orderNo} saved for ${displayNameForEmail(rep)}. No visit was recorded.`, res.alreadySaved ? 'info' : 'success');
+        moClose();
+        await resetAndLoadOrders();
+      } catch (err) {
+        moError.textContent = (err.code === 'order-conflict' ? err.message : 'Could not save the order: ' + err.message + ' You can press Save again; it will not create a duplicate.');
+        moError.style.display = 'block';
+        if (err.code === 'order-conflict') moRequestId = newRequestId();   // the next Save is deliberately a NEW order
+      } finally {
+        moSaving = false;
+        clearButtonLoading(moSaveBtn);
+      }
+    });
   }
 
   // ============= TODAY'S VISITS (sales rep) =============
@@ -3435,8 +3643,8 @@ async function initApp(user, role) {
     let todayDate = malawiDate();
     let visitsLoaded = false;
 
-    // Straight-line route ordering for today's customers. Start = phone GPS,
-    // falling back to the warehouse pin. Unpinned customers go last.
+    // Straight-line route ordering for today's customers. Start = the phone's GPS position.
+    // Unpinned customers go last.
     let todaysRouteInfo = null; // Map(customerId -> { stopNo, legKm })
     const todaysRouteOptimizeBtn = document.getElementById('todaysRouteOptimizeBtn');
     const todaysRouteSummary = document.getElementById('todaysRouteSummary');
@@ -3447,11 +3655,9 @@ async function initApp(user, role) {
       if (pinned.length === 0) { showToast('None of today\'s customers have a pin yet.', 'error'); return; }
       setButtonLoading(todaysRouteOptimizeBtn, 'Finding your location…');
       try {
-        let depot = null;
-        try { depot = await fetchDepot(); } catch (err) { /* no depot saved / not readable */ }
-        const start = await getStartPoint(depot);
+        const start = await getStartPoint();
         if (!start) {
-          showToast('Allow location access on your phone, or ask the manager to set the warehouse pin.', 'error');
+          showToast('Allow location access on your phone to find the shortest route.', 'error');
           return;
         }
         const { ordered, totalKm } = orderStops(start, pinned.map(c => ({ id: c.id, lat: c.lat, lng: c.lng })));
@@ -3732,27 +3938,6 @@ async function initApp(user, role) {
   if (isManager) {
     const delPeriod = document.getElementById('delPeriod');
     const delOverdueHours = document.getElementById('delOverdueHours');
-    // Warehouse pin: the route starting point when a phone's GPS isn't available.
-    const depotStatus = document.getElementById('depotStatus');
-    let depotCache = null;
-    async function refreshDepotStatus() {
-      try { depotCache = await fetchDepot(); } catch (err) { depotCache = null; }
-      depotStatus.textContent = depotCache
-        ? `Set ✓ (${depotCache.lat.toFixed(5)}, ${depotCache.lng.toFixed(5)})`
-        : 'Not set yet — routes will rely on each phone\'s GPS only.';
-      depotStatus.style.color = depotCache ? '#3a7d2c' : '#b3261e';
-    }
-    document.getElementById('depotSetBtn').addEventListener('click', () => {
-      openLocationPicker({
-        label: 'Warehouse', lat: depotCache ? depotCache.lat : null, lng: depotCache ? depotCache.lng : null,
-        onSave: async ({ lat, lng }) => {
-          await saveDepot({ lat, lng, uid: user.uid });
-          await refreshDepotStatus();
-          showToast('Warehouse location saved.', 'success');
-        },
-      });
-    });
-
     delOverdueHours.innerHTML = OVERDUE_HOUR_OPTIONS
       .map(h => `<option value="${h}" ${h === DEFAULT_OVERDUE_HOURS ? 'selected' : ''}>${h} hours</option>`).join('');
 
@@ -3822,7 +4007,6 @@ async function initApp(user, role) {
 
     window.loadDeliveriesView = async function loadDeliveriesView() {
       const refreshBtn = document.getElementById('delRefreshBtn');
-      refreshDepotStatus();
       setButtonLoading(refreshBtn, 'Loading…');
       try {
         const since = earliestNeededStart(new Date());
@@ -3873,10 +4057,16 @@ async function initApp(user, role) {
       repSummaryBody.innerHTML = rows.map(r => `
         <tr data-rep="${esc(r.rep)}">
           <td>${nameOf(r.rep)}${r.totalVisits === 0 ? ' <span class="numbering-hint">(no visits recorded)</span>' : ''}</td>
-          <td>${r.scheduledCount}</td><td>${r.visitedCount}</td><td>${r.stillDueCount}</td>
+          ${r.reliableDays === 0
+            ? '<td colspan="3" class="numbering-hint">not calculated (no reliable schedule for these dates)</td>'
+            : `<td>${r.scheduledCount}</td><td>${r.visitedCount}</td><td>${r.stillDueCount}</td>`}
           <td>${r.ordersTaken}</td><td>${r.noOrderVisits}</td>
           <td>${pctText(r.coveragePct)}</td><td>${pctText(r.conversionPct)}</td>
+          <td>${r.attributedOrders ? `${r.attributedOrders} order(s), ${r.attributedValue === null ? '—' : mwk(r.attributedValue)}` : '—'}${r.attributedCancelled ? ` <span class="numbering-hint">(${r.attributedCancelled} cancelled)</span>` : ''}</td>
         </tr>`).join('');
+      // The limitation is stated plainly - no figure is shown for a date without a reliable schedule record.
+      if (report.limitation) { perfScheduleWarning.textContent = report.limitation; perfScheduleWarning.style.display = 'block'; }
+      else perfScheduleWarning.style.display = 'none';
 
       const due = rows.flatMap(r => r.due.map(d => ({ rep: r.rep, ...d })));
       dueEmpty.style.display = due.length ? 'none' : 'block';
@@ -3913,14 +4103,6 @@ async function initApp(user, role) {
         <td>${v.outcome === 'No Order' ? esc(v.reasonNoOrder || '—') + (v.reasonNotes ? ': ' + esc(v.reasonNotes) : '') : '—'}</td>
         <td>${v.wasScheduled === true ? 'Yes' : v.wasScheduled === false ? 'No' : '—'}</td></tr>`).join('');
 
-      // Schedule-change warning
-      const changed = scheduleChangedSince(customersCache, report.from, (ms) => malawiDate(new Date(ms)));
-      if (changed.length) {
-        perfScheduleWarning.textContent = `Heads up: the visit day of ${changed.length} customer(s) was changed on or after ${formatDate(report.from)}. Scheduled and Still due figures for earlier days in this range use the schedule as it is now, so they may differ from what applied at the time. Visited counts are also affected, because they count scheduled customers using the schedule as it is now. Orders and No order counts come from saved visits and are unaffected.`;
-        perfScheduleWarning.style.display = 'block';
-      } else {
-        perfScheduleWarning.style.display = 'none';
-      }
     }
 
     const perfShownRange = document.getElementById('perfShownRange');
@@ -3943,17 +4125,19 @@ async function initApp(user, role) {
         onInvalid: (msg) => { perfRangeError.textContent = msg; perfRangeError.style.display = 'block'; },
         fetch: async ({ from, to }) => {
           perfRangeError.style.display = 'none';
-          const [visits, reps] = await Promise.all([fetchVisitsInRange(from, to), fetchRepEmails()]);
+          const [visits, reps, history, orders] = await Promise.all([
+            fetchVisitsInRange(from, to), fetchRepEmails(), fetchScheduleHistory(), fetchOrdersInRange(from, to),
+          ]);
           try { await loadProfilesCache(); await loadCustomersCache(); } catch (err) { /* names fall back to emails */ }
-          return { visits, reps };
+          return { visits, reps, history, attributedOrders: orders.filter(o => o.source === 'manager-entered') };
         },
-        apply: ({ visits, reps }, { from, to }) => {
+        apply: ({ visits, reps, history, attributedOrders }, { from, to }) => {
           perfReps = reps;
           const prev = perfRepFilter.value;
           const all = [...new Set([...reps, ...visits.map(v => v.repEmail)].filter(Boolean).map(e => e.trim().toLowerCase()))].sort();
           perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${nameOf(r)}</option>`).join('');
           perfRepFilter.value = all.includes(prev) ? prev : 'all';
-          perfReport = { visits, from, to };      // the range that was FETCHED, not whatever the boxes say now
+          perfReport = { visits, from, to, history, attributedOrders };      // the range that was FETCHED, not whatever the boxes say now
           drawPerformance();
         },
         onError: (err) => showToast('Could not load the report: ' + err.message, 'error'),
@@ -3962,8 +4146,15 @@ async function initApp(user, role) {
     let perfReport = null;
     function drawPerformance() {
       if (!perfReport) return;
-      const { visits, from, to } = perfReport;
-      const report = buildPerformanceReport({ customers: customersCache, visits, reps: perfReps, from, to, repFilter: perfRepFilter.value });
+      const { visits, from, to, history, attributedOrders } = perfReport;
+      const index = buildScheduleIndex(history);
+      document.getElementById('scheduleHistoryStartBox').style.display = index.startDate ? 'none' : 'block';
+      const report = buildPerformanceReport({ index, visits, reps: perfReps, from, to, repFilter: perfRepFilter.value, attributedOrders });
+      const mismatches = findScheduleMismatches(index, customersCache);
+      if (mismatches.length) {
+        report.limitation = (report.limitation ? report.limitation + ' ' : '') +
+          `Warning: ${mismatches.length} customer(s) have a current schedule that does not match their schedule history (${mismatches.slice(0, 3).map(m => m.name).join(', ')}${mismatches.length > 3 ? ', …' : ''}), so recent targets may be wrong. Ask the developer to check.`;
+      }
       renderPerformance(report, visits);
       updateShownRange();
     }
@@ -3973,6 +4164,19 @@ async function initApp(user, role) {
       await runPerformance();
     };
 
+    document.getElementById('startScheduleHistoryBtn').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      if (!confirm('Start the dated schedule history now?\n\nEach customer\'s CURRENT visit day and active state is recorded as the starting point from today. Dates before today will show "no reliable schedule" in reports. Do this once, not close to midnight.')) return;
+      setButtonLoading(btn, 'Starting…');
+      try {
+        await loadCustomersCache();
+        const res = await startScheduleHistory({ customers: customersCache, uid: user.uid, email: user.email });
+        showToast(res.status === 'already-started' ? `Schedule history already started on ${res.startDate}.` : `Schedule history started for ${res.added} customer(s).`, 'success');
+        await runPerformance();
+      } catch (err) {
+        showToast('Could not start the schedule history: ' + err.message, 'error', 8000);
+      } finally { clearButtonLoading(btn); }
+    });
     perfRunBtn.addEventListener('click', runPerformance);
     document.getElementById('perfTodayBtn').addEventListener('click', () => { perfFrom.value = perfTo.value = malawiDate(); runPerformance(); });
     document.getElementById('perfWeekBtn').addEventListener('click', () => {
@@ -4306,18 +4510,15 @@ async function initDeliveryApp(user) {
     renderDeliveryEmpty();
   }
 
-  // Orders the whole waiting list into a short route: GPS first, warehouse
-  // pin as backup. Orders without a pin can't be placed on the route, so
-  // they're listed last.
+  // Orders the whole waiting list into a short route starting from the phone's GPS position.
+  // Orders without a pin can't be placed on the route, so they're listed last.
   deliverySortBtn.addEventListener('click', async () => {
     setButtonLoading(deliverySortBtn, 'Finding your location…');
     try {
       await loadAllDeliveryPages();
-      let depot = null;
-      try { depot = await fetchDepot(); } catch (err) { /* none saved */ }
-      const start = await getStartPoint(depot);
+      const start = await getStartPoint();
       if (!start) {
-        showToast('Turn on location on your phone, or ask the manager to set the warehouse.', 'error');
+        showToast('Turn on location on your phone to find the shortest route.', 'error');
         return;
       }
       const pinned = [];
@@ -4336,7 +4537,6 @@ async function initDeliveryApp(user) {
       const dest = first[first.length - 1];
       const waypoints = first.slice(0, -1).map(p => `${p.lat},${p.lng}`).join('|');
       const mapsUrl = `https://www.google.com/maps/dir/?api=1` +
-        (start.source === 'depot' ? `&origin=${start.lat},${start.lng}` : '') +
         `&destination=${dest.lat},${dest.lng}` + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=driving`;
       deliveryRouteSummary.style.display = 'block';
       deliveryRouteSummary.innerHTML =

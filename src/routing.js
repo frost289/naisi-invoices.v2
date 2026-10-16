@@ -68,10 +68,11 @@ export function formatKm(km) {
   return km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
 }
 
-// GPS first; if the phone refuses / times out, fall back to the warehouse
-// pin; if neither exists, returns null.
-export async function getStartPoint(depot) {
-  const gps = await new Promise((resolve) => {
+// The route starts from the phone's own GPS position. There is no stored warehouse/depot location: if the phone
+// refuses or times out this returns null and the screen tells the user to allow location access. (The map link
+// then simply omits the origin and Google Maps starts from the phone's current location.)
+export async function getStartPoint() {
+  return await new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, source: 'gps' }),
@@ -79,13 +80,8 @@ export async function getStartPoint(depot) {
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
     );
   });
-  if (gps) return gps;
-  if (depot && typeof depot.lat === 'number' && typeof depot.lng === 'number') {
-    return { lat: depot.lat, lng: depot.lng, source: 'depot' };
-  }
-  return null;
 }
 
-export function startLabel(start) {
-  return start.source === 'gps' ? 'your current location' : 'the warehouse';
+export function startLabel() {
+  return 'your current location';
 }

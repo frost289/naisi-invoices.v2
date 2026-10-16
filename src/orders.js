@@ -1,41 +1,14 @@
 import { db } from './firebase.js';
 import {
-  collection, addDoc, doc, getDoc, updateDoc, deleteDoc, getDocs,
+  collection, doc, getDoc, getDocs,
   serverTimestamp, query, where, orderBy, limit, startAfter, runTransaction
 } from 'firebase/firestore';
-import { incrementOrderCounterAtomically } from './orderNumbering.js';
 import { COUNTER_DOC, buildInvoiceNo } from './numbering.js';
 import { makeError, orderRevisionKey } from './orderRevision.js';
-import { isValidPin } from './customers.js';
 
 const PAGE_SIZE = 25;
 
 export const ORDER_STATUSES = ['Draft', 'Submitted', 'Approved', 'Invoicing', 'Invoiced', 'Dispatched', 'Delivered', 'Rejected', 'Cancelled'];
-
-// LEGACY, UNUSED by any screen (checked: no caller outside tests). Reps now create orders only through
-// submitOrderWithVisit() in visits.js. The final security rules REFUSE this path for reps: it writes the
-// order and the counter in separate commits and with no visit. Do not call it.
-export async function submitOrder({ customerId, customerName, customerPhone, customerLocation, customerLat, customerLng, items, notes, uid, email }) {
-  // The delivery point is the customer's pinned coordinates, snapshotted
-  // onto the order. customerLocation stays as the human-readable area label.
-  if (!isValidPin(customerLat, customerLng)) {
-    throw new Error('This customer has no pinned location. Pin it before placing an order.');
-  }
-  const { usedNo } = await incrementOrderCounterAtomically();
-  const grandTotal = items.reduce((sum, it) => sum + (it.total || 0), 0);
-  const docRef = await addDoc(collection(db, 'orders'), {
-    orderNo: usedNo,
-    status: 'Submitted',
-    customerId, customerName, customerPhone, customerLocation, customerLat, customerLng,
-    items, notes: notes || '', grandTotal,
-    createdBy: uid, createdByEmail: email,
-    createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-    submittedAt: serverTimestamp(),
-    approvedAt: null, rejectedAt: null, cancelledAt: null, invoicedAt: null,
-    managerNotes: '', invoiceId: null, invoiceNo: null,
-  });
-  return { id: docRef.id, orderNo: usedNo };
-}
 
 export async function fetchMyOrdersPage(uid, cursor = null) {
   const constraints = [where('createdBy', '==', uid), orderBy('createdAt', 'desc'), limit(PAGE_SIZE)];
@@ -63,12 +36,15 @@ export async function fetchOrderById(id) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
-export async function setOrderStatus(id, status, managerNotes = '') {
-  const patch = { status, updatedAt: serverTimestamp() };
-  if (status === 'Approved') patch.approvedAt = serverTimestamp();
-  if (status === 'Rejected') { patch.rejectedAt = serverTimestamp(); patch.managerNotes = managerNotes; }
-  if (status === 'Cancelled') patch.cancelledAt = serverTimestamp();
-  await updateDoc(doc(db, 'orders', id), patch);
+// Rejecting a Submitted order (no stock was ever touched). Cancelling is a separate, audited operation: stock.js cancelOrder.
+export async function rejectOrder(id, managerNotes = '') {
+  await runTransaction(db, async (tx) => {
+    const ref = doc(db, 'orders', id);
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Order no longer exists.');
+    if (snap.data().status !== 'Submitted') throw new Error('Only a Submitted order can be rejected. Refresh the list.');
+    tx.update(ref, { status: 'Rejected', rejectedAt: serverTimestamp(), managerNotes, updatedAt: serverTimestamp() });
+  });
 }
 
 // ============= INVOICING =============
@@ -138,6 +114,14 @@ export async function beginInvoiceGeneration(id, { resume = INVOICING_RESUME_ENA
     if (!orderSnap.exists()) throw new Error('Order no longer exists.');
     const o = orderSnap.data();
     if (o.status === 'Invoiced' || o.invoiceId) throw alreadyInvoicedError(o);
+    // A customer that is being merged away cannot have an order start invoicing (the merge waits for invoicing, and
+    // invoicing waits for the merge). The security rules enforce the same thing; this gives the clear message.
+    if (o.customerId) {
+      const custSnap = await tx.get(doc(db, 'customers', o.customerId));
+      if (custSnap.exists() && custSnap.data().mergeLock) {
+        throw makeError('This order\'s customer is being merged with another customer right now. Try again in a few minutes.', { code: 'customer-merging' });
+      }
+    }
 
     if (o.status === 'Invoicing') {
       const busy = (why) => makeError(
@@ -174,16 +158,23 @@ export async function revertInvoiceGeneration(id, attemptToken) {
 }
 
 // Reserves the next invoice number, writes the invoice and (for an order)
-// marks it Invoiced — one all-or-nothing transaction.
+// marks it Invoiced - one all-or-nothing transaction.
 //   orderId + attemptToken : invoice for an order locked by beginInvoiceGeneration
-//   invoiceId              : stand-alone invoice only — a client-chosen id
+//   invoiceId              : stand-alone (walk-in) invoice only - derived from the request id, see standaloneInvoiceIdFor
 //   expectedRevision       : orderRevisionKey of the order as the manager saw
 //                            it; the commit is refused if it has changed since
 //   meta                   : invoice fields WITHOUT invoiceNo
-export async function commitInvoice({ orderId = null, attemptToken = null, invoiceId = null, expectedRevision = null, meta, uid }) {
+// Every invoice carries an explicit identity: kind 'order' (id ord_<orderId>) or kind 'standalone' (id sa_<uid>_<requestId>).
+// A write without it - an old copy of the app, or a hand-made write - is refused by the security rules.
+// The issued number is also stored once in invoiceNumbers/{invoiceNo}: a number can never be issued twice, even after the
+// next number has been adjusted by hand (the commit fails with 'number-already-issued' and nothing is saved).
+export async function commitInvoice({ orderId = null, attemptToken = null, invoiceId = null, requestId = null, expectedRevision = null, meta, uid }) {
   const items = meta.items || [];
   const grandTotal = items.reduce((sum, it) => sum + (it.total || 0), 0);
-  const targetId = orderId ? invoiceIdForOrder(orderId) : (invoiceId || doc(collection(db, 'invoices')).id);
+  if (!orderId && !(typeof invoiceId === 'string' && invoiceId.startsWith(`sa_${uid}_`))) {
+    throw new Error('A stand-alone invoice needs its request id (standaloneInvoiceIdFor).');
+  }
+  const targetId = orderId ? invoiceIdForOrder(orderId) : invoiceId;
 
   return await runTransaction(db, async (tx) => {
     // All reads first (Firestore requirement).
@@ -201,28 +192,39 @@ export async function commitInvoice({ orderId = null, attemptToken = null, invoi
       if (o.status === 'Invoiced' || o.invoiceId) throw alreadyInvoicedError(o);
       if (invoiceSnap.exists()) {
         throw makeError(
-          `An invoice (${invoiceSnap.data().invoiceNo}) already exists for this order but the order is not marked Invoiced. No new invoice was created — this needs manual review.`,
+          `An invoice (${invoiceSnap.data().invoiceNo}) already exists for this order but the order is not marked Invoiced. No new invoice was created - this needs manual review.`,
           { code: 'invoice-conflict', invoiceNo: invoiceSnap.data().invoiceNo });
       }
       if (o.status !== 'Invoicing' || !attemptToken || o.invoicingAttempt !== attemptToken) {
         throw makeError('This invoicing attempt is no longer the active one (it was released or taken over). Nothing was saved.', { code: 'lock-lost' });
       }
       if (expectedRevision !== null && orderRevisionKey(o) !== expectedRevision) {
-        throw makeError('This order was changed after you loaded it. Nothing was saved — refresh the list and review the order again.', { code: 'order-changed' });
+        throw makeError('This order was changed after you loaded it. Nothing was saved - refresh the list and review the order again.', { code: 'order-changed' });
       }
     } else if (invoiceSnap.exists()) {
-      // A retry of a stand-alone invoice whose first attempt DID commit (the
-      // acknowledgement was lost): report the saved invoice, create nothing.
+      // A retry of a stand-alone invoice whose first attempt DID commit (the acknowledgement was lost): report the
+      // saved invoice, create nothing and use no number. If the retry carries DIFFERENT details it is refused.
       const saved = invoiceSnap.data();
+      if (standaloneKey(saved) !== standaloneKey({ ...meta, grandTotal })) {
+        throw makeError(`This invoice was already saved as ${saved.invoiceNo} with different details. The new details were NOT saved. Start a new invoice if you need another.`, { code: 'invoice-conflict', invoiceNo: saved.invoiceNo });
+      }
       return { invoiceId: targetId, invoiceNo: saved.invoiceNo, grandTotal: saved.grandTotal, next: counter, alreadySaved: true };
     }
 
     const invoiceNo = buildInvoiceNo(counter.prefix, counter.counter);
+    const numberRef = doc(db, 'invoiceNumbers', invoiceNo);
+    const numberSnap = await tx.get(numberRef);          // still a read: must come before the writes below
+    if (numberSnap.exists()) {
+      throw makeError(`Invoice number ${invoiceNo} was already issued. Nothing was saved. A manager must raise the next invoice number above the highest number already used (Invoices -> Numbering).`, { code: 'number-already-issued', invoiceNo });
+    }
     const next = { prefix: counter.prefix, counter: counter.counter + 1 };
 
-    tx.set(COUNTER_DOC, next);
+    tx.set(COUNTER_DOC, { ...next, lastInvoiceId: targetId });
+    tx.set(numberRef, { invoiceId: targetId, issuedBy: uid, issuedAt: serverTimestamp() });
     tx.set(invoiceRef, {
       ...meta, invoiceNo, grandTotal, orderId: orderId || null,
+      kind: orderId ? 'order' : 'standalone',
+      ...(orderId ? {} : { requestId: invoiceId.slice(`sa_${uid}_`.length) }),
       createdBy: uid, createdAt: serverTimestamp(),
     });
     if (orderRef) {
@@ -234,6 +236,13 @@ export async function commitInvoice({ orderId = null, attemptToken = null, invoi
     }
     return { invoiceId: targetId, invoiceNo, grandTotal, next, alreadySaved: false };
   });
+}
+
+// What identifies "the same stand-alone invoice" on a retry: customer, date, items and total.
+function standaloneKey(inv) {
+  return JSON.stringify([inv.customerId || null, String(inv.customer ?? ''), String(inv.date ?? ''),
+    (inv.items || []).map(it => [Number(it.qty) || 0, String(it.desc ?? ''), Number(it.price) || 0, Number(it.total) || 0]),
+    Number(inv.grandTotal) || 0]);
 }
 
 // Lock -> commit -> (release the lock if the commit failed). The one place
@@ -249,11 +258,17 @@ export async function issueInvoiceForOrder({ orderId, meta, expectedRevision = n
   }
 }
 
-// Stand-alone invoice (not tied to an order). Pass the SAME invoiceId on a
-// retry of the same click; use newStandaloneInvoiceId() for a new invoice.
-export function newStandaloneInvoiceId() { return doc(collection(db, 'invoices')).id; }
-export async function issueStandaloneInvoice({ invoiceId, meta, uid }) {
-  return await commitInvoice({ invoiceId, meta, uid });
+// Stand-alone (walk-in) invoice, manager only. Its id is derived from a request id that the screen keeps until the
+// save succeeds, so a double click or a retry after a lost acknowledgement finds the saved invoice instead of creating
+// another one or using another number. Use newStandaloneRequestId() for a NEW invoice.
+export const standaloneInvoiceIdFor = (uid, requestId) => `sa_${uid}_${requestId}`;
+export function newStandaloneRequestId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return 'r' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+export async function issueStandaloneInvoice({ requestId, meta, uid }) {
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(requestId)) throw new Error('Missing request id.');
+  return await commitInvoice({ invoiceId: standaloneInvoiceIdFor(uid, requestId), meta, uid });
 }
 
 

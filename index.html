@@ -241,13 +241,6 @@
 <!-- ===================== DELIVERIES VIEW (manager) ===================== -->
 <div id="deliveriesView" class="list-section" style="display:none;">
   <div class="card">
-    <h2><span class="dot"></span>Warehouse Location</h2>
-    <p class="numbering-hint">The starting point for routes when a phone's GPS isn't available. Set it once.</p>
-    <p id="depotStatus" style="font-size:0.85rem; margin:6px 0 10px;"></p>
-    <button type="button" class="add-item-btn" id="depotSetBtn">📍 Set warehouse pin</button>
-  </div>
-
-  <div class="card">
     <h2><span class="dot"></span>Delivery Overview</h2>
     <div class="row3" style="align-items:end;">
       <div class="field"><label>Period</label>
@@ -339,9 +332,14 @@
     <p id="perfShownRange" class="numbering-hint" style="margin:4px 0;" aria-live="polite"></p>
     <p id="perfRangeError" class="pin-required-box" style="display:none;" role="alert"></p>
     <p id="perfScheduleWarning" class="pin-required-box" style="display:none;"></p>
+    <div id="scheduleHistoryStartBox" class="pin-required-box" style="display:none;">
+      <strong>Schedule history has not been started.</strong> Until it is, Scheduled / Visited / Coverage cannot be calculated for any date.
+      Starting it records each customer's current schedule as the baseline from today. Earlier dates stay "no reliable history".
+      <div style="margin-top:8px;"><button type="button" class="list-action-btn" id="startScheduleHistoryBtn">Start schedule history now</button></div>
+    </div>
     <div style="overflow-x:auto;">
     <table class="items-table" id="repSummaryTable" style="width:100%;">
-      <thead><tr><th>Rep</th><th>Scheduled</th><th>Visited</th><th>Still due</th><th>Orders</th><th>No order</th><th>Coverage</th><th>Conversion</th></tr></thead>
+      <thead><tr><th>Rep</th><th>Scheduled</th><th>Visited</th><th>Still due</th><th>Orders (visits)</th><th>No order</th><th>Coverage</th><th>Conversion</th><th>Manager-entered orders</th></tr></thead>
       <tbody id="repSummaryBody"></tbody>
     </table>
     </div>
@@ -349,12 +347,13 @@
     <details class="numbering-hint" style="margin-top:10px;" open>
       <summary><strong>How these numbers are worked out</strong></summary>
       <ul style="margin:6px 0 0 18px;">
-        <li><strong>Scheduled</strong>: active customers whose weekly visit day matches each date in the range, added up over the days. Every rep shares the same list.</li>
+        <li><strong>Scheduled</strong>: the customers who were active and had that weekday as their visit day <em>on that date</em>, taken from the dated schedule history, added up over the days. Every rep shares the same list. Customers with no visit day yet are never counted.</li>
         <li><strong>Visited</strong>: scheduled customers this rep recorded at least once that day. A repeat visit is kept in the history but counted once.</li>
         <li><strong>Still due</strong> = Scheduled &minus; Visited.</li>
-        <li><strong>Orders / No order</strong>: every recorded visit with that outcome, including repeat visits and shops that were not scheduled that day.</li>
-        <li><strong>Coverage</strong> = Visited &divide; Scheduled. <strong>Conversion</strong> = Orders &divide; all recorded visits. Shown as &ldquo;&mdash;&rdquo; when the divisor is zero.</li>
-        <li><strong>Schedule changes</strong>: past days are measured against the schedule as it is <em>now</em>. If a customer&rsquo;s day was changed, or a customer was deactivated, earlier Scheduled, Visited and Still due figures can differ from what applied then (Visited counts only customers who are scheduled on that day under today&rsquo;s schedule). Orders and No order come straight from saved visits. The report warns when this may affect the range.</li>
+        <li><strong>Orders (visits) / No order</strong>: every recorded visit with that outcome, including repeat visits and shops that were not scheduled that day.</li>
+        <li><strong>Manager-entered orders</strong>: orders a manager entered on the rep&rsquo;s behalf. They are credited to the rep here, but they are <em>not</em> shop visits and are not in Visited, Coverage, Conversion or the visit lists.</li>
+        <li><strong>Coverage</strong> = Visited &divide; Scheduled. <strong>Conversion</strong> = Orders (visits) &divide; all recorded visits. Shown as &ldquo;&mdash;&rdquo; when the divisor is zero or when no date in the range has a reliable schedule.</li>
+        <li><strong>Schedule changes</strong>: a change applies from the start of the Malawi day on which it was saved (server time) and never alters earlier days. Dates before the schedule history began have no reliable record, so no target or percentage is calculated for them and the report says so.</li>
         <li><strong>Date range</strong>: up to 366 days (both end dates counted). A longer range is refused, never shortened, so every figure covers the same dates. The line &ldquo;Showing&hellip;&rdquo; above the table states the dates the report covers.</li>
       </ul>
     </details>
@@ -464,7 +463,12 @@
 
   <div class="card" id="weeklyScheduleCard" style="display:none;">
     <h2><span class="dot"></span>Weekly Visit Schedule</h2>
-    <p class="numbering-hint">Manager-only. Each active customer gets one day a week — a predictable routine so reps know who to see, and customers learn when to expect a visit.</p>
+    <p class="numbering-hint">Manager-only. You give each customer one day a week; every rep works from the same daily list. Nothing is assigned automatically.</p>
+    <div id="awaitingSchedulingBox" style="display:none; background:#fff4e0; border:1px solid var(--amber); border-radius:8px; padding:10px 12px; margin-bottom:12px;">
+      <strong id="awaitingSchedulingTitle">Awaiting scheduling</strong>
+      <p class="numbering-hint" style="margin:4px 0 8px;">New (or reactivated) customers have no visit day yet. They are not on any rep's list and do not count as targets until you choose a day.</p>
+      <div id="awaitingSchedulingList"></div>
+    </div>
     <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;" id="scheduleDayTabs"></div>
     <div id="scheduleDayList"></div>
   </div>
@@ -630,11 +634,13 @@
         <option value="Approved">Approved</option>
         <option value="Invoicing">Invoicing (in progress)</option>
         <option value="Invoiced">Invoiced</option>
+        <option value="Cancelled">Cancelled</option>
         <option value="all">All Orders</option>
       </select>
   </div>
   <div class="card">
     <h2><span class="dot"></span><span id="orderListTitle">Orders</span></h2>
+    <button type="button" class="list-action-btn" id="enterOrderForRepBtn" style="display:none; margin-bottom:10px;">+ Enter an order for a sales rep</button>
     <div id="bulkApproveBar" style="display:none; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
       <button type="button" class="generate-btn" id="bulkApproveBtn" style="width:auto;" disabled>Approve Selected (0)</button>
       <span id="bulkApproveHint" style="font-size:0.78rem; color:var(--muted);">Tick the orders you want to approve, then approve them all at once.</span>
@@ -672,13 +678,18 @@
       </div>
 
       <div class="numbering-box" id="numberingBox">
-        <div class="numbering-label">Invoice numbering</div>
+        <div class="numbering-label">Invoice numbering <span class="auto-tag">automatic</span></div>
         <div class="row3">
-          <div class="field"><label>Prefix</label><input type="text" id="invPrefix" value="NF-INV"></div>
+          <div class="field"><label>Prefix</label><input type="text" id="invPrefix" readonly></div>
           <div class="field"><label>Year <span class="auto-tag">auto</span></label><input type="text" id="invYearDisplay" readonly></div>
-          <div class="field"><label>Next No.</label><input type="number" id="invCounter" min="1" step="1" value="1"></div>
+          <div class="field"><label>Next No.</label><input type="number" id="invCounter" readonly></div>
         </div>
-        <p class="numbering-hint" id="numberingHint">The year is automatic.</p>
+        <p class="numbering-hint" id="numberingHint">Numbers are issued automatically and never reused. A manager can change the next number with a recorded reason.</p>
+        <button type="button" class="list-action-btn" id="adjustNumberingBtn" style="display:none;">Change next number…</button>
+        <details id="numberingAuditWrap" style="margin-top:8px; display:none;">
+          <summary class="numbering-hint">Numbering change history</summary>
+          <table class="items-table" style="width:100%;"><thead><tr><th>When</th><th>Who</th><th>From</th><th>To</th><th>Reason</th></tr></thead><tbody id="numberingAuditBody"></tbody></table>
+        </details>
       </div>
 
       <div class="row2">
@@ -776,6 +787,75 @@
 </div>
 </div>
 
+</div>
+
+<!-- ===================== CANCEL ORDER MODAL (manager only) ===================== -->
+<div id="cancelOrderModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Cancel order <span id="cancelOrderNoLabel"></span></h2>
+      <button type="button" class="modal-close-btn" id="cancelOrderCloseBtn" aria-label="Close">&times;</button>
+    </div>
+    <p class="numbering-hint" id="cancelOrderHint"></p>
+    <div class="field"><label for="cancelOrderReason">Reason for cancelling (required)</label>
+      <textarea id="cancelOrderReason" maxlength="300" placeholder="e.g. Customer changed their mind"></textarea></div>
+    <p id="cancelOrderError" class="pin-required-box" style="display:none;" role="alert"></p>
+    <div style="display:flex; gap:8px;">
+      <button type="button" class="generate-btn" id="cancelOrderConfirmBtn">Cancel this order</button>
+      <button type="button" class="list-action-btn" id="cancelOrderBackBtn">Keep the order</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== CHANGE INVOICE NUMBERING MODAL (manager only) ===================== -->
+<div id="adjustNumberModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Change next invoice number</h2>
+      <button type="button" class="modal-close-btn" id="adjustNumberCloseBtn" aria-label="Close">&times;</button>
+    </div>
+    <p class="numbering-hint">Current: <strong id="adjustNumberCurrent"></strong>. A number that was already issued can never be used again; the system refuses it.</p>
+    <div class="row2">
+      <div class="field"><label for="adjustPrefix">Prefix</label><input type="text" id="adjustPrefix" maxlength="20"></div>
+      <div class="field"><label for="adjustCounter">Next number</label><input type="number" id="adjustCounter" min="1" step="1"></div>
+    </div>
+    <div class="field"><label for="adjustReason">Reason (required)</label><textarea id="adjustReason" maxlength="300" placeholder="e.g. Resuming after paper invoice book ends at 0250"></textarea></div>
+    <p id="adjustNumberError" class="pin-required-box" style="display:none;" role="alert"></p>
+    <div style="display:flex; gap:8px;">
+      <button type="button" class="generate-btn" id="adjustNumberSaveBtn">Save change</button>
+      <button type="button" class="list-action-btn" id="adjustNumberBackBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MANAGER-ENTERED ORDER MODAL (manager only) ===================== -->
+<div id="managerOrderModal" class="modal-overlay" style="display:none;">
+  <div class="modal-box card">
+    <div class="modal-header">
+      <h2><span class="dot"></span>Enter an order for a sales rep</h2>
+      <button type="button" class="modal-close-btn" id="moCloseBtn" aria-label="Close">&times;</button>
+    </div>
+    <p class="numbering-hint">The order is credited to the rep you choose and recorded as entered by you. It does not create a shop visit.</p>
+    <div class="field"><label for="moRep">Sales rep</label><select id="moRep"></select></div>
+    <div class="field" style="position:relative;">
+      <label for="moCustSearch">Customer</label>
+      <input type="text" id="moCustSearch" placeholder="Search by name..." autocomplete="off">
+      <div id="moCustSuggestions" class="suggestions-dropdown" style="display:none;"></div>
+      <p id="moCustSelected" class="numbering-hint"></p>
+    </div>
+    <div class="quick-add-label">Quick add — tap a product</div>
+    <div class="quick-add-grid" id="moQuickAddGrid"></div>
+    <table class="items-table" id="moItemsTable">
+      <thead><tr><th class="qty-col">Qty</th><th>Description</th><th class="price-col">Unit Price</th><th class="del-col"></th></tr></thead>
+      <tbody id="moItemsBody"></tbody>
+    </table>
+    <div class="field"><label for="moNotes">Notes</label><textarea id="moNotes" placeholder="Optional"></textarea></div>
+    <p id="moError" class="pin-required-box" style="display:none;" role="alert"></p>
+    <div style="display:flex; gap:8px;">
+      <button type="button" class="generate-btn" id="moSaveBtn">Save order</button>
+      <button type="button" class="list-action-btn" id="moBackBtn">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- ===================== EDIT ORDER MODAL (manager only) ===================== -->

@@ -70,6 +70,7 @@ function requireActiveCustomer(snap) {
   if (!snap.exists()) throw new Error('That customer no longer exists.');
   const c = snap.data();
   if (c.active === false) throw new Error('That customer is inactive and cannot be visited.');
+  if (c.mergeLock) throw makeError('That customer is being merged with another customer right now. Try again in a few minutes.', { code: 'customer-merging' });
   return c;
 }
 
@@ -195,7 +196,7 @@ export async function submitOrderWithVisit({ customerId, items, notes, requestId
       createdAt: serverTimestamp(), updatedAt: serverTimestamp(), submittedAt: serverTimestamp(),
       approvedAt: null, rejectedAt: null, cancelledAt: null, invoicedAt: null,
       managerNotes: '', invoiceId: null, invoiceNo: null,
-      visitId: visitRef.id,
+      visitId: visitRef.id, source: 'rep-visit',
     });
     tx.set(visitRef, {
       ...visitBase({ customerId, customer, uid, email, requestId, now }),
