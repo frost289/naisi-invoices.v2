@@ -1,21 +1,46 @@
-# Testing the final rules on your Windows PC (fake data only)
+# Testing the final candidate on Windows (fake data only, nothing touches live Firebase)
 
-Nothing here touches the live Firebase project. Everything runs on your own computer against the Firebase *emulator*.
+## Supported versions (tested by the QA review; older versions are NOT supported)
+| Tool | Version |
+|---|---|
+| Node.js | **24.12 or newer** (24 LTS; QA used 24.19.0). `@firebase/rules-unit-testing` 6.0.0 requires >= 24.12. The old "Node 20+" statement was wrong. |
+| npm | 10 or newer (QA used 12.2.0). npm 12 blocks dependency install scripts; nothing here needs them. |
+| Java | **21** (Temurin, QA used 21.0.12). Needed only by the Firestore emulator. |
+| Firebase CLI | 14.27.0 (installed by `npm ci` in `tests`, do not install another) |
+
+Do NOT run `firebase login`, `firebase deploy` or `git push`. Nothing in these steps needs them.
 
 ## One-time setup
-1. Install **Node.js 20 or newer** (nodejs.org) and **Java 11 or newer** (for example Temurin, adoptium.net). Restart the PC after installing.
-2. Unzip the app folder somewhere simple, for example `C:\naisi-app`.
+1. Install Node.js 24 and Java 21, then restart the PC. In a new Command Prompt, `node --version` must print v24.12 or higher and `java -version` must print 21.
+2. Unzip the app folder, for example to `C:\naisi-app`.
+3. Install the test browser once: open Command Prompt in `C:\naisi-app\tests` and run `npm ci` then `npm run e2e:browser-setup`.
 
-## A. Run the automatic rules tests (about 3 minutes, most important)
-1. Double-click **`run-rules-tests.bat`**. The first run downloads the emulator (about 60 MB).
-2. When it finishes it shows PASS or FAIL for every test and saves everything to **`tests\rules-test-output.txt`**.
-3. Send that file back. Do **not** change the rules or tests to make a failure go away: a failure means the rules and the app disagree, and that is what we need to know.
+## A. Automated tests (run from `C:\naisi-app\tests`, after `npm ci`)
+| Command | What it runs | Expected |
+|---|---|---|
+| `npm test` | 182 unit tests (in-memory stand-in) | 12 files, 182 passed |
+| `npm run test:rules` | the rules tests against `rules\firestore.rules.FINAL-CANDIDATE` on the local Firestore emulator (first run downloads about 60 MB) | 99 tests, all passed |
+| `npm run test:e2e` | 25 browser checks E1-E25 (in-memory backend) | 25 PASS |
+| `npm run test:all` | all three | |
 
-## B. Try the real app by hand against the emulator
-1. Double-click **`start-emulators.bat`** and leave the window open (viewer: http://127.0.0.1:4000).
-2. Double-click **`run-app-on-emulators.bat`** (loads fake shops, products and orders, then starts the app).
-3. Open the address it prints (usually http://localhost:5173). Click Sign in with Google. In the emulator popup choose **Add new account**, type one of these emails and press Sign in:
-   `mgr@example.com` (manager), `rep1@example.com` / `rep2@example.com` (sales reps), `deliv@example.com` (deliverer), `stranger@example.com` (no role).
-4. Quick check list: as rep1 open Today's Visits, record one "No order" visit and one order; as mgr open the visit report and approve and invoice the order; as deliv deliver it; as stranger confirm nothing opens.
+The same is available by double-clicking `run-rules-tests.bat` (rules only; it saves `tests\rules-test-output.txt`).
+Keep the complete console output of every command and send it back unedited. A failure is information: do not change a test or a rule to make it pass.
 
-If port 8080 is busy, close the other program (or tell us; the ports are in `firebase.emulators.json`).
+## B. The real app on the local emulators (manual walkthrough)
+1. Double-click `start-emulators.bat` and leave it open (viewer: http://127.0.0.1:4000).
+2. Double-click `run-app-on-emulators.bat` (creates the fake accounts and data, then starts the app at the address it prints, usually http://localhost:5173).
+3. Log in with email and password `Passw0rd!`:
+   `mgr@example.com` (manager), `rep1@example.com` and `rep2@example.com` (sales reps), `deliv@example.com` (deliverer), `stranger@example.com` (no role).
+4. Follow ONE order through all roles:
+   - rep1: Today's Visits, pick a shop, "Order placed", add items, submit. Then a second shop: "No order", try submitting with no reason (must refuse), with "Other" and no explanation (must refuse), then a proper reason.
+   - rep2: the same shops are listed, with its own progress.
+   - mgr: visit report (numbers match), approve rep1's order, generate the invoice, check the invoice list and numbers.
+   - deliv: the order is on the delivery list, mark it delivered.
+   - stranger: nothing opens.
+   - mgr: add a customer, change a visit day, deactivate and reactivate, merge two customers.
+5. Write PASS or FAIL beside each step, with a screenshot of any failure.
+
+If port 8080 or 9099 is busy, close the other program. Ports are set in `firebase.emulators.json`.
+
+## If a command fails to start (Windows "spawn EPERM", antivirus or locked-down PC)
+The test configs already avoid helper processes (esbuild disabled, one worker thread, native config loading). If `npm run test:rules` still reports it cannot start Java or the CLI, run it from a normal (non-sandboxed) Command Prompt as your own user, and send us the exact message. Do not edit the configs.

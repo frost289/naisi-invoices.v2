@@ -1,34 +1,20 @@
 # Tests
 
-## Run (mock tests - no Firebase, no network)
+## Supported versions
+Node.js **24.12+** (24 LTS), npm 10+, Java **21** (emulator only), firebase-tools 14.27.0 (installed by `npm ci` in this folder). Details and Windows steps: `../docs/WINDOWS-TESTING.md`.
 
-    cd tests
-    npm install
-    npm test
+## Commands (after `npm ci` in `tests`)
 
-Runs `vitest` with `vitest.config.mjs`. All paths are relative to this folder; nothing depends on a particular machine. Node 20+.
+| Command | What it proves | What it does NOT prove |
+|---|---|---|
+| `npm test` | 12 files / 182 tests: the app's real `../src` code against an in-memory Firestore stand-in (transactions, retries, failure injection) | the real SDK, network, security rules, a browser |
+| `npm run test:rules` | 99 tests: the FINAL rules file (`../rules/firestore.rules.FINAL-CANDIDATE`) on the local Firestore emulator for manager, reps, deliverer, stranger and anonymous, including the real app functions (visits, orders, customers, invoicing, merge, products) and one order through rep -> manager -> deliverer | the screens |
+| `npm run e2e:browser-setup` then `npm run test:e2e` | 25 real-browser checks E1-E25 of the daily-visit workflow against an in-memory backend | the real emulators or rules |
+| `npm run test:all` | the three above | the manual walkthrough in `../docs/WINDOWS-TESTING.md` part B |
 
-## What these tests ARE
+The rules tests route `firebase/firestore` and `@firebase/rules-unit-testing` to one CommonJS copy of the SDK (`helpers/*-cjs.mjs`, regenerate with `node helpers/make-cjs-wrappers.mjs`); without that the app code and the test fixtures use two SDK builds and `doc()` rejects the Firestore object before any rule runs. This changes no security expectation. The test configs also disable esbuild and use one worker thread so that no helper processes are spawned. `NAISI_RULES_PATH` overrides the rules file under test.
 
-They run the app's real source files (`../src/*.js`) against an **in-memory stand-in for Firestore** (`helpers/fakeFirestore.js`) that models transactions (reads before writes, all-or-nothing commit, re-run on conflict, max 5 attempts), plus failure injection at the commit (`hooks.failCommit`, `hooks.failAfterCommit`) and a controllable clock. The bulk window runs in jsdom.
-
-## What they are NOT
-
-They do not exercise the real Firebase SDK, the network, offline persistence, retry timing, **security rules**, a real browser, jsPDF, or file downloads. A passing run does not prove the rules accept the new writes or that the screens work. The handlers in `src/main.js` (button wiring) are not unit-tested; they are covered by the manual list in `docs/DEVELOPER-NOTES.md`.
-
-## Emulator tests (rules) - written, NOT RUN
-
-    cd tests
-    NAISI_RULES_PATH=/absolute/path/to/firestore.rules npm run test:rules
-
-Needs Java and the Firestore emulator (`firebase-tools` downloads it). Adapt `seedUsers()` in `rules/invoicing.rules.test.js` to your manager check first. Without `NAISI_RULES_PATH` the file is skipped. These tests encode the behaviour proposed in `../rules/invoicing.rules.fragment`; failures against your current rules show the gaps.
-
-## Browser tests (daily visits) - run against an in-memory stand-in, NOT the emulators
-
-    cd tests
-    npm run test:e2e        # about 100 s; builds the app with Firebase aliased to local fakes, then drives headless Chromium (phone viewport, America/Los_Angeles time zone)
-
-`e2e/` builds the real app with `firebase/*` replaced by `e2e/firestoreBrowser.js` and `e2e/authFake.js` (in-memory, data persisted to localStorage so refresh can be tested; failure injection for failed saves and lost acknowledgements). Non-local network requests are aborted. 25 checks (E1-E25) cover the visit workflow, including changed retries (E22), slow report answers (E23) and the report range limit (E24). This is NOT the Firestore or Auth emulator (the emulator download is blocked in the build environment) and it knows nothing about security rules. Setting `VITE_USE_EMULATORS=true` at build time makes `src/firebase.js` use emulators on 8080/9099 for anyone who can run them. Checks that need the emulators or the real rules are BLOCKED.
+Browser tests build the real app with `firebase/*` replaced by in-memory fakes (`e2e/firestoreBrowser.js`, `e2e/authFake.js`); data persists to localStorage so a refresh can be tested, with failure injection for failed saves and lost acknowledgements. Setting `VITE_USE_EMULATORS=true` at build time makes `src/firebase.js` use the emulators on 8080/9099 (see `run-app-on-emulators.bat`).
 
 ## Files
 

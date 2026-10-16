@@ -301,9 +301,15 @@ describe('E. order <-> visit <-> counter integrity (from BOTH sides)', () => {
     b.set(doc(db, 'visits', V), placedVisit({ repId: 'rep2', repEmail: 'rep2@example.com' }));
     await assertFails(b.commit());
   });
-  it('legacy submitOrder path (addDoc order, then counter) is refused for reps', async () => {
+  it('legacy submitOrder path (addDoc order with NO visitId field, then counter) is refused for reps with permission-denied', async () => {
     const db = as('rep1');
-    await assertFails(addDoc(collection(db, 'orders'), orderDoc({ visitId: undefined })));
+    const { visitId, ...legacyOrder } = orderDoc();          // a valid legacy payload: the field is OMITTED, never undefined
+    if ('visitId' in legacyOrder) throw new Error('fixture error: visitId must be omitted');
+    await assertDenied(addDoc(collection(db, 'orders'), legacyOrder));
+    // ...and the counter-first half of the legacy path is refused too (no order in the same commit)
+    await assertDenied(setDoc(doc(db, 'orderCounters', 'naisiOrder'), { counter: 42 }));
+    const stored = await readAsAdmin((adb) => getDocs(query(collection(adb, 'orders'), where('createdBy', '==', 'rep1'), where('orderNo', '==', 'ORD-2026-0041'))));
+    if (stored.size !== 0) throw new Error('the refused legacy order was stored');
   });
   it('manager keeps full order creation (documented decision) and manager order workflow still works', async () => {
     const db = as('mgr');
@@ -497,15 +503,31 @@ describe('H. real app functions as authenticated users', () => {
     const a = await app('rep1');
     await a.visits.recordNoOrderVisit({ customerId: 'c1', reason: 'Other', notes: 'Owner at a funeral', requestId: 'req-bbbbbbbb-2222', ...rep, now: NOW });
   });
-  it('rep: submitOrderWithVisit saves order + visit + counter; retry is idempotent; changed retry conflicts; counter moved once', async () => {
+  it('rep: submitOrderWithVisit saves order + visit + counter; counter 41 -> 42, still 42 after an identical retry and after a changed-request conflict; exactly one linked order and visit', async () => {
+    const counterNow = async () => (await readAsAdmin((adb) => getDoc(doc(adb, 'orderCounters', 'naisiOrder')))).data().counter;
+    const linked = async () => ({
+      orders: (await readAsAdmin((adb) => getDocs(query(collection(adb, 'orders'), where('visitId', '==', V))))).docs,
+      visits: (await readAsAdmin((adb) => getDocs(query(collection(adb, 'visits'), where('requestId', '==', REQ))))).docs,
+    });
+    if ((await counterNow()) !== 41) throw new Error('fixture: counter should start at 41');
     const a = await app('rep1');
     const r1 = await a.visits.submitOrderWithVisit({ customerId: 'c1', items, notes: 'n', requestId: REQ, ...rep, now: NOW });
+    if (r1.alreadySaved !== false) throw new Error('first save should not be alreadySaved: ' + JSON.stringify(r1));
+    if ((await counterNow()) !== 42) throw new Error('counter should be 42 after one order, is ' + (await counterNow()));
     const r2 = await a.visits.submitOrderWithVisit({ customerId: 'c1', items, notes: 'n', requestId: REQ, ...rep, now: NOW });
-    if (r1.alreadySaved !== false || r2.alreadySaved !== true || r1.orderId !== r2.orderId) throw new Error(`unexpected: ${JSON.stringify([r1, r2])}`);
+    if (r2.alreadySaved !== true || r2.orderId !== r1.orderId || r2.orderNo !== r1.orderNo) throw new Error('identical retry should return the saved result: ' + JSON.stringify([r1, r2]));
+    if ((await counterNow()) !== 42) throw new Error('counter should stay 42 after an identical retry, is ' + (await counterNow()));
     let code; try { await a.visits.submitOrderWithVisit({ customerId: 'c1', items: [{ ...items[0], qty: 3, total: 300 }], notes: 'n', requestId: REQ, ...rep, now: NOW }); } catch (e) { code = e.code; }
     if (code !== 'visit-conflict') throw new Error('expected visit-conflict, got ' + code);
-    const counter = await env.withSecurityRulesDisabled(async (ctx) => (await getDoc(doc(ctx.firestore(), 'orderCounters', 'naisiOrder'))).data().counter);
-    if (counter !== 42) throw new Error('counter should be 42, is ' + counter);
+    if ((await counterNow()) !== 42) throw new Error('counter should stay 42 after a conflict, is ' + (await counterNow()));
+    const { orders, visits } = await linked();
+    if (orders.length !== 1 || visits.length !== 1) throw new Error(`expected exactly one linked order and visit, got ${orders.length} and ${visits.length}`);
+    const o = orders[0].data(), v = visits[0].data();
+    if (orders[0].id !== r1.orderId || visits[0].id !== r1.visitId) throw new Error('ids differ from the returned result');
+    if (v.orderId !== orders[0].id || o.visitId !== visits[0].id) throw new Error('order and visit do not point at each other');
+    if (v.orderNo !== o.orderNo || v.orderValue !== o.grandTotal || v.customerId !== o.customerId || v.repId !== o.createdBy) throw new Error('order and visit disagree');
+    if (o.grandTotal !== 200 || o.items[0].qty !== 2) throw new Error('the conflicting request changed the saved order: ' + JSON.stringify(o.items));
+    if (!/^ORD-\d{4}-0041$/.test(o.orderNo)) throw new Error('unexpected order number ' + o.orderNo);
   });
   it('rep: two different shops get two different order numbers', async () => {
     const a = await app('rep1');
@@ -521,23 +543,71 @@ describe('H. real app functions as authenticated users', () => {
     const a = await app('rep1');
     const id = await a.customers.addCustomer({ name: 'Rep Shop', phone: '', location: 'Area 3', lat: -13.9, lng: 33.7, uid: 'rep1', assignedDay: 'Tue' });
     if (!id) throw new Error('no id');
-    await assertRejects(a.orders.submitOrder({ customerId: 'c1', customerName: 'Shop', customerPhone: '1', customerLocation: 'x', customerLat: -13.9, customerLng: 33.7, items, notes: '', ...rep }));
+    await assertDenied(a.orders.submitOrder({ customerId: 'c1', customerName: 'Shop', customerPhone: '1', customerLocation: 'x', customerLat: -13.9, customerLng: 33.7, items, notes: '', ...rep }));
   });
   it('rep: cannot deactivate a customer or change its day with the real app functions', async () => {
     const a = await app('rep1');
-    await assertRejects(a.customers.deactivateCustomer('c1'));
-    await assertRejects(a.customers.setCustomerVisitDay('c1', 'Fri'));
+    await assertDenied(a.customers.deactivateCustomer('c1'));
+    await assertDenied(a.customers.setCustomerVisitDay('c1', 'Fri'));
     await a.customers.updateCustomer('c1', { name: 'Shop', phone: '0888', location: 'Area 25' });
   });
-  it('manager: deactivate, reactivate, set day, merge customers (re-points visits/orders/invoices)', async () => {
+  it('manager: deactivate, reactivate and set the visit day through the real functions', async () => {
     const a = await app('mgr');
     await a.customers.setCustomerVisitDay('c1', 'Fri');
     await a.customers.deactivateCustomer('c1');
+    let c = (await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c1')))).data();
+    if (c.active !== false || c.assignedDay !== null) throw new Error('deactivate did not apply: ' + JSON.stringify(c));
     await a.customers.reactivateCustomer('c1');
+    c = (await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c1')))).data();
+    if (c.active !== true) throw new Error('reactivate did not apply');
+  });
+  it('manager: mergeCustomers(keepId, mergeId) re-links orders, visits and invoices, removes only the merged customer, and changes no financial value', async () => {
+    // c1 = customer to keep, c2 = duplicate to remove (its record is deleted by the merge)
+    const seed = {
+      orders: { m1: { orderNo: 'ORD-2026-0101', status: 'Approved', customerId: 'c2', customerName: 'Closed Shop', customerPhone: '111', customerLocation: 'Old', items: [{ qty: 2, price: 100, total: 200, productId: 'p1' }], grandTotal: 200, createdBy: 'rep1' },
+                m2: { orderNo: 'ORD-2026-0102', status: 'Invoiced', customerId: 'c2', customerName: 'Closed Shop', customerPhone: '111', customerLocation: 'Old', items: [{ qty: 1, price: 50, total: 50, productId: 'p1' }], grandTotal: 50, createdBy: 'rep1', invoiceId: 'ord_m2', invoiceNo: 'NF-INV-2026-0200' } },
+      visits: { v_rep1_merge1: { repId: 'rep1', outcome: 'No Order', reasonNoOrder: 'Shop closed', customerId: 'c2', customerName: 'Closed Shop', date: '2026-10-14' } },
+      invoices: { ord_m2: { orderId: 'm2', invoiceNo: 'NF-INV-2026-0200', customerId: 'c2', customer: 'Closed Shop', phone: '111', location: 'Old', items: [{ qty: 1, price: 50, total: 50 }], grandTotal: 50, createdBy: 'mgr' } },
+    };
     await env.withSecurityRulesDisabled(async (ctx) => {
-      await setDoc(doc(ctx.firestore(), 'visits', 'v_rep1_merge'), { repId: 'rep1', customerId: 'c2', customerName: 'Closed Shop' });
+      for (const [coll, docs] of Object.entries(seed)) for (const [id, data] of Object.entries(docs)) await setDoc(doc(ctx.firestore(), coll, id), data);
     });
-    await a.customers.mergeCustomers('c1', ['c2']);
+    const before = {};
+    for (const [coll, docs] of Object.entries(seed)) for (const id of Object.keys(docs)) before[`${coll}/${id}`] = (await readAsAdmin((adb) => getDoc(doc(adb, coll, id)))).data();
+    const keepBefore = (await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c1')))).data();
+    const countAll = async () => ({ orders: (await readAsAdmin((adb) => getDocs(collection(adb, 'orders')))).size, visits: (await readAsAdmin((adb) => getDocs(collection(adb, 'visits')))).size, invoices: (await readAsAdmin((adb) => getDocs(collection(adb, 'invoices')))).size });
+    const countsBefore = await countAll();
+
+    const a = await app('mgr');
+    const moved = await a.customers.mergeCustomers('c1', 'c2');
+    if (moved.orders !== 2 || moved.visits !== 1 || moved.invoices !== 1) throw new Error('unexpected move counts ' + JSON.stringify(moved));
+
+    const gone = await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c2')));
+    if (gone.exists()) throw new Error('the merged customer still exists');
+    const keep = (await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c1')))).data();
+    if (JSON.stringify(keep) !== JSON.stringify(keepBefore)) throw new Error('the retained customer was changed: ' + JSON.stringify(keep));
+    const countsAfter = await countAll();
+    if (JSON.stringify(countsAfter) !== JSON.stringify(countsBefore)) throw new Error('records were lost or created: ' + JSON.stringify([countsBefore, countsAfter]));
+
+    for (const key of Object.keys(before)) {
+      const [coll, id] = key.split('/');
+      const after = (await readAsAdmin((adb) => getDoc(doc(adb, coll, id)))).data();
+      if (after.customerId !== 'c1') throw new Error(`${key} still points at ${after.customerId}`);
+      // every field the merge does not own is unchanged: money, numbers, status, items, links
+      for (const f of ['orderNo', 'status', 'items', 'grandTotal', 'invoiceId', 'invoiceNo', 'orderId', 'createdBy', 'repId', 'outcome', 'reasonNoOrder', 'date']) {
+        if (JSON.stringify(after[f]) !== JSON.stringify(before[key][f])) throw new Error(`${key}.${f} changed: ${JSON.stringify(before[key][f])} -> ${JSON.stringify(after[f])}`);
+      }
+      const nameField = coll === 'invoices' ? 'customer' : 'customerName';
+      if (after[nameField] !== keepBefore.name) throw new Error(`${key} shows ${after[nameField]}, expected ${keepBefore.name}`);
+    }
+  });
+  it('rep: cannot merge customers (the merge is refused by the rules, nothing is moved)', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), 'visits', 'v_rep1_mm'), { repId: 'rep1', customerId: 'c2', customerName: 'Closed Shop', outcome: 'No Order' }); });
+    const a = await app('rep1');
+    await assertRejects(a.customers.mergeCustomers('c1', 'c2'));
+    const v = (await readAsAdmin((adb) => getDoc(doc(adb, 'visits', 'v_rep1_mm')))).data();
+    if (v.customerId !== 'c2') throw new Error('a rep moved a visit');
+    if (!(await readAsAdmin((adb) => getDoc(doc(adb, 'customers', 'c2')))).exists()) throw new Error('a rep deleted a customer');
   });
   it('manager: full invoicing through the real functions (issueInvoiceForOrder, issueStandaloneInvoice, begin/revert)', async () => {
     const a = await app('mgr');
@@ -561,6 +631,101 @@ describe('H. real app functions as authenticated users', () => {
   });
 });
 
+// ---- Known gaps in the SUPPLIED rules, recorded as tests so they stay visible (owner decision needed; see docs/FINAL-RULES.md) ----
+describe('J. documented policy gaps (current behaviour, not endorsed)', () => {
+  it('DECISION: manager "cancel and delete" of an Approved order is refused (orders delete is false in the supplied rules); stock and order stay unchanged', async () => {
+    const stockBefore = (await readAsAdmin((adb) => getDoc(doc(adb, 'products', 'p1')))).data().stockOnHand;
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'orders', 'oDel'), { orderNo: 'ORD-2026-0090', status: 'Approved', stockApplied: true, items: [{ qty: 2, price: 100, total: 200, productId: 'p1', desc: 'Amanda' }], grandTotal: 200, createdBy: 'rep1' });
+    });
+    holder.db = as('mgr'); vi.resetModules();
+    const stock = await import('../../src/stock.js');
+    await assertDenied(stock.cancelApprovedOrderAndDelete({ id: 'oDel' }, { uid: 'mgr', email: 'mgr@example.com' }));
+    const o = await readAsAdmin((adb) => getDoc(doc(adb, 'orders', 'oDel')));
+    if (!o.exists() || o.data().status !== 'Approved') throw new Error('the order changed although the delete was refused');
+    const stockAfter = (await readAsAdmin((adb) => getDoc(doc(adb, 'products', 'p1')))).data().stockOnHand;
+    if (stockAfter !== stockBefore) throw new Error('stock changed although the transaction was refused');
+  });
+  it('DECISION: nobody can read or write config/depot (the supplied rules have no rule for it), so the depot-pin screen cannot save', async () => {
+    await assertDenied(setDoc(doc(as('mgr'), 'config', 'depot'), { lat: -13.9, lng: 33.7 }));
+    await assertDenied(getDoc(doc(as('mgr'), 'config', 'depot')));
+  });
+});
+
+// =============================================================================================
+// I. ONE order through the whole chain with the REAL app functions under the REAL rules:
+//    rep records it -> manager sees it in the report query, approves it (stock), invoices it -> deliverer delivers it.
+describe('I. rep -> manager -> deliverer chain for the same order', () => {
+  it('the same order moves through every role; stock moves once; one invoice; every record links', async () => {
+    const NOW = () => new Date('2026-10-15T08:00:00Z');
+    const rep = { uid: 'rep1', email: 'rep1@example.com' };
+    const items = [{ qty: 2, desc: 'Amanda 100g', price: 100, total: 200, productId: 'p1' }];
+    const get = async (...p) => (await readAsAdmin((adb) => getDoc(doc(adb, ...p)))).data();
+    const load = async (who) => { holder.db = as(who); vi.resetModules(); return { visits: await import('../../src/visits.js'), orders: await import('../../src/orders.js'), stock: await import('../../src/stock.js'), reports: await import('../../src/reports.js') }; };
+
+    // 1. rep: order + visit saved together
+    const r = await (await load('rep1')).visits.submitOrderWithVisit({ customerId: 'c1', items, notes: 'chain', requestId: REQ, ...rep, now: NOW });
+    const mine = await (await load('rep1')).visits.fetchMyVisitsForDate('rep1', '2026-10-15');
+    if (mine.length !== 1 || mine[0].orderId !== r.orderId) throw new Error('rep cannot see its own visit');
+
+    // 2. manager: the report query sees the rep's visit; approves (stock deducted once); repeating the approval changes nothing
+    const m = await load('mgr');
+    const seen = await m.reports.fetchVisitsInRange('2026-10-15', '2026-10-15');
+    if (!seen.some((v) => v.id === r.visitId)) throw new Error('manager report does not include the rep visit');
+    await m.stock.approveOrderWithStock({ id: r.orderId, items }, { uid: 'mgr', email: 'mgr@example.com' });
+    if ((await get('products', 'p1')).stockOnHand !== 8) throw new Error('stock should be 10 - 2 = 8');
+    let again; try { await m.stock.approveOrderWithStock({ id: r.orderId, items }, { uid: 'mgr', email: 'mgr@example.com' }); } catch (e) { again = e; }
+    if (!again) throw new Error('a second approval must be refused');
+    if ((await get('products', 'p1')).stockOnHand !== 8) throw new Error('a repeated approval changed stock');
+    const moves = await readAsAdmin((adb) => getDocs(query(collection(adb, 'stockMovements'), where('orderId', '==', r.orderId))));
+    if (moves.size !== 1) throw new Error('expected exactly one stock movement, got ' + moves.size);
+
+    // 3. manager: invoice it (lock -> atomic commit)
+    const inv = await m.orders.issueInvoiceForOrder({ orderId: r.orderId, meta: { items, customer: 'Shop', customerId: 'c1' }, uid: 'mgr' });
+    if (inv.invoiceId !== 'ord_' + r.orderId || !/-0370$/.test(inv.invoiceNo)) throw new Error('unexpected invoice ' + JSON.stringify(inv));
+    if ((await get('counters', 'naisiInvoice')).counter !== 371) throw new Error('invoice counter should be 371');
+    const ordInv = await get('orders', r.orderId);
+    if (ordInv.status !== 'Invoiced' || ordInv.invoiceId !== inv.invoiceId || ordInv.invoiceNo !== inv.invoiceNo) throw new Error('order not Invoiced correctly: ' + JSON.stringify(ordInv));
+    let second; try { await m.orders.issueInvoiceForOrder({ orderId: r.orderId, meta: { items, customer: 'Shop', customerId: 'c1' }, uid: 'mgr' }); } catch (e) { second = e; }
+    if (!second) throw new Error('a second invoice for the same order must be refused');
+    if ((await get('counters', 'naisiInvoice')).counter !== 371) throw new Error('the refused second invoice used a number');
+
+    // 4. deliverer: sees it in the pending list, delivers it
+    const d = await load('deliv');
+    holder.db = as('deliv');
+    const dl = await import('../../src/deliveries.js');
+    const pending = await dl.fetchPendingDeliveries();
+    if (!pending.some((o) => o.id === r.orderId)) throw new Error('deliverer does not see the invoiced order');
+    await d.orders.markOrderDelivered(r.orderId, { uid: 'deliv', email: 'deliv@example.com' });
+    const done = await get('orders', r.orderId);
+    if (done.status !== 'Delivered' || done.deliveredBy !== 'deliv') throw new Error('not delivered: ' + JSON.stringify(done));
+
+    // 5. unrelated users still see nothing of it
+    const sdb = as('stranger');
+    await assertDenied(getDoc(doc(sdb, 'orders', r.orderId)));
+    await assertDenied(getDoc(doc(sdb, 'invoices', inv.invoiceId)));
+    await assertDenied(getDoc(doc(as('rep2'), 'orders', r.orderId)));
+    await assertDenied(getDoc(doc(as('rep2'), 'visits', r.visitId)));
+  });
+});
+
+// Reads with the rules disabled (test inspection only) and RETURNS the callback's value. The installed
+// withSecurityRulesDisabled helper returns void, so the value is captured here.
+async function readAsAdmin(fn) {
+  let out;
+  await env.withSecurityRulesDisabled(async (ctx) => { out = await fn(ctx.firestore()); });
+  return out;
+}
+// A refusal BY THE RULES: the error must be permission-denied. Any other error (a bad payload, a bug) fails the test.
+async function assertDenied(promise) {
+  let err = null; try { await promise; } catch (e) { err = e; }
+  if (!err) throw new Error('expected permission-denied, but the operation succeeded');
+  const code = err.code || '';
+  if (code !== 'permission-denied' && !/PERMISSION_DENIED|insufficient permissions/i.test(String(err.message))) {
+    throw new Error('expected permission-denied but got ' + (code || '(no code)') + ': ' + err.message);
+  }
+}
+// Any refusal (used where the APP's own validation may refuse before the rules are reached).
 async function assertRejects(promise) {
   let failed = false; try { await promise; } catch { failed = true; }
   if (!failed) throw new Error('expected the operation to be refused, but it succeeded');

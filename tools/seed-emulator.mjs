@@ -1,7 +1,7 @@
 // Writes FAKE sample data into a RUNNING LOCAL Firestore emulator (127.0.0.1:8080). Never touches a live project:
 // it refuses to run unless FIRESTORE_EMULATOR_HOST (or the default 127.0.0.1:8080) answers as the emulator.
 //   node tools/seed-emulator.mjs            (project id defaults to naisi-invoices, the id the app is configured with)
-// Fake logins (use "Sign in with Google" in the app, then "Add new account" in the emulator popup and type the email):
+// Fake logins (the app signs in with email + password; these accounts are created in the Auth emulator, password Passw0rd!):
 //   mgr@example.com (manager)  rep1@example.com, rep2@example.com (sales reps)  deliv@example.com (deliverer)  stranger@example.com (no role)
 const HOST = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8080';
 const PROJECT = process.env.NAISI_PROJECT || 'naisi-invoices';
@@ -31,6 +31,20 @@ async function put(path, data) {
     body: JSON.stringify({ fields: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, enc(v)])) }),
   });
   if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
+}
+
+// ---- fake Auth accounts (Auth emulator, 127.0.0.1:9099). Skipped with a warning if it is not running. ----
+const AUTH = process.env.FIREBASE_AUTH_EMULATOR_HOST || '127.0.0.1:9099';
+const PASSWORD = 'Passw0rd!';
+for (const email of ['mgr@example.com', 'rep1@example.com', 'rep2@example.com', 'deliv@example.com', 'stranger@example.com']) {
+  try {
+    const r = await fetch(`http://${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=fake-api-key`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: PASSWORD, returnSecureToken: false }) });
+    const j = await r.json();
+    if (r.ok) console.log(`Auth account created: ${email}`);
+    else if (j?.error?.message === 'EMAIL_EXISTS') console.log(`Auth account already exists: ${email}`);
+    else console.warn(`Auth account ${email}: ${JSON.stringify(j)}`);
+  } catch { console.warn(`Auth emulator not reachable at ${AUTH}: accounts were NOT created (start-emulators.bat starts it).`); break; }
 }
 
 const now = new Date();

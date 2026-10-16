@@ -10,7 +10,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // tests/README.md for what they do and do not prove.
 export default defineConfig({
   root: here,
-  test: { include: ['unit/**/*.test.js'] },
+  // esbuild:false + threads/1 worker: no helper processes are spawned (some locked-down Windows setups refuse them); the sources are plain JavaScript.
+  esbuild: false,
+  test: { include: ['unit/**/*.test.js'], pool: 'threads', maxWorkers: 1, minWorkers: 1, fileParallelism: false },
   resolve: {
     alias: [
       { find: 'firebase/firestore', replacement: path.join(here, 'helpers/fakeFirestore.js') },

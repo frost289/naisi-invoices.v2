@@ -2,7 +2,7 @@
 
 File: `rules/firestore.rules.FINAL-CANDIDATE` (one complete file, all collections, all roles). Built from the rules supplied 2026-10-16; every
 rule not listed below is unchanged. **Not deployed. Not yet run on an emulator by its author** (the emulator cannot be downloaded in the
-authoring environment). Run `run-rules-tests.bat` (see `docs/WINDOWS-TESTING.md`) before anyone treats it as safe.
+authoring environment; the QA review ran an earlier copy of the tests there: 91 of 94 passed, the 3 failures were test mistakes, now corrected). Run `npm run test:rules` (see `docs/WINDOWS-TESTING.md`) before anyone treats it as safe.
 
 ## Changes by role
 | Role | Change |
@@ -25,3 +25,15 @@ authoring environment). Run `run-rules-tests.bat` (see `docs/WINDOWS-TESTING.md`
 * `string()` of an integer, `.trim()`, `duration.value(10,'m')` and `getAfter()` on a path touched in the same batch are used; they are standard but were not executed by the author.
 * Invoice numbers use `PREFIX-YYYY-NNNN`; the year is not checked (client clock), only prefix and counter value.
 * A manager can still set an order to Delivered/Cancelled etc. without constraint (as before).
+
+## Owner decisions still open (nothing here was decided by the developer)
+| # | Question | Current behaviour | Why it matters |
+|---|---|---|---|
+| 1 | Customer creation, scheduling, activation | Reps may create customers (active, automatic Mon-Sat day) and edit contact/location/pin; only managers deactivate, reactivate or change days. | Confirm reps should not be able to deactivate a shop or move a visit day. |
+| 2 | Legacy clients / mandatory visit record | A rep order without its visit and counter step in the same commit is refused; old browser tabs must reload. | Confirm reps have no other way to enter orders (no manager-entered orders on their behalf). |
+| 3 | Manager order creation and counter overrides | Managers can create orders with any content and can step the order counter +1; the invoice counter can be set by hand (`setCounterStart`). | A manager could create an order with a duplicate number. Decide whether managers should be limited like reps. |
+| 4 | Standalone invoices | Allowed (automatic id, `orderId: null`) but must move the invoice counter by one in the same commit. | Confirm they stay. |
+| 5 | Depot settings | No rule exists for `config/depot`: the depot-pin screen cannot read or save for anyone (test J). | Add a manager-write / staff-read rule, or retire the screen. |
+| 6 | Manager "cancel and delete" of an Approved order | Refused: the supplied rules forbid deleting orders (test J). The whole transaction fails, so stock and order stay unchanged. | Either allow manager delete of Approved orders in the rules, or change the app to cancel without deleting. |
+| 7 | Historical performance targets after schedule changes | Reports measure past dates against the CURRENT schedule and say so on screen. | Decide whether history should be frozen per week. |
+| 8 | A merge while an order is being invoiced | Merging customers fails (safe) if one of their orders is locked "Invoicing"; retry after it finishes. | Informational. |
