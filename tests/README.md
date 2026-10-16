@@ -7,9 +7,9 @@ Node.js **24.12+** (24 LTS), npm 10+, Java **21** (emulator only), firebase-tool
 
 | Command | What it proves | What it does NOT prove |
 |---|---|---|
-| `npm test` | 12 files / 182 tests: the app's real `../src` code against an in-memory Firestore stand-in (transactions, retries, failure injection) | the real SDK, network, security rules, a browser |
-| `npm run test:rules` | 99 tests: the FINAL rules file (`../rules/firestore.rules.FINAL-CANDIDATE`) on the local Firestore emulator for manager, reps, deliverer, stranger and anonymous, including the real app functions (visits, orders, customers, invoicing, merge, products) and one order through rep -> manager -> deliverer | the screens |
-| `npm run e2e:browser-setup` then `npm run test:e2e` | 25 real-browser checks E1-E25 of the daily-visit workflow against an in-memory backend | the real emulators or rules |
+| `npm test` | 14 files / 268 tests (RC2 had 12 / 182: added decisions.test.js 71 and migrate.test.js 5, reconcile +7, others updated): the app's real `../src` code against an in-memory Firestore stand-in (transactions, retries, failure injection) | the real SDK, network, security rules, a browser |
+| `npm run test:rules` | 170 test cases (RC2: 99). NOT yet run on an emulator by the developer: the FINAL rules file (`../rules/firestore.rules.FINAL-CANDIDATE`) on the local Firestore emulator for manager, reps, deliverer, stranger and anonymous, including the real app functions (visits, orders, customers, invoicing, merge, products) and one order through rep -> manager -> deliverer | the screens |
+| `npm run e2e:browser-setup` then `npm run test:e2e` | 42 real-browser checks E1-E42 against an in-memory backend | the real emulators or rules |
 | `npm run test:all` | the three above | the manual walkthrough in `../docs/WINDOWS-TESTING.md` part B |
 
 The rules tests route `firebase/firestore` and `@firebase/rules-unit-testing` to one CommonJS copy of the SDK (`helpers/*-cjs.mjs`, regenerate with `node helpers/make-cjs-wrappers.mjs`); without that the app code and the test fixtures use two SDK builds and `doc()` rejects the Firestore object before any rule runs. This changes no security expectation. The test configs also disable esbuild and use one worker thread so that no helper processes are spawned. `NAISI_RULES_PATH` overrides the rules file under test.
@@ -27,9 +27,11 @@ Browser tests build the real app with `firebase/*` replaced by in-memory fakes (
 | `unit/invoiceFlow.test.js` | PDF failure after save does not issue another invoice |
 | `unit/bulkProgress.test.js` | overlapping jobs, re-entry, de-duplication, button locking, retry-failed-only, PDF retry |
 | `unit/pagination.test.js` | out-of-order responses, stale failure, loading state, double Load more |
-| `unit/reconcile.test.js` | read-only reconciliation classification |
+| `unit/reconcile.test.js` | read-only reconciliation classification, incl. RC3 checks |
+| `unit/decisions.test.js` | the eight owner decisions |
+| `unit/migrate.test.js` | migration planner |
 | `unit/malawiTime.test.js` | Malawi date, weekday and range helpers across the UTC boundary |
 | `unit/visits.test.js` | visit validation, atomic order+visit, idempotent retry, conflict, failure atomicity |
 | `unit/visitSchedule.test.js` | scheduled lists, distinct progress, performance report, schedule-change warning |
 | `unit/reportLoader.test.js` | manager report: newest range wins, out-of-order and failing stale responses, range limit |
-| `e2e/visits.e2e.mjs` | 25 real-browser checks E1-E25 (see above) |
+| `e2e/visits.e2e.mjs` | E1-E25 here; E26-E42 in `e2e/decisions.e2e.mjs` |

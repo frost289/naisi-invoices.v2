@@ -18,9 +18,9 @@ Do NOT run `firebase login`, `firebase deploy` or `git push`. Nothing in these s
 ## A. Automated tests (run from `C:\naisi-app\tests`, after `npm ci`)
 | Command | What it runs | Expected |
 |---|---|---|
-| `npm test` | 182 unit tests (in-memory stand-in) | 12 files, 182 passed |
-| `npm run test:rules` | the rules tests against `rules\firestore.rules.FINAL-CANDIDATE` on the local Firestore emulator (first run downloads about 60 MB) | 99 tests, all passed |
-| `npm run test:e2e` | 25 browser checks E1-E25 (in-memory backend) | 25 PASS |
+| `npm test` | 268 unit tests (in-memory stand-in) | 14 files, 268 passed |
+| `npm run test:rules` | the rules tests against `rules\firestore.rules.FINAL-CANDIDATE` on the local Firestore emulator (first run downloads about 60 MB) | 170 tests, all must pass (never run by the developer: this is the key QA step) |
+| `npm run test:e2e` | 42 browser checks E1-E42 (in-memory backend) | 42 PASS |
 | `npm run test:all` | all three | |
 
 The same is available by double-clicking `run-rules-tests.bat` (rules only; it saves `tests\rules-test-output.txt`).
@@ -36,6 +36,7 @@ Keep the complete console output of every command and send it back unedited. A f
    - rep2: the same shops are listed, with its own progress.
    - mgr: visit report (numbers match), approve rep1's order, generate the invoice, check the invoice list and numbers.
    - deliv: the order is on the delivery list, mark it delivered.
+   - mgr: Walk-in Invoice tab (standalone invoice), Numbering (adjust with a reason), cancel an Approved order (reason; stock restored once), enter an order for a rep, Customers: start schedule history, schedule a new customer, merge two customers (blocked while an order is Invoicing).
    - stranger: nothing opens.
    - mgr: add a customer, change a visit day, deactivate and reactivate, merge two customers.
 5. Write PASS or FAIL beside each step, with a screenshot of any failure.
