@@ -174,7 +174,7 @@ try {
   });
 
   // ---------------- decision 8: merge blocked while invoicing ----------------
-  await R.check('E36', 'Merge is blocked while an affected order is Invoicing: clear message, nothing moved or deleted; retry works once it is finished', async () => {
+  await R.check('E36', 'Merge is blocked while an affected order is Invoicing: clear message, nothing moved or deleted (the retry after invoicing is covered by unit + emulator tests)', async () => {
     await nav('navCustomersBtn'); await page.waitForSelector('#mergeKeepSearch');
     const pickCustomer = async (inputId, sugId, text) => { await page.fill(inputId, text); await page.waitForSelector(`${sugId} > *`); await page.click(`${sugId} > * >> nth=0`); };
     await pickCustomer('#mergeKeepSearch', '#mergeKeepSuggestions', 'Alpha');
