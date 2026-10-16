@@ -184,7 +184,8 @@ export async function submitOrderWithVisit({ customerId, items, notes, requestId
 
     const counter = counterSnap.exists() ? counterSnap.data().counter : 1;
     const orderNo = buildOrderNo(counter);
-    tx.set(ORDER_COUNTER_DOC, { counter: counter + 1 });
+    // lastOrderId ties this counter step to THIS order: the security rules refuse a counter step that has no order in the same commit.
+    tx.set(ORDER_COUNTER_DOC, { counter: counter + 1, lastOrderId: orderRef.id });
     tx.set(orderRef, {
       orderNo, status: 'Submitted',
       customerId, customerName: customer.name, customerPhone: customer.phone || '-', customerLocation: customer.location || '-',

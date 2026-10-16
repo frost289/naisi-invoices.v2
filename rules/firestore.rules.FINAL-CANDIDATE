@@ -1,0 +1,395 @@
+rules_version = '2';
+// =============================================================================================
+// NAISI FOODS - COMPLETE FIRESTORE RULES, FINAL CANDIDATE (2026-10-16)
+// Built from the rules file supplied on 2026-10-16. NOT deployed. NOT yet run on an emulator by
+// its author (emulator unavailable in the authoring environment): run tests/rules before any use.
+//
+// What this adds to the supplied rules (every other rule is kept exactly as supplied):
+//   1. A rep may read a visit/order document that does not exist yet ONLY at their own
+//      deterministic id (v_<uid>_*, o_<uid>_*). Needed for the app's idempotent first save.
+//   2. Visits: reps create only well-formed visits (id, reason list, "Other" explanation, own
+//      email, server time, active customer). A visit "Order Placed" must be created in the SAME
+//      commit as its order and the order-number counter; managers may only re-point a visit to
+//      another customer (customer merge).
+//   3. Orders created by reps must come with their visit and counter increment in the same commit
+//      (orders without a visit, or a visit saved afterwards in another commit, are refused).
+//      Managers keep full order creation (no manager screen creates orders today).
+//   4. Customers: only managers may change active / assignedDay / assignedDayChangedAt. A rep who
+//      creates a customer cannot create it inactive or with a change timestamp; the app's own
+//      automatic visit day (Mon-Sat) is still accepted on creation.
+//   5. Invoices/orders: one invoice per order (deterministic id ord_<orderId>), created in the same
+//      commit that moves the order Invoicing -> Invoiced; stand-alone invoices keep working but must
+//      move the invoice counter by exactly one in the same commit; existing invoices cannot change
+//      orderId / invoiceNo / createdBy / createdAt; order locks use server time and an expired lease.
+//   6. Products: unitsPerCase must be a positive whole number or null (checked when it changes).
+// =============================================================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- role helpers (email lists in config/roles) ----------
+    // .get(name, []) means a missing list (e.g. no "deliverers" yet) is
+    // treated as empty instead of throwing. Emails in config/roles must be
+    // stored in lowercase, which is how Firebase Auth reports them.
+    function roleList(name) {
+      return get(/databases/$(database)/documents/config/roles).data.get(name, []);
+    }
+    function isManager() {
+      return request.auth != null && request.auth.token.email in roleList('managers');
+    }
+    function isSubmitter() {
+      return request.auth != null && request.auth.token.email in roleList('submitters');
+    }
+    function isDeliverer() {
+      return request.auth != null && request.auth.token.email in roleList('deliverers');
+    }
+    function isStaff() {
+      return isManager() || isSubmitter() || isDeliverer();
+    }
+
+    // A real pinned location: numeric, in-range coordinates.
+    function validPin(lat, lng) {
+      return lat is number && lng is number &&
+        lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+    }
+
+    // The signed-in user created / owns the EXISTING document.
+    function ownsCreatedBy() {
+      return resource.data.createdBy == request.auth.uid;
+    }
+
+    // ---------- path helpers ----------
+    function customerPath(id) { return /databases/$(database)/documents/customers/$(id); }
+    function orderPath(id) { return /databases/$(database)/documents/orders/$(id); }
+    function visitPath(id) { return /databases/$(database)/documents/visits/$(id); }
+    function invoicePath(id) { return /databases/$(database)/documents/invoices/$(id); }
+    function orderCounterPath() { return /databases/$(database)/documents/orderCounters/naisiOrder; }
+    function invoiceCounterPath() { return /databases/$(database)/documents/counters/naisiInvoice; }
+
+    // The order number counter value BEFORE this commit (1 when the counter document does not exist yet).
+    function orderCounterBefore() {
+      return exists(orderCounterPath()) ? get(orderCounterPath()).data.counter : 1;
+    }
+    function invoiceCounterBefore() {
+      return exists(invoiceCounterPath()) ? get(invoiceCounterPath()).data.counter : 1;
+    }
+    function invoicePrefixBefore() {
+      return exists(invoiceCounterPath()) ? get(invoiceCounterPath()).data.prefix : 'NF-INV';
+    }
+
+    // An active customer whose name (and, for orders, location) the document copies exactly.
+    function customerIsActive(customerId) {
+      return exists(customerPath(customerId)) &&
+        get(customerPath(customerId)).data.get('active', true) == true;
+    }
+
+    match /config/roles {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Invoice counter. A manager can still set the next number by hand (paper-book resume); the
+    // invoice rule below is what stops an invoice being saved without moving this counter by one.
+    match /counters/{counterId} {
+      allow read, create, update: if isManager();
+      allow delete: if false;
+    }
+
+    // A counter step must come with the order it numbered: lastOrderId names an order that is created
+    // in the SAME commit by the same rep. So the counter cannot move without an order, and (with the
+    // order rule's check that the order number is the counter value before the commit) an order cannot
+    // be saved without moving the counter. A manager keeps the original behaviour (+1 steps, or start anywhere).
+    function counterStepHasOrder() {
+      return request.resource.data.get('lastOrderId', null) is string &&
+        !exists(orderPath(request.resource.data.lastOrderId)) &&
+        existsAfter(orderPath(request.resource.data.lastOrderId)) &&
+        getAfter(orderPath(request.resource.data.lastOrderId)).data.createdBy == request.auth.uid;
+    }
+    match /orderCounters/{counterId} {
+      allow read: if isManager() || isSubmitter();
+      allow create: if request.resource.data.counter is int &&
+        request.resource.data.counter > 0 &&
+        (isManager() ||
+          (isSubmitter() && request.resource.data.counter == 2 && counterStepHasOrder()));
+      allow update: if request.resource.data.counter == resource.data.counter + 1 &&
+        (isManager() || (isSubmitter() && counterStepHasOrder()));
+      allow delete: if false;
+    }
+
+    // ---------- invoices ----------
+    // New-version clients ALWAYS write orderId (null for stand-alone invoices); the old version never
+    // wrote it, so the shape check below refuses the old "automatic id, no orderId" write.
+    function invoiceShapeOk(d) {
+      return d.keys().hasAll(['orderId', 'invoiceNo', 'items', 'createdBy']) &&
+        d.createdBy == request.auth.uid &&
+        d.invoiceNo is string && d.items is list;
+    }
+    // The invoice number is the counter value read BEFORE the commit, and the counter moves by exactly
+    // one in the same commit (so two invoices can never share a number, and none is saved uncounted).
+    // Format PREFIX-YYYY-NNNN (4 digits minimum). The prefix is removed literally (replace is not a
+    // regex), so a prefix containing regex characters cannot break the check.
+    function padNumber(n) {
+      return n < 10 ? '000' + string(n) : (n < 100 ? '00' + string(n) : (n < 1000 ? '0' + string(n) : string(n)));
+    }
+    function numberOk(no, prefix, n) {
+      return no is string &&
+        no.size() == prefix.size() + no.replace(prefix, '').size() &&
+        no.replace(prefix, '').matches('-[0-9][0-9][0-9][0-9]-' + padNumber(n));
+    }
+    function invoiceNumberOk(d) {
+      return getAfter(invoiceCounterPath()).data.counter == invoiceCounterBefore() + 1 &&
+        getAfter(invoiceCounterPath()).data.prefix == invoicePrefixBefore() &&
+        numberOk(d.invoiceNo, invoicePrefixBefore(), invoiceCounterBefore());
+    }
+    // An invoice for an order: id is ord_<orderId>; the order must be Invoicing now and be marked
+    // Invoiced, pointing at THIS invoice, in the same commit.
+    function orderInvoiceOk(id, d) {
+      return d.orderId is string &&
+        id == 'ord_' + d.orderId &&
+        get(orderPath(d.orderId)).data.status == 'Invoicing' &&
+        getAfter(orderPath(d.orderId)).data.status == 'Invoiced' &&
+        getAfter(orderPath(d.orderId)).data.invoiceId == id &&
+        getAfter(orderPath(d.orderId)).data.invoiceNo == d.invoiceNo;
+    }
+
+    match /invoices/{invoiceId} {
+      allow create: if isManager() && invoiceShapeOk(request.resource.data) &&
+        invoiceNumberOk(request.resource.data) &&
+        (request.resource.data.orderId == null || orderInvoiceOk(invoiceId, request.resource.data));
+      allow read: if isManager();
+      // Editing an invoice (customer, items...) is allowed; its identity is not.
+      allow update: if isManager() &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['orderId', 'invoiceNo', 'createdBy', 'createdAt']);
+      allow delete: if false;
+    }
+
+    // ---------- customers ----------
+    function validVisitDay(day) {
+      return day == null || day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    }
+    // The shared weekly schedule fields: only managers change them after creation.
+    function touchesSchedule() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny(['active', 'assignedDay', 'assignedDayChangedAt']);
+    }
+
+    match /customers/{customerId} {
+      allow read: if isStaff();
+      // Every new customer must carry a pinned location (lat/lng). A rep cannot create a customer
+      // that is inactive or carries a schedule-change time; the app's automatic Mon-Sat day is fine.
+      allow create: if (isManager() || isSubmitter()) &&
+        validPin(request.resource.data.lat, request.resource.data.lng) &&
+        (isManager() || (
+          request.resource.data.get('active', true) == true &&
+          validVisitDay(request.resource.data.get('assignedDay', null)) &&
+          request.resource.data.get('assignedDayChangedAt', null) == null));
+      // Edits may not remove or invalidate an existing pin. Only a manager may touch the schedule fields.
+      allow update: if (isManager() || (isSubmitter() && !touchesSchedule())) &&
+        (!(resource.data.get('lat', null) is number) ||
+          validPin(request.resource.data.get('lat', null), request.resource.data.get('lng', null)));
+      allow delete: if isManager();
+    }
+
+    match /expenses/{expenseId} {
+      // Anyone creating an expense must stamp it with their own uid.
+      allow create: if isManager() ||
+        ((isSubmitter() || isDeliverer()) &&
+          request.resource.data.createdBy == request.auth.uid);
+      allow read: if isManager() ||
+        ((isSubmitter() || isDeliverer()) && ownsCreatedBy());
+      // Owners can edit their own expense but not re-assign it to someone else.
+      allow update: if isManager() ||
+        ((isSubmitter() || isDeliverer()) && ownsCreatedBy() &&
+          request.resource.data.createdBy == resource.data.createdBy);
+      allow delete: if isManager();
+    }
+
+    // ---------- products ----------
+    // unitsPerCase: a positive whole number, or null (cleared). Checked when it is created or CHANGED, so a
+    // product that already holds an odd old value can still have its stock updated.
+    function validUnitsPerCase(v) {
+      return v == null || (v is int && v > 0 && v <= 1000000);
+    }
+    match /products/{productId} {
+      allow read: if isManager() || isSubmitter();
+      allow create: if isManager() && validUnitsPerCase(request.resource.data.get('unitsPerCase', null));
+      allow update: if isManager() &&
+        (request.resource.data.get('unitsPerCase', null) == resource.data.get('unitsPerCase', null) ||
+         validUnitsPerCase(request.resource.data.get('unitsPerCase', null)));
+      allow delete: if isManager();
+    }
+
+    // ---------- orders ----------
+    // Rep order: created together with its visit and the counter increment (one commit), by its owner,
+    // for an active customer, with the number taken from the counter.
+    function repOrderOk(orderId, d) {
+      return d.createdBy == request.auth.uid &&
+        d.createdByEmail == request.auth.token.email &&
+        d.status == 'Submitted' &&
+        validPin(d.get('customerLat', null), d.get('customerLng', null)) &&
+        d.items is list && d.items.size() > 0 && d.grandTotal is number && d.grandTotal >= 0 &&
+        d.customerId is string && customerIsActive(d.customerId) &&
+        get(customerPath(d.customerId)).data.name == d.customerName &&
+        get(customerPath(d.customerId)).data.lat == d.customerLat &&
+        get(customerPath(d.customerId)).data.lng == d.customerLng &&
+        d.visitId is string &&
+        !exists(visitPath(d.visitId)) && existsAfter(visitPath(d.visitId)) &&
+        d.visitId == 'v_' + request.auth.uid + '_' + getAfter(visitPath(d.visitId)).data.requestId &&
+        orderId == 'o_' + request.auth.uid + '_' + getAfter(visitPath(d.visitId)).data.requestId &&
+        getAfter(visitPath(d.visitId)).data.outcome == 'Order Placed' &&
+        getAfter(visitPath(d.visitId)).data.repId == request.auth.uid &&
+        getAfter(visitPath(d.visitId)).data.customerId == d.customerId &&
+        getAfter(visitPath(d.visitId)).data.orderId == orderId &&
+        getAfter(visitPath(d.visitId)).data.orderNo == d.orderNo &&
+        getAfter(visitPath(d.visitId)).data.orderValue == d.grandTotal &&
+        getAfter(orderCounterPath()).data.counter == orderCounterBefore() + 1 &&
+        numberOk(d.orderNo, 'ORD', orderCounterBefore());
+    }
+
+    // Invoicing lock: server time, an attempt token, and (to take over) an expired lease.
+    function lockFieldsOk() {
+      return request.resource.data.invoicingAttempt is string &&
+        request.resource.data.invoicingAttempt.size() > 0 &&
+        request.resource.data.invoicingLeaseStartedAt == request.time;
+    }
+    function invoicingEntryOk() {
+      return (resource.data.status == 'Approved' && lockFieldsOk()) ||
+        (resource.data.status == 'Invoicing' && lockFieldsOk() &&
+          resource.data.get('invoicingAttempt', null) is string &&
+          resource.data.get('invoicingLeaseStartedAt', null) is timestamp &&
+          request.time > resource.data.invoicingLeaseStartedAt + duration.value(10, 'm'));
+    }
+    // Invoiced: only from Invoicing, pointing at ord_<orderId>, created in this same commit.
+    function invoicedEntryOk(orderId) {
+      return resource.data.status == 'Invoicing' &&
+        request.resource.data.invoiceId == 'ord_' + orderId &&
+        request.resource.data.invoiceNo is string &&
+        !exists(invoicePath(request.resource.data.invoiceId)) &&
+        existsAfter(invoicePath(request.resource.data.invoiceId)) &&
+        getAfter(invoicePath(request.resource.data.invoiceId)).data.orderId == orderId &&
+        getAfter(invoicePath(request.resource.data.invoiceId)).data.invoiceNo == request.resource.data.invoiceNo;
+    }
+    function managerOrderWriteOk(orderId) {
+      return (request.resource.data.status != 'Invoicing' || invoicingEntryOk()) &&
+        (request.resource.data.status != 'Invoiced' ||
+          (resource.data.status == 'Invoiced' &&
+            request.resource.data.get('invoiceId', null) == resource.data.get('invoiceId', null) &&
+            request.resource.data.get('invoiceNo', null) == resource.data.get('invoiceNo', null)) ||
+          invoicedEntryOk(orderId));
+    }
+
+    match /orders/{orderId} {
+      // Reps create orders only through the visit workflow (see repOrderOk). Managers keep full
+      // create rights (no manager screen creates orders today; this is a legacy compatibility decision).
+      allow create: if isManager() ||
+        (isSubmitter() && repOrderOk(orderId, request.resource.data));
+      // get: a rep's save reads the order at its own fixed id first (retry check); on a first
+      // save it does not exist yet (resource == null).
+      allow get: if isManager() ||
+        (isSubmitter() && (
+          (resource != null && ownsCreatedBy()) ||
+          (resource == null && orderId.matches('o_' + request.auth.uid + '_.*')))) ||
+        (isDeliverer() && resource != null && resource.data.status == 'Invoiced');
+      allow list: if isManager() ||
+        (isSubmitter() && ownsCreatedBy()) ||
+        (isDeliverer() && resource.data.status == 'Invoiced');
+      // Deliverers can do exactly two things to an Invoiced order, touching
+      // only the delivery fields (never items, totals, customer, etc.):
+      //  1. mark it Delivered, or
+      //  2. record a failed attempt (reason) while it stays Invoiced.
+      allow update: if (isManager() && managerOrderWriteOk(orderId)) ||
+        (isDeliverer() &&
+          resource.data.status == 'Invoiced' &&
+          ((request.resource.data.status == 'Delivered' &&
+            request.resource.data.deliveredBy == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'deliveredBy', 'deliveredByEmail', 'deliveredAt', 'updatedAt'])) ||
+           (request.resource.data.status == 'Invoiced' &&
+            request.resource.data.lastDeliveryFailure.byUid == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['lastDeliveryFailure', 'deliveryAttemptCount', 'updatedAt']))));
+      allow delete: if false;
+    }
+
+    // ---------- visits ----------
+    function noOrderOk(d) {
+      return d.reasonNoOrder in ['Shop still has stock', 'Price too high', 'Stock unavailable',
+          'Shop owner unavailable', 'Shop closed', 'No money today', 'Not interested', 'Other'] &&
+        d.reasonNotes is string && d.reasonNotes.size() <= 500 &&
+        (d.reasonNoOrder != 'Other' || d.reasonNotes.trim().size() >= 3) &&
+        d.get('orderId', null) == null && d.get('orderNo', null) == null && d.get('orderValue', null) == null;
+    }
+    // "Order Placed": the order is created in this same commit (it must not exist before), it is the
+    // rep's own, for the same customer, with the same number and value.
+    function orderPlacedOk(visitId, d) {
+      return d.get('reasonNoOrder', null) == null &&
+        d.orderId is string &&
+        d.orderId == 'o_' + request.auth.uid + '_' + d.requestId &&
+        !exists(orderPath(d.orderId)) && existsAfter(orderPath(d.orderId)) &&
+        getAfter(orderPath(d.orderId)).data.visitId == visitId &&
+        getAfter(orderPath(d.orderId)).data.createdBy == request.auth.uid &&
+        getAfter(orderPath(d.orderId)).data.customerId == d.customerId &&
+        getAfter(orderPath(d.orderId)).data.orderNo == d.orderNo &&
+        getAfter(orderPath(d.orderId)).data.grandTotal == d.orderValue;
+    }
+    function validRepVisit(visitId, d) {
+      return d.repId == request.auth.uid &&
+        d.repEmail == request.auth.token.email &&
+        d.requestId is string &&
+        visitId == 'v_' + request.auth.uid + '_' + d.requestId &&
+        d.createdAt == request.time &&
+        d.customerId is string && customerIsActive(d.customerId) &&
+        get(customerPath(d.customerId)).data.name == d.customerName &&
+        ((d.outcome == 'No Order' && noOrderOk(d)) ||
+         (d.outcome == 'Order Placed' && orderPlacedOk(visitId, d)));
+    }
+    match /visits/{visitId} {
+      // repId must be the caller's own uid so reps cannot log visits (or inflate success rates)
+      // under another rep's name; the rest of the shape is checked in validRepVisit.
+      allow create: if isManager() ||
+        (isSubmitter() && validRepVisit(visitId, request.resource.data));
+      // get: a rep's save reads the visit at its own fixed id first (retry check); on a first save
+      // it does not exist yet (resource == null).
+      allow get: if isManager() ||
+        (isSubmitter() && (
+          (resource != null && resource.data.repId == request.auth.uid) ||
+          (resource == null && visitId.matches('v_' + request.auth.uid + '_.*'))));
+      allow list: if isManager() ||
+        (isSubmitter() && resource.data.repId == request.auth.uid);
+      // Visit reports are a record: no edits and no deletes, except that a manager merging two
+      // duplicate customers may re-point a visit to the kept customer (customerId / customerName only).
+      allow update: if isManager() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customerName']);
+      allow delete: if false;
+    }
+
+    // One document per FAILED delivery attempt, with the reason. Append-only.
+    match /deliveryAttempts/{attemptId} {
+      allow create: if isDeliverer() &&
+        request.resource.data.by == request.auth.uid &&
+        request.resource.data.outcome == 'Failed' &&
+        request.resource.data.reason is string &&
+        request.resource.data.reason.size() > 0;
+      allow read: if isManager();
+      allow update, delete: if false;
+    }
+
+    match /stockMovements/{movementId} {
+      allow read, create: if isManager();
+      allow update, delete: if false;
+    }
+
+    match /locations/{locationId} {
+      allow read, create: if isManager() || isSubmitter();
+      allow update, delete: if isManager();
+    }
+
+    match /users/{uid} {
+      allow read: if isManager() || isSubmitter();
+      // Your own profile only, and the stored email must be your real login email.
+      allow create, update: if request.auth != null && request.auth.uid == uid &&
+        request.resource.data.email == request.auth.token.email;
+      allow delete: if false;
+    }
+  }
+}

@@ -17,6 +17,13 @@ beforeEach(() => {
 const order = (over = {}) => v.submitOrderWithVisit({ customerId: 'c1', items: orderItems, notes: 'n', requestId: REQ, ...rep, now: NOW, ...over });
 const noOrder = (over = {}) => v.recordNoOrderVisit({ customerId: 'c1', reason: 'Price too high', notes: '', requestId: REQ, ...rep, now: NOW, ...over });
 
+describe('order counter step is tied to its order (rules require lastOrderId)', () => {
+  it('the counter document records which order used the number', async () => {
+    const r = await order();
+    expect(F.store.get('orderCounters/naisiOrder')).toEqual({ counter: 42, lastOrderId: r.orderId });
+  });
+});
+
 describe('validation (data layer, not only the form)', () => {
   it('reason list: all eight, "Other" last', () => {
     expect(v.NO_ORDER_REASONS).toEqual(['Shop still has stock', 'Price too high', 'Stock unavailable', 'Shop owner unavailable', 'Shop closed', 'No money today', 'Not interested', 'Other']);

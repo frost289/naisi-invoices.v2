@@ -12,6 +12,9 @@ const PAGE_SIZE = 25;
 
 export const ORDER_STATUSES = ['Draft', 'Submitted', 'Approved', 'Invoicing', 'Invoiced', 'Dispatched', 'Delivered', 'Rejected', 'Cancelled'];
 
+// LEGACY, UNUSED by any screen (checked: no caller outside tests). Reps now create orders only through
+// submitOrderWithVisit() in visits.js. The final security rules REFUSE this path for reps: it writes the
+// order and the counter in separate commits and with no visit. Do not call it.
 export async function submitOrder({ customerId, customerName, customerPhone, customerLocation, customerLat, customerLng, items, notes, uid, email }) {
   // The delivery point is the customer's pinned coordinates, snapshotted
   // onto the order. customerLocation stays as the human-readable area label.
