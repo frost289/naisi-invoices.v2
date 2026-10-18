@@ -67,6 +67,49 @@ describe('building the changes', () => {
   });
 });
 
+describe('F7: conflicting rows are resolved first, then grouped by the resolved customer', () => {
+  const cs = [C('a', 'Alpha', { assignedDay: 'Thu' }), C('f1', 'Fox'), C('f2', 'Fox'), C('g', 'Gamma')];
+  const ids = (r) => r.moves.map(m => m.id);
+  it('manual/manual: two ambiguous rows both pointed at the same customer on different days block BOTH', () => {
+    const rows = I.planImport([{ line: 2, name: 'Fox', dayRaw: 'Wed' }, { line: 3, name: 'Fox', dayRaw: 'Thu' }], cs);
+    const r = I.buildMoves(rows, cs, { 2: 'f2', 3: 'f2' });
+    expect(ids(r)).toEqual([]);
+    expect(r.notes.filter(n => /more than one day|conflict/i.test(n.why)).map(n => n.line).sort()).toEqual([2, 3]);
+  });
+  it('manual/automatic: an automatic match and a manual choice on different days block BOTH, whatever the row order', () => {
+    const a = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Fox', dayRaw: 'Tue' }], cs);
+    // the manager resolves the ambiguous Fox row to Alpha (a mistake the plan must not silently half-apply)
+    expect(ids(I.buildMoves(a, cs, { 3: 'a' }))).toEqual([]);
+    const b = I.planImport([{ line: 2, name: 'Fox', dayRaw: 'Tue' }, { line: 3, name: 'Alpha', dayRaw: 'Mon' }], cs);
+    const rb = I.buildMoves(b, cs, { 2: 'a' });
+    expect(ids(rb)).toEqual([]);
+    expect(rb.notes.map(n => n.line).sort()).toEqual([2, 3]);
+  });
+  it('a customer matched automatically on two days stays blocked even when a third row is chosen for the same customer', () => {
+    const rows = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Alpha', dayRaw: 'Tue' }, { line: 4, name: 'Fox', dayRaw: 'Wed' }], cs);
+    const r = I.buildMoves(rows, cs, { 4: 'a' });
+    expect(ids(r)).toEqual([]);
+    expect(r.notes.map(n => n.line).sort()).toEqual([2, 3, 4]);
+  });
+  it('the conflict clears when the manager points the ambiguous row at somebody else; unrelated shops are unaffected', () => {
+    const rows = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Fox', dayRaw: 'Tue' }, { line: 4, name: 'Gamma', dayRaw: 'Sat' }], cs);
+    expect(ids(I.buildMoves(rows, cs, { 3: 'a' }))).not.toContain('a');
+    const ok = I.buildMoves(rows, cs, { 3: 'f1' });
+    expect(ids(ok)).toEqual(['a', 'f1', 'g']);
+  });
+  it('unrelated shops still move while a conflicting customer is blocked', () => {
+    const rows = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Fox', dayRaw: 'Tue' }, { line: 4, name: 'Gamma', dayRaw: 'Sat' }], cs);
+    expect(ids(I.buildMoves(rows, cs, { 3: 'a' }))).toEqual(['g']);
+  });
+  it('the same customer listed twice on the SAME day is one change, not two; re-importing an unchanged plan changes nothing', () => {
+    const rows = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Alpha', dayRaw: 'Mon' }], cs);
+    expect(ids(I.buildMoves(rows, cs))).toEqual(['a']);
+    const after = cs.map(c => c.id === 'a' ? { ...c, assignedDay: 'Mon' } : c);
+    const again = I.planImport([{ line: 2, name: 'Alpha', dayRaw: 'Mon' }, { line: 3, name: 'Alpha', dayRaw: 'Mon' }], after);
+    expect(I.buildMoves(again, after).moves).toEqual([]);
+  });
+});
+
 describe('end to end with the guarded apply', () => {
   it('applies reviewed moves with one dated history entry each; a change made meanwhile is skipped', async () => {
     for (const c of [C('a', 'Alpha', { lat: -13.9, lng: 33.7 }), C('b', 'Beta', { lat: -13.9, lng: 33.7 })]) { const { id, ...d } = c; F.store.set('customers/' + id, d); }

@@ -104,29 +104,41 @@ export function planImport(planRows, customers, { similar = 0.85 } = {}) {
   // the same customer planned on two different days = ambiguous plan: neither is applied
   const byCust = new Map();
   for (const r of rows) if (r.status === 'matched') (byCust.get(r.customerId) || byCust.set(r.customerId, []).get(r.customerId)).push(r);
-  for (const list of byCust.values()) if (new Set(list.map(r => r.day)).size > 1) for (const r of list) { r.status = 'skip'; r.note = 'The plan gives this customer more than one day.'; }
+  for (const list of byCust.values()) if (new Set(list.map(r => r.day)).size > 1) for (const r of list) { r.conflictId = r.customerId; r.status = 'skip'; r.note = 'The plan gives this customer more than one day.'; }
   return rows;
 }
 
 // Turns reviewed rows into moves. choices: { [line]: customerId } for rows the manager resolved. Skips shops that cannot be scheduled.
+// Order of work (finding 7): 1) resolve every row to a customer id (automatic match, manual choice, or an automatic match that the
+// planner already blocked for a conflict); 2) group the rows by that resolved id; 3) if a customer is given more than one day,
+// block EVERY row of that customer (nothing is half-applied, and the order of the rows does not matter); 4) only then build moves.
 export function buildMoves(rows, customers, choices = {}) {
   const byId = new Map(customers.map(c => [c.id, c]));
   const moves = [], notes = [];
-  const seen = new Map();
-  for (const r of rows) {
-    const id = r.status === 'matched' ? r.customerId : (r.status === 'choose' ? choices[r.line] : null);
-    if (!id) continue;
+  const resolved = rows.map(r => ({ r, id: r.status === 'matched' ? r.customerId : (r.status === 'choose' ? choices[r.line] : (r.conflictId || null)) })).filter(x => x.id);
+  const groups = new Map();
+  for (const x of resolved) (groups.get(x.id) || groups.set(x.id, []).get(x.id)).push(x);
+  const blocked = new Set();
+  for (const [id, list] of groups) {
+    if (new Set(list.map(x => x.r.day)).size > 1) {
+      const c = byId.get(id);
+      for (const x of list) { blocked.add(x.r.line); notes.push({ line: x.r.line, name: c ? c.name : x.r.planName, why: 'the plan gives this customer more than one day: fix the plan or the choices', conflict: true }); }
+    }
+  }
+  const done = new Set();
+  for (const { r, id } of resolved) {
+    if (blocked.has(r.line) || r.status === 'skip') continue;
     const c = byId.get(id);
     if (!c) { notes.push({ line: r.line, name: r.planName, why: 'customer no longer exists' }); continue; }
     if (c.active === false) { notes.push({ line: r.line, name: c.name, why: 'customer is inactive: reactivate first' }); continue; }
     if (c.mergeLock) { notes.push({ line: r.line, name: c.name, why: 'customer is being merged' }); continue; }
-    if (seen.has(id) && seen.get(id) !== r.day) { notes.push({ line: r.line, name: c.name, why: 'chosen for two different days' }); continue; }
-    seen.set(id, r.day);
     const from = c.assignedDay || null;
     if (from === r.day) { notes.push({ line: r.line, name: c.name, why: 'already on ' + r.day, already: true }); continue; }
-    if (moves.some(m => m.id === id)) continue;
+    if (done.has(id)) continue;          // the same customer on the same day twice is one change
+    done.add(id);
     moves.push({ id, name: c.name, from, to: r.day, line: r.line });
   }
+  notes.sort((a, b) => a.line - b.line);
   return { moves, notes };
 }
 export { DEFAULT_DAYS };

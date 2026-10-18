@@ -1,6 +1,6 @@
 # Final rules candidate: what it does, what it assumes, what is NOT verified
 
-File: `rules/firestore.rules.FINAL-CANDIDATE` (one complete file, all collections, all roles). Built from the rules supplied 2026-10-16; every
+File: `rules/firestore.rules` (one complete file, all collections, all roles). Built from the rules supplied 2026-10-16; every
 rule not listed below is unchanged. **Not deployed. Not yet run on an emulator by its author** (the emulator cannot be downloaded in the
 authoring environment; the QA review ran an earlier copy of the tests there: 91 of 94 passed, the 3 failures were test mistakes, now corrected). Run `npm run test:rules` (see `docs/WINDOWS-TESTING.md`) before anyone treats it as safe.
 

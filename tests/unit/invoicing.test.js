@@ -117,6 +117,15 @@ describe('lock ownership and lease', () => {
     expect(invoices()).toHaveLength(0);
     expect(F.store.get('orders/o1').invoicingAttempt).toBe(b.attemptToken);
   });
+  it('RC4: ending an attempt writes its token (invoicingAttemptEnded) so the rules can check ownership', async () => {
+    order();
+    const a = await o.beginInvoiceGeneration('o1');
+    await o.revertInvoiceGeneration('o1', a.attemptToken);
+    expect(F.store.get('orders/o1')).toMatchObject({ status: 'Approved', invoicingAttempt: null, invoicingAttemptEnded: a.attemptToken });
+    const b = await o.beginInvoiceGeneration('o1');
+    await o.commitInvoice({ orderId: 'o1', attemptToken: b.attemptToken, meta: meta(), uid: 'u1' });
+    expect(F.store.get('orders/o1')).toMatchObject({ status: 'Invoiced', invoicingAttemptEnded: b.attemptToken });
+  });
   it('revert releases only a lock that is still ours', async () => {
     order();
     const a = await o.beginInvoiceGeneration('o1');

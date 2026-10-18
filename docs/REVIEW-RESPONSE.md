@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-10-18).** This file describes RC3. The only authoritative status is `docs/RC4-RELEASE-REPORT.md`; any PASS or READY claim below does not apply to RC4.
+
 # Review response, finding by finding
 
 Classification key: **INTRODUCED** = created by my first patch; **PRE-EXISTING** = in the base `908c3c3`; **CONDITIONAL** = only bites under a deployment condition; **UNVERIFIABLE** = cannot be checked from the repository.

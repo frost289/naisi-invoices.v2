@@ -8,7 +8,7 @@ Node.js **24.12+** (24 LTS), npm 10+, Java **21** (emulator only), firebase-tool
 | Command | What it proves | What it does NOT prove |
 |---|---|---|
 | `npm test` | 16 files / 297 tests (RC2 had 12 / 182: added decisions 71, migrate 5, scheduleSuggest 16, scheduleImport 11, reconcile +7, visitSchedule +2, others updated): the app's real `../src` code against an in-memory Firestore stand-in (transactions, retries, failure injection) | the real SDK, network, security rules, a browser |
-| `npm run test:rules` | 170 test cases (RC2: 99). NOT yet run on an emulator by the developer: the FINAL rules file (`../rules/firestore.rules.FINAL-CANDIDATE`) on the local Firestore emulator for manager, reps, deliverer, stranger and anonymous, including the real app functions (visits, orders, customers, invoicing, merge, products) and one order through rep -> manager -> deliverer | the screens |
+| `npm run test:rules` | 170 test cases (RC2: 99). NOT yet run on an emulator by the developer: the FINAL rules file (`../rules/firestore.rules`) on the local Firestore emulator for manager, reps, deliverer, stranger and anonymous, including the real app functions (visits, orders, customers, invoicing, merge, products) and one order through rep -> manager -> deliverer | the screens |
 | `npm run e2e:browser-setup` then `npm run test:e2e` | 51 real-browser checks (E1-E41 and E43-E52; the old E42 "no JavaScript errors" check is now E52) against an in-memory backend | the real emulators or rules |
 | `npm run test:all` | the three above | the manual walkthrough in `../docs/WINDOWS-TESTING.md` part B |
 

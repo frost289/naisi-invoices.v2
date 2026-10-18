@@ -1,4 +1,4 @@
-// Firestore EMULATOR tests for the complete final rules file (rules/firestore.rules.FINAL-CANDIDATE).
+// Firestore EMULATOR tests for the complete final rules file (rules/firestore.rules).
 //
 // RC3: updated for the eight owner decisions. The RC2 baseline (99 tests) passed on the emulator in independent QA;
 // the RC3 rules and these updated/new tests have NOT yet been run on an emulator (the build sandbox cannot download it).
@@ -22,7 +22,7 @@ import {
 } from 'firebase/firestore';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const rulesPath = process.env.NAISI_RULES_PATH || path.resolve(here, '../../rules/firestore.rules.FINAL-CANDIDATE');
+const rulesPath = process.env.NAISI_RULES_PATH || path.resolve(here, '../../rules/firestore.rules');
 
 // The real app modules talk to whichever Firestore instance is in holder.db (the signed-in role of the moment).
 const holder = vi.hoisted(() => ({ db: null }));
@@ -62,7 +62,8 @@ beforeEach(async () => {
     await setDoc(doc(db, 'orders', 'oInv'), { orderNo: 'ORD-2026-0002', status: 'Invoiced', items: [], customerName: 'Shop', createdBy: 'rep1', invoiceId: 'ord_oInv', invoiceNo: 'NF-INV-0300' });
     await setDoc(doc(db, 'invoices', 'ord_oInv'), { orderId: 'oInv', invoiceNo: 'NF-INV-0300', items: [], createdBy: 'mgr' });
     await setDoc(doc(db, 'visits', 'v_rep2_x'), { repId: 'rep2', outcome: 'No Order', customerId: 'c1', customerName: 'Shop' });
-    await setDoc(doc(db, 'orders', 'o_rep2_x'), { orderNo: 'ORD-2026-0003', status: 'Submitted', createdBy: 'rep2', items: [] });
+    await setDoc(doc(db, 'orders', 'o_rep2_x'), { orderNo: 'ORD-2026-0003', status: 'Submitted', createdBy: 'rep2', items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], grandTotal: 10 });
+    await setDoc(doc(db, 'orders', 'o_rep2_y'), { orderNo: 'ORD-2026-0004', status: 'Submitted', createdBy: 'rep2', items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], grandTotal: 10 });
   });
 });
 
@@ -330,9 +331,10 @@ describe('E. order <-> visit <-> counter integrity (from BOTH sides)', () => {
     await assertFails(addDoc(collection(db, 'orders'), orderDoc({ createdBy: 'mgr', createdByEmail: 'mgr@example.com' })));
     await assertFails(setDoc(doc(db, 'orderCounters', 'naisiOrder'), { counter: 42 }));          // RC2 allowed +1; RC3 allows it only WITH its order
     await assertFails(setDoc(doc(db, 'orderCounters', 'naisiOrder'), { counter: 100 }));
-    await assertSucceeds(updateDoc(doc(db, 'orders', 'o_rep2_x'), { status: 'Approved', updatedAt: serverTimestamp() }));
-    await assertSucceeds(updateDoc(doc(db, 'orders', 'o_rep2_x'), { status: 'Rejected' }));
-    await assertSucceeds(updateDoc(doc(db, 'orders', 'o1'), { items: [{ qty: 2 }] }));               // edit an approved order
+    await assertSucceeds(updateDoc(doc(db, 'orders', 'o_rep2_x'), { status: 'Approved', stockApplied: true, approvedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db, 'orders', 'o_rep2_x'), { status: 'Rejected' }));                // RC4: Approved -> Rejected is not in the transition table
+    await assertSucceeds(updateDoc(doc(db, 'orders', 'o_rep2_y'), { status: 'Rejected', rejectedAt: serverTimestamp(), managerNotes: 'no', updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(db, 'orders', 'o1'), { items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], grandTotal: 10, updatedAt: serverTimestamp() }));               // edit an approved order
     await assertFails(deleteDoc(doc(db, 'orders', 'o1')));
   });
   it('a rep order may not carry manager-entered / cancellation fields or another source', async () => {
@@ -462,14 +464,14 @@ describe('F. customers: new customers are unscheduled; schedule fields are manag
 // =============================================================================================
 describe('G. invoices and orders: the seven protections + legitimate paths', () => {
   const lock = (db, over = {}) => updateDoc(doc(db, 'orders', 'o1'), { status: 'Invoicing', invoicingAttempt: 't1', invoicingLeaseStartedAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
-  const inv = (over = {}) => ({ orderId: 'o1', kind: 'order', invoiceNo: 'NF-INV-2026-0370', items: [], createdBy: 'mgr', grandTotal: 0, customer: 'Shop', createdAt: serverTimestamp(), ...over });
+  const inv = (over = {}) => ({ orderId: 'o1', kind: 'order', invoiceNo: 'NF-INV-2026-0370', items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], createdBy: 'mgr', grandTotal: 10, customer: 'Shop', createdAt: serverTimestamp(), ...over });
   const reg = (invoiceId, no = 'NF-INV-2026-0370') => ({ invoiceId, issuedBy: 'mgr', issuedAt: serverTimestamp() });
   const commit = (db, { invoiceId = 'ord_o1', invoice = {}, order = {}, counter = { prefix: 'NF-INV', counter: 371, lastInvoiceId: invoiceId }, skip = [], regNo = 'NF-INV-2026-0370' } = {}) => {
     const b = writeBatch(db);
     if (!skip.includes('counter')) b.set(doc(db, 'counters', 'naisiInvoice'), counter);
     if (!skip.includes('registry')) b.set(doc(db, 'invoiceNumbers', regNo), reg(invoiceId));
     if (!skip.includes('invoice')) b.set(doc(db, 'invoices', invoiceId), inv(invoice));
-    if (!skip.includes('order')) b.update(doc(db, 'orders', 'o1'), { status: 'Invoiced', invoiceId, invoiceNo: 'NF-INV-2026-0370', invoicingAttempt: null, invoicingLeaseStartedAt: null, invoicedAt: serverTimestamp(), updatedAt: serverTimestamp(), ...order });
+    if (!skip.includes('order')) b.update(doc(db, 'orders', 'o1'), { status: 'Invoiced', invoiceId, invoiceNo: 'NF-INV-2026-0370', invoicingAttempt: null, invoicingAttemptEnded: 't1', invoicingLeaseStartedAt: null, invoicedAt: serverTimestamp(), updatedAt: serverTimestamp(), ...order });
     return b.commit();
   };
   it('legitimate: lock, then ONE atomic commit (counter + ord_ invoice + order Invoiced)', async () => {
@@ -479,14 +481,14 @@ describe('G. invoices and orders: the seven protections + legitimate paths', () 
   });
   it('legitimate: revert a lock (Invoicing -> Approved)', async () => {
     const db = as('mgr'); await assertSucceeds(lock(db));
-    await assertSucceeds(updateDoc(doc(db, 'orders', 'o1'), { status: 'Approved', invoicingAttempt: null, invoicingLeaseStartedAt: null }));
+    await assertSucceeds(updateDoc(doc(db, 'orders', 'o1'), { status: 'Approved', invoicingAttempt: null, invoicingAttemptEnded: 't1', invoicingLeaseStartedAt: null, updatedAt: serverTimestamp() }));
   });
   const SA = `sa_mgr_${REQ}`;
   const standalone = (db, { id = SA, invoice = {}, counter = {}, skip = [] } = {}) => {
     const b = writeBatch(db);
     if (!skip.includes('counter')) b.set(doc(db, 'counters', 'naisiInvoice'), { prefix: 'NF-INV', counter: 371, lastInvoiceId: id, ...counter });
     if (!skip.includes('registry')) b.set(doc(db, 'invoiceNumbers', 'NF-INV-2026-0370'), reg(id));
-    b.set(doc(db, 'invoices', id), inv({ orderId: null, kind: 'standalone', requestId: REQ, ...invoice }));
+    b.set(doc(db, 'invoices', id), inv({ orderId: null, kind: 'standalone', requestId: REQ, items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], grandTotal: 10, ...invoice }));
     return b.commit();
   };
   it('legitimate: stand-alone invoice with the explicit id sa_<uid>_<requestId>, kind standalone, orderId null, counter +1 and the registry entry in the same commit', async () => {
@@ -512,7 +514,7 @@ describe('G. invoices and orders: the seven protections + legitimate paths', () 
   });
   it('legitimate: edit an existing invoice (customer/items) but not its identity', async () => {
     const d = doc(as('mgr'), 'invoices', 'ord_oInv');
-    await assertSucceeds(updateDoc(d, { customer: 'Renamed', items: [{ a: 1 }], updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(d, { customer: 'Renamed', items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], grandTotal: 10, updatedAt: serverTimestamp() }));
     for (const f of [{ orderId: 'x' }, { invoiceNo: 'NF-INV-9999' }, { createdBy: 'rep1' }, { createdAt: serverTimestamp() }, { kind: 'standalone' }, { requestId: 'zzzzzzzz' }]) await assertFails(updateDoc(d, f));
   });
   // ---- 1..7 ----
@@ -762,7 +764,7 @@ describe('H. real app functions as authenticated users', () => {
     const a = await app('mgr');
     const r = await a.orders.issueInvoiceForOrder({ orderId: 'o1', meta: { items: [{ qty: 1, price: 5, total: 5 }], customer: 'Shop', customerId: 'c1' }, uid: 'mgr' });
     if (!/^NF-INV-\d{4}-0370$/.test(r.invoiceNo)) throw new Error('unexpected number ' + r.invoiceNo);
-    const s = await a.orders.issueStandaloneInvoice({ requestId: a.orders.newStandaloneRequestId(), meta: { items: [], customer: 'Walk-in' }, uid: 'mgr' });
+    const s = await a.orders.issueStandaloneInvoice({ requestId: a.orders.newStandaloneRequestId(), meta: { items: [{ qty: 1, desc: 'Walk-in', price: 5, total: 5 }], customer: 'Walk-in' }, uid: 'mgr' });
     if (!/0371$/.test(s.invoiceNo)) throw new Error('unexpected number ' + s.invoiceNo);
     const { attemptToken } = await a.orders.beginInvoiceGeneration('o_rep2_x').catch((e) => ({ attemptToken: null, e }));
     if (attemptToken) throw new Error('a Submitted order must not be lockable');
@@ -1092,7 +1094,7 @@ describe('M. invoice number control (decision 6)', () => {
     return b.commit();
   };
   const adjust = (a, over = {}) => a.numbering.adjustInvoiceCounter({ prefix: 'NF-INV', counter: 500, reason: 'Skip numbers used on paper', requestId: REQ, ...MGR, ...over });
-  const standalone = (a) => a.orders.issueStandaloneInvoice({ requestId: a.orders.newStandaloneRequestId(), meta: { items: [], customer: 'Walk-in' }, uid: 'mgr' });
+  const standalone = (a) => a.orders.issueStandaloneInvoice({ requestId: a.orders.newStandaloneRequestId(), meta: { items: [{ qty: 1, desc: 'Walk-in', price: 5, total: 5 }], customer: 'Walk-in' }, uid: 'mgr' });
 
   it('raw: an audited adjustment (counter change + audit entry in one commit) is accepted', async () => { await assertSucceeds(adjBatch(as('mgr'))); });
   it('raw: a prefix change is accepted when audited', async () => { await assertSucceeds(adjBatch(as('mgr'), { counter: { prefix: 'NF-2', counter: 1 } })); });
@@ -1494,3 +1496,103 @@ async function assertRejects(promise) {
   if (!failed) throw new Error('expected the operation to be refused, but it succeeded');
 }
 async function assertRejectsLocally(fn) { await assertRejects(fn()); }
+
+
+// =============================================================================================
+// RC4 (review findings 2 and 3): the order transition table, the owned invoicing lock, and trusted order-line validation.
+// These run against the real rules in the emulator. They have NOT been executed in the build environment (emulator download blocked: HTTP 403);
+// see docs/RC4-RELEASE-REPORT.md for the exact command.
+// =============================================================================================
+describe('RC4-H. order lifecycle: the transition table and the owned invoicing lock (finding 2)', () => {
+  const L = [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }];
+  const ord = (over = {}) => ({ orderNo: 'ORD-2026-0090', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', items: L, grandTotal: 10, createdBy: 'rep1', invoiceId: null, invoiceNo: null, ...over });
+  const lockedFor = (tok) => ord({ status: 'Invoicing', invoicingAttempt: tok, invoicingLeaseStartedAt: Timestamp.now() });
+  const ended = (tok, over = {}) => ({ status: 'Approved', invoicingAttempt: null, invoicingAttemptEnded: tok, invoicingLeaseStartedAt: null, updatedAt: serverTimestamp(), ...over });
+
+  it('Invoiced and Delivered orders cannot return to Approved (so they can never be cancelled afterwards)', async () => {
+    await adminSet(['orders', 'oV'], ord({ status: 'Invoiced', invoiceId: 'ord_oV', invoiceNo: 'NF-INV-2026-0001' }));
+    await adminSet(['orders', 'oD'], ord({ status: 'Delivered', invoiceId: 'ord_oD', invoiceNo: 'NF-INV-2026-0002' }));
+    for (const id of ['oV', 'oD']) {
+      await assertFails(updateDoc(doc(as('mgr'), 'orders', id), { status: 'Approved', updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(doc(as('mgr'), 'orders', id), ended('t')));
+      await assertFails(updateDoc(doc(as('mgr'), 'orders', id), { status: 'Cancelled', cancelReason: 'abc', updatedAt: serverTimestamp() }));
+    }
+  });
+  it('no status move outside the table: Rejected/Cancelled/Delivered are final; Submitted cannot jump to Invoiced/Delivered', async () => {
+    await adminSet(['orders', 'oR'], ord({ status: 'Rejected' }));
+    await adminSet(['orders', 'oS'], ord({ status: 'Submitted', stockApplied: false }));
+    for (const to of ['Approved', 'Submitted', 'Invoicing', 'Invoiced', 'Delivered', 'Dispatched']) await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oR'), { status: to, updatedAt: serverTimestamp() }));
+    for (const to of ['Invoiced', 'Delivered', 'Dispatched', 'Invoicing']) await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oS'), { status: to, updatedAt: serverTimestamp() }));
+  });
+  it('financial identity fields cannot be changed on any status by a manager (orderNo, createdBy, invoiceId, invoiceNo, stockApplied)', async () => {
+    await adminSet(['orders', 'oA'], ord());
+    for (const f of [{ orderNo: 'ORD-2026-9999' }, { createdBy: 'mgr' }, { invoiceId: 'ord_x' }, { invoiceNo: 'NF-INV-9' }, { stockApplied: false }, { grandTotal: 1 }]) {
+      await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oA'), { ...f, updatedAt: serverTimestamp() }));
+    }
+  });
+  it('a stale attempt cannot release, and cannot complete, a newer attempt', async () => {
+    await adminSet(['orders', 'oL'], lockedFor('NEW'));
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oL'), ended('OLD')));
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oL'), ended(null)));
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oL'), { status: 'Approved', invoicingAttempt: null, invoicingLeaseStartedAt: null, updatedAt: serverTimestamp() }));   // no token at all
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'orders', 'oL'), ended('NEW')));
+  });
+  it('an Invoiced order needs the holder\'s token, the ord_ invoice created in the same commit, and changes nothing else', async () => {
+    await adminSet(['orders', 'oL'], lockedFor('NEW'));
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oL'), { status: 'Invoiced', invoiceId: 'ord_oL', invoiceNo: 'NF-INV-2026-0370', invoicingAttempt: null, invoicingAttemptEnded: 'NEW', invoicingLeaseStartedAt: null, invoicedAt: serverTimestamp(), updatedAt: serverTimestamp() }));   // invoice not created in this commit
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oL'), { status: 'Invoiced', grandTotal: 1, updatedAt: serverTimestamp() }));
+  });
+  it('legitimate paths still work: edit an open order, cancel a Submitted order, lock take-over after the lease', async () => {
+    await adminSet(['orders', 'oE'], ord());
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'orders', 'oE'), { notes: 'call first', updatedAt: serverTimestamp() }));
+    await adminSet(['orders', 'oT'], { ...lockedFor('OLD'), invoicingLeaseStartedAt: Timestamp.fromMillis(Date.now() - 3_600_000) });
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'orders', 'oT'), { status: 'Invoicing', invoicingAttempt: 'NEW', invoicingLeaseStartedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  });
+  it('roles: rep, deliverer, stranger and anonymous cannot make any manager transition', async () => {
+    await adminSet(['orders', 'oA'], ord());
+    for (const who of ['rep1', 'deliv', 'stranger', 'anon']) {
+      await assertFails(updateDoc(doc(as(who), 'orders', 'oA'), { status: 'Invoicing', invoicingAttempt: 't', invoicingLeaseStartedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(doc(as(who), 'orders', 'oA'), { notes: 'x', updatedAt: serverTimestamp() }));
+    }
+  });
+});
+
+describe('RC4-I. order lines and money are validated by the rules (finding 3)', () => {
+  const base = (items, grandTotal) => ({ items, grandTotal });
+  const ln = (o = {}) => ({ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1', ...o });
+  const create = (db, o) => saveOrderBatch(db, { order: o, vis: { orderValue: Math.max(0, o.grandTotal) } });   // the app's exact atomic write set
+  const BAD = {
+    'negative quantity': [ln({ qty: -2, total: -10 })],
+    'zero quantity': [ln({ qty: 0, total: 0 })],
+    'fractional stock-tracked quantity': [ln({ qty: 1.5, total: 7.5 })],
+    'negative price': [ln({ price: -5, total: -10 })],
+    'total does not equal qty x price': [ln({ total: 99 })],
+    'string quantity': [ln({ qty: '2' })],
+    'missing price': [{ qty: 2, desc: 'x', total: 10, productId: 'p1' }],
+    'NaN-like missing total': [{ qty: 2, desc: 'x', price: 5, productId: 'p1' }],
+    'numeric productId': [ln({ productId: 7 })],
+    '13 lines': Array.from({ length: 13 }, () => ln({ qty: 1, total: 5 })),
+    'no lines': [],
+  };
+  for (const [name, items] of Object.entries(BAD)) {
+    it('create refused: ' + name, async () => { await assertFails(create(as('rep1'), base(items, items.reduce((s, i) => s + (typeof i.total === 'number' ? i.total : 0), 0)))); });
+  }
+  it('control: the same save with VALID lines succeeds (so the refusals above are for the lines, not for something else)', async () => { await assertSucceeds(create(as('rep1'), base([ln()], 10))); });
+  it('create refused: grandTotal differs from the sum of the lines', async () => { await assertFails(create(as('rep1'), base([ln()], 11))); });
+  it('custom line (no productId) with a fractional quantity is allowed on an invoice but is not stock-tracked', async () => {
+    const SA = `sa_mgr_${REQ}`; const db = as('mgr'); const b = writeBatch(db);
+    b.set(doc(db, 'counters', 'naisiInvoice'), { prefix: 'NF-INV', counter: 371, lastInvoiceId: SA });
+    b.set(doc(db, 'invoiceNumbers', 'NF-INV-2026-0370'), { invoiceId: SA, issuedBy: 'mgr', issuedAt: serverTimestamp() });
+    b.set(doc(db, 'invoices', SA), { orderId: null, kind: 'standalone', requestId: REQ, invoiceNo: 'NF-INV-2026-0370', customer: 'Walk-in', items: [{ qty: 1.5, desc: 'Freight', price: 100, total: 150 }], grandTotal: 150, createdBy: 'mgr', createdAt: serverTimestamp() });
+    await assertSucceeds(b.commit());
+  });
+  it('approval of a stored order with a negative quantity is refused by the rules (stock can never go up through approval)', async () => {
+    await adminSet(['orders', 'oN'], { orderNo: 'ORD-2026-0091', status: 'Submitted', customerId: 'c1', customerName: 'Shop', items: [ln({ qty: -5, total: -25 })], grandTotal: -25, createdBy: 'rep1' });
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oN'), { status: 'Approved', stockApplied: true, approvedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  });
+  it('editing an open order to invalid lines is refused', async () => {
+    await adminSet(['orders', 'oE'], { orderNo: 'ORD-2026-0092', status: 'Submitted', customerId: 'c1', customerName: 'Shop', items: [ln()], grandTotal: 10, createdBy: 'rep1' });
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oE'), { items: [ln({ qty: -1, total: -5 })], grandTotal: -5, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oE'), { items: [ln()], grandTotal: 11, updatedAt: serverTimestamp() }));
+  });
+});

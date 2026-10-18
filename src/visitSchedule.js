@@ -18,7 +18,7 @@
 //   coverage %          distinct visited / scheduled. Blank when nothing is scheduled.
 //   conversion %        orders taken / all recorded visits. Blank when there are no visits.
 import { datesInRange, weekdayOfDate, malawiDate } from './malawiTime.js';
-import { targetsForDate, resolveCustomerId } from './scheduleHistory.js';
+import { targetsForDate, visitIdentityAt } from './scheduleHistory.js';
 
 export function isActive(c) { return c && c.active !== false; }
 
@@ -91,11 +91,17 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
     const mine = inRange.filter(v => repKey(v.repEmail) === rep);
     let scheduledCount = 0, visitedCount = 0;
     const due = [];            // { date, customer } - scheduled on a reliable date and not visited by this rep that day
+    const unverifiable = [];   // { date, customer } - shops left out because a legacy merged visit cannot be attributed (finding 4)
+    const identity = new Map(mine.map(v => [v, visitIdentityAt(index, v)]));
+    const ambiguousVisits = mine.filter(v => identity.get(v).ambiguous);
     for (const day of dayInfo) {
       if (!day.reliable) continue;
-      const visitedIds = new Set(mine.filter(v => v.date === day.date).map(v => resolveCustomerId(index, v.customerId)));
-      scheduledCount += day.targets.length;
+      const todays = mine.filter(v => v.date === day.date);
+      const visitedIds = new Set(todays.map(v => identity.get(v)).filter(i => !i.ambiguous).map(i => i.id));
+      const doubtful = new Set(todays.map(v => identity.get(v)).filter(i => i.ambiguous).flatMap(i => i.candidates));
       for (const t of day.targets) {
+        if (doubtful.has(t.customerId)) { unverifiable.push({ date: day.date, customer: { id: t.customerId, name: t.customerName } }); continue; }
+        scheduledCount += 1;
         if (visitedIds.has(t.customerId)) visitedCount += 1;
         else due.push({ date: day.date, customer: { id: t.customerId, name: t.customerName } });
       }
@@ -104,9 +110,11 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
     // the flag the visit itself recorded when it was saved (wasScheduled), and left unclassified if neither exists.
     const extra = [];
     for (const v of mine) {
+      const idn = identity.get(v);
+      if (idn.ambiguous) continue;          // cannot be classified: reported in ambiguousVisits, never guessed
       const day = dayInfo.find(d => d.date === v.date);
       let scheduledThen;
-      if (day && day.reliable) scheduledThen = day.targets.some(t => t.customerId === resolveCustomerId(index, v.customerId));
+      if (day && day.reliable) scheduledThen = day.targets.some(t => t.customerId === idn.id);
       else scheduledThen = typeof v.wasScheduled === 'boolean' ? v.wasScheduled : null;
       if (scheduledThen === false) extra.push(v);
     }
@@ -118,7 +126,7 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
     const attrMine = attributed.filter(o => repKey(o.attributedRepEmail) === rep && o.status !== 'Cancelled' && o.status !== 'Rejected');
     const attrValue = attrMine.reduce((s, o) => s + (Number(o.grandTotal) || 0), 0);
     return {
-      rep, scheduledCount, visitedCount, stillDueCount: scheduledCount - visitedCount, due,
+      rep, scheduledCount, visitedCount, stillDueCount: scheduledCount - visitedCount, due, unverifiable, ambiguousVisits: ambiguousVisits.length,
       reliableDays: reliableDays.length, unreliableDays: unreliableDates.length,
       ordersTaken: orders.length, noOrderVisits: noOrder.length, totalVisits: mine.length,
       closedVisits: closed.length, conversionExclClosedPct: pct(orders.length, mine.length - closed.length),
@@ -135,6 +143,10 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
   return {
     from, to, days: dates.length, rows,
     reliableDays: reliableDays.length, unreliableDates,
+    ambiguity: (() => {
+      const n = rows.reduce((a, r) => a + r.ambiguousVisits, 0);
+      return n ? `${n} visit(s) in this range were made before a customer merge that was done earlier than the app kept the original shop. Which of the merged shops each one belongs to cannot be recovered, so they are not credited to any shop and those shops are left out of Scheduled, Visited and Still due for that rep and day (see "unverifiable"). The visits still count in the totals.` : null;
+    })(),
     limitation: unreliableDates.length
       ? (index.startDate
         ? `Schedule history began on ${index.startDate}. For ${unreliableDates.length} day(s) in this range before that date there is no reliable record of who was scheduled, so Scheduled, Visited, Still due and Coverage are NOT calculated for those days. Orders and No-order counts are still shown from the saved visits.`

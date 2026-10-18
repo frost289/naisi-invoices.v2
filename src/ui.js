@@ -14,7 +14,10 @@ export function showToast(message, type = 'info', duration = 3500) {
   const c = ensureContainer();
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.innerHTML = `<span class="toast-icon">${ICONS[type] || ICONS.info}</span><span class="toast-msg">${message}</span>`;
+  // Built with textContent: a message can contain saved names or server error text and must never be parsed as HTML.
+  const icon = document.createElement('span'); icon.className = 'toast-icon'; icon.textContent = ICONS[type] || ICONS.info;
+  const msg = document.createElement('span'); msg.className = 'toast-msg'; msg.textContent = String(message ?? '');
+  toast.append(icon, msg);
   c.appendChild(toast);
 
   requestAnimationFrame(() => {
@@ -30,7 +33,10 @@ export function showToast(message, type = 'info', duration = 3500) {
 
 export function setButtonLoading(btn, loadingLabel) {
   if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
-  btn.innerHTML = `<span class="btn-spinner"></span><span>${loadingLabel || 'Working…'}</span>`;
+  btn.replaceChildren();
+  const spin = document.createElement('span'); spin.className = 'btn-spinner';
+  const label = document.createElement('span'); label.textContent = loadingLabel || 'Working…';
+  btn.append(spin, label);
   btn.disabled = true;
   btn.classList.add('btn-loading');
 }

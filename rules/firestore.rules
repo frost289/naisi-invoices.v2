@@ -1,6 +1,6 @@
 rules_version = '2';
 // =============================================================================================
-// NAISI FOODS - COMPLETE FIRESTORE RULES, RELEASE CANDIDATE 3 (2026-10-16)
+// NAISI FOODS - COMPLETE FIRESTORE RULES, RELEASE CANDIDATE 4 (2026-10-18)
 // NOT deployed. Run tests/rules against the local emulator before any use (docs/WINDOWS-TESTING.md).
 //
 // RC2 behaviour kept: first-save reads at a rep's own deterministic ids, validated rep visits/orders tied to the
@@ -18,6 +18,14 @@ rules_version = '2';
 //      (reason, previous/new value, actor, server time). Every issued number is also stored once in invoiceNumbers, so
 //      a number can never be issued twice. The order counter can only step +1 together with its order.
 //   7  scheduleChanges / customerMerges / config/scheduleHistory are append-only records (no update, no delete).
+//   RC4 review fixes (docs/RC4-REVIEW-FIXES.md):
+//   2  Order lifecycle: a manager can change an order only through an explicit transition table (managerOrderWriteOk) that
+//      names the old status, the new status and the ONLY fields each move may touch. Invoiced/Delivered/Rejected/Cancelled
+//      orders cannot go back to Approved (so they cannot be cancelled later). The invoicing lock is owned: finishing or releasing
+//      an attempt must present the attempt token (invoicingAttemptEnded), so a stale attempt cannot release or complete a newer one.
+//   3  Order lines and money: orders carry at most 12 lines; every line has a positive quantity (whole for stock-tracked lines),
+//      a non-negative price and total = qty x price (0.01 tolerance); grandTotal = sum of the line totals. Checked on create, on edit,
+//      before approval, and before a cancellation that restores stock. Every new invoice must have internally consistent lines and total. (Whether an order's invoice may differ from its order is a business decision left unchanged; see docs/RC4-REVIEW-FIXES.md.)
 //   8  Customer merge lock: customers/{id}.mergeLock blocks new Invoicing, new visits/orders/invoices and schedule
 //      changes for that customer, and is the ONLY thing that permits moving its records or deleting it.
 // =============================================================================================
@@ -246,6 +254,7 @@ service cloud.firestore {
       return d.kind == 'order' && d.orderId is string &&
         id == 'ord_' + d.orderId &&
         get(orderPath(d.orderId)).data.status == 'Invoicing' &&
+        linesAndTotalOk(d) &&
         getAfter(orderPath(d.orderId)).data.status == 'Invoiced' &&
         getAfter(orderPath(d.orderId)).data.invoiceId == id &&
         getAfter(orderPath(d.orderId)).data.invoiceNo == d.invoiceNo;
@@ -254,6 +263,7 @@ service cloud.firestore {
     // unidentified write (old client, hand-made request) is refused. Not for a customer being merged.
     function standaloneInvoiceOk(id, d) {
       return d.kind == 'standalone' && d.orderId == null &&
+        linesAndTotalOk(d) &&
         d.get('requestId', null) is string &&
         id == 'sa_' + request.auth.uid + '_' + d.requestId &&
         customerFree(d.get('customerId', null));
@@ -276,6 +286,7 @@ service cloud.firestore {
       allow update: if isManager() &&
         !request.resource.data.diff(resource.data).affectedKeys()
           .hasAny(['orderId', 'invoiceNo', 'createdBy', 'createdAt', 'kind', 'requestId']) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data)) &&
         invoiceCustomerOk();
       allow delete: if false;
     }
@@ -383,7 +394,7 @@ service cloud.firestore {
     match /customerMerges/{mergedId} {
       allow read: if isManager();
       allow create: if isManager() &&
-        request.resource.data.keys().hasOnly(['keepId', 'keepName', 'mergedName', 'moved', 'mergedBy', 'mergedByEmail', 'mergedAt']) &&
+        request.resource.data.keys().hasOnly(['keepId', 'keepName', 'mergedName', 'moved', 'visitsKeepOriginal', 'mergedBy', 'mergedByEmail', 'mergedAt']) &&
         request.resource.data.keepId is string && request.resource.data.keepId != mergedId &&
         request.resource.data.mergedBy == request.auth.uid &&
         request.resource.data.mergedByEmail == request.auth.token.email &&
@@ -423,12 +434,41 @@ service cloud.firestore {
       allow delete: if isManager();
     }
 
+    // ---------- order lines and money (finding 3) ----------
+    // Rules have no loops and a budget of 1,000 evaluated expressions per request, so the lines are checked by a BOUNDED, unrolled
+    // schema: 1 to 12 lines. A line is valid when quantity > 0 (and a whole number when it names a product, i.e. is stock-tracked),
+    // price >= 0 and total = quantity x price within 0.01 (currency policy: MWK, 2 decimals; the app computes qty x price once and
+    // stores it). A line with no productId is a custom line: it may have a fractional quantity and is never stock-tracked. A comparison
+    // on a missing or non-numeric field is an error in rules, which denies the write, so those cases are refused too.
+    function lineOk(l) {
+      return l.qty > 0 && l.qty <= 1000000 && l.price >= 0 && l.price <= 1000000000 &&
+        math.abs(l.total - l.qty * l.price) <= 0.01 &&
+        (l.get('productId', null) == null || (l.productId is string && l.productId.size() > 0 && l.qty is int));
+    }
+    function lineAt(items, i) { return items.size() <= i || lineOk(items[i]); }
+    function linesSum(items) {
+      return (items.size() > 0 ? items[0].total : 0) + (items.size() > 1 ? items[1].total : 0) + (items.size() > 2 ? items[2].total : 0) +
+        (items.size() > 3 ? items[3].total : 0) + (items.size() > 4 ? items[4].total : 0) + (items.size() > 5 ? items[5].total : 0) +
+        (items.size() > 6 ? items[6].total : 0) + (items.size() > 7 ? items[7].total : 0) + (items.size() > 8 ? items[8].total : 0) +
+        (items.size() > 9 ? items[9].total : 0) + (items.size() > 10 ? items[10].total : 0) + (items.size() > 11 ? items[11].total : 0);
+    }
+    // d is an order or an invoice document (the same line shape).
+    function linesAndTotalOk(d) {
+      let items = d.get('items', null);
+      return items is list && items.size() >= 1 && items.size() <= 12 &&
+        lineAt(items, 0) && lineAt(items, 1) && lineAt(items, 2) && lineAt(items, 3) && lineAt(items, 4) && lineAt(items, 5) &&
+        lineAt(items, 6) && lineAt(items, 7) && lineAt(items, 8) && lineAt(items, 9) && lineAt(items, 10) && lineAt(items, 11) &&
+        d.get('grandTotal', null) is number && d.grandTotal >= 0 && d.grandTotal <= 1000000000000 &&
+        math.abs(d.grandTotal - linesSum(items)) <= 0.01;
+    }
+
     // ---------- orders ----------
     // Shared by both creation paths: a pinned, valid order for a usable customer whose name and pin it copies.
     function orderBodyOk(d) {
       return d.status == 'Submitted' &&
         validPin(d.get('customerLat', null), d.get('customerLng', null)) &&
-        d.items is list && d.items.size() > 0 && d.grandTotal is number && d.grandTotal >= 0 &&
+        linesAndTotalOk(d) &&
+        !('originalCustomerId' in d) &&
         d.customerId is string && customerUsable(d.customerId) &&
         get(customerPath(d.customerId)).data.name == d.customerName &&
         get(customerPath(d.customerId)).data.lat == d.customerLat &&
@@ -487,9 +527,22 @@ service cloud.firestore {
           resource.data.get('invoicingLeaseStartedAt', null) is timestamp &&
           request.time > resource.data.invoicingLeaseStartedAt + duration.value(10, 'm'));
     }
-    // Invoiced: only from Invoicing, pointing at ord_<orderId>, created in this same commit.
+    // The lock is OWNED. Whoever ends an attempt (finishes it as Invoiced, or releases it back to Approved) must present the token
+    // of the attempt that holds the lock now (invoicingAttemptEnded). An attempt that was superseded after its lease ran out holds an
+    // old token, so it can neither complete nor release the newer attempt. The lock fields are cleared in the same write.
+    function attemptHeld() {
+      return resource.data.get('invoicingAttempt', null) is string && resource.data.invoicingAttempt.size() > 0 &&
+        request.resource.data.get('invoicingAttemptEnded', null) == resource.data.invoicingAttempt &&
+        request.resource.data.get('invoicingAttempt', null) == null &&
+        request.resource.data.get('invoicingLeaseStartedAt', null) == null;
+    }
+    // Invoiced: only from Invoicing, by the attempt that holds the lock, pointing at ord_<orderId>, created in this same commit.
+    // Nothing else on the order may change (lines, totals, customer, numbers, creator...).
     function invoicedEntryOk(orderId) {
-      return resource.data.status == 'Invoicing' &&
+      return resource.data.status == 'Invoicing' && request.resource.data.status == 'Invoiced' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'invoiceId', 'invoiceNo', 'invoicingAttempt',
+          'invoicingLeaseStartedAt', 'invoicingAttemptEnded', 'invoicedAt', 'updatedAt']) &&
+        attemptHeld() &&
         request.resource.data.invoiceId == 'ord_' + orderId &&
         request.resource.data.invoiceNo is string &&
         !exists(invoicePath(request.resource.data.invoiceId)) &&
@@ -499,10 +552,13 @@ service cloud.firestore {
     }
     // Cancelled: only from Submitted/Approved, with a reason, the actor and server time, stock marked released, and the
     // once-only cancellation record created in the same commit (it states whether stock was restored). An Invoicing,
-    // Invoiced, Dispatched or Delivered order can never be cancelled this way.
+    // Invoiced, Dispatched or Delivered order can never be cancelled this way. When stock is to be restored the order's lines must
+    // still be valid (an order with a negative or fractional quantity can never "restore" stock).
     function cancelEntryOk(orderId) {
       let d = request.resource.data;
       return resource.data.status in ['Submitted', 'Approved'] &&
+        d.diff(resource.data).affectedKeys().hasOnly(['status', 'stockApplied', 'cancelReason', 'cancelledBy', 'cancelledByEmail',
+          'cancelledAt', 'cancelPriorStatus', 'updatedAt']) &&
         d.get('cancelReason', null) is string && d.cancelReason.trim().size() >= 3 && d.cancelReason.size() <= 300 &&
         d.get('cancelledBy', null) == request.auth.uid &&
         d.get('cancelledByEmail', null) == request.auth.token.email &&
@@ -514,7 +570,8 @@ service cloud.firestore {
         getAfter(cancellationPath(orderId)).data.priorStatus == resource.data.status &&
         getAfter(cancellationPath(orderId)).data.cancelledBy == request.auth.uid &&
         getAfter(cancellationPath(orderId)).data.stockRestored is bool &&
-        (resource.data.status == 'Approved' || getAfter(cancellationPath(orderId)).data.stockRestored == false);
+        (resource.data.status == 'Approved' || getAfter(cancellationPath(orderId)).data.stockRestored == false) &&
+        (getAfter(cancellationPath(orderId)).data.stockRestored == false || linesAndTotalOk(resource.data));
     }
     // Re-pointing an order to another customer happens ONLY in a merge (customer fields only, never an order in
     // Invoicing), or as an ordinary edit of an open order between two customers that are not being merged.
@@ -526,21 +583,57 @@ service cloud.firestore {
     }
     function orderCustomerOk() {
       return request.resource.data.get('customerId', null) == resource.data.get('customerId', null) ||
-        orderMergeMoveOk() ||
         (resource.data.status in ['Submitted', 'Approved'] &&
           customerFree(resource.data.get('customerId', null)) &&
           customerUsable(request.resource.data.get('customerId', null)));
     }
-    function managerOrderWriteOk(orderId) {
-      return (resource.data.status != 'Cancelled' || orderMergeMoveOk()) &&
+
+    // ---- THE ORDER TRANSITION TABLE (finding 2): a manager can change an order only in these ways. Each row names the old status,
+    // the new status and the only fields it may touch; anything else (any other status move, any other field) is refused.
+    //   Submitted -> Approved    status, stockApplied(=true), approvedAt, updatedAt; the stored lines must be valid
+    //   Submitted -> Rejected    status, rejectedAt, managerNotes, updatedAt
+    //   Submitted|Approved -> Cancelled   cancelEntryOk (reason, actor, server time, once-only record)
+    //   Approved -> Invoicing    status, invoicingAttempt, invoicingLeaseStartedAt (server time), updatedAt
+    //   Invoicing -> Invoicing   same fields, only after the 10-minute lease has run out (take-over)
+    //   Invoicing -> Approved    release: status, lock fields cleared, the holder's token presented
+    //   Invoicing -> Invoiced    invoicedEntryOk (invoice created in the same commit, the holder's token presented)
+    //   Submitted|Approved -> same status   edit: customer details, notes, lines, grandTotal, updatedAt (valid lines)
+    //   any status, customer fields only   a merge move under the merge lock (never an Invoicing order)
+    // There is no row that leaves Invoiced, Delivered, Rejected or Cancelled, and none that goes to Submitted/Dispatched/Delivered
+    // (Delivered is the deliverer's own rule).
+    function approveEntryOk() {
+      return resource.data.status == 'Submitted' && request.resource.data.status == 'Approved' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'stockApplied', 'approvedAt', 'updatedAt']) &&
+        request.resource.data.get('stockApplied', false) == true &&
+        linesAndTotalOk(resource.data);
+    }
+    function rejectEntryOk() {
+      return resource.data.status == 'Submitted' && request.resource.data.status == 'Rejected' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'rejectedAt', 'managerNotes', 'updatedAt']);
+    }
+    function editEntryOk() {
+      return resource.data.status in ['Submitted', 'Approved'] && request.resource.data.status == resource.data.status &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customerName', 'customerPhone',
+          'customerLocation', 'notes', 'items', 'grandTotal', 'updatedAt']) &&
         orderCustomerOk() &&
-        (request.resource.data.status != 'Invoicing' || invoicingEntryOk()) &&
-        (request.resource.data.status != 'Cancelled' || resource.data.status == 'Cancelled' || cancelEntryOk(orderId)) &&
-        (request.resource.data.status != 'Invoiced' ||
-          (resource.data.status == 'Invoiced' &&
-            request.resource.data.get('invoiceId', null) == resource.data.get('invoiceId', null) &&
-            request.resource.data.get('invoiceNo', null) == resource.data.get('invoiceNo', null)) ||
-          invoicedEntryOk(orderId));
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data));
+    }
+    function lockEntryOk() {
+      return request.resource.data.status == 'Invoicing' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'invoicingAttempt', 'invoicingLeaseStartedAt', 'updatedAt']) &&
+        invoicingEntryOk();
+    }
+    function releaseEntryOk() {
+      return resource.data.status == 'Invoicing' && request.resource.data.status == 'Approved' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'invoicingAttempt', 'invoicingLeaseStartedAt',
+          'invoicingAttemptEnded', 'updatedAt']) &&
+        attemptHeld();
+    }
+    function managerOrderWriteOk(orderId) {
+      return orderMergeMoveOk() ||
+        approveEntryOk() || rejectEntryOk() || editEntryOk() ||
+        (request.resource.data.status == 'Cancelled' && cancelEntryOk(orderId)) ||
+        lockEntryOk() || releaseEntryOk() || invoicedEntryOk(orderId);
     }
 
     match /orders/{orderId} {
@@ -618,6 +711,7 @@ service cloud.firestore {
         d.requestId is string &&
         visitId == 'v_' + request.auth.uid + '_' + d.requestId &&
         d.createdAt == request.time &&
+        !('originalCustomerId' in d) &&
         d.customerId is string && customerUsable(d.customerId) &&
         get(customerPath(d.customerId)).data.name == d.customerName &&
         ((d.outcome == 'No Order' && noOrderOk(d)) ||
@@ -636,10 +730,13 @@ service cloud.firestore {
       allow list: if isManager() ||
         (isSubmitter() && resource.data.repId == request.auth.uid);
       // Visit reports are a record: no edits and no deletes, except that a manager merging two duplicate customers
-      // may re-point a visit to the kept customer (customerId / customerName only, and only under the merge lock).
+      // may re-point a visit to the kept customer (customerId / customerName only, and only under the merge lock). The re-point must
+      // keep the shop the visit was recorded against in originalCustomerId (set once, never changed), so that history can still tell
+      // the merged shops apart (finding 4). A rep can never set originalCustomerId on a new visit (see validRepVisit).
       allow update: if isManager() &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customerName']) &&
-        lockedInto(resource.data.customerId, request.resource.data.customerId);
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customerName', 'originalCustomerId']) &&
+        lockedInto(resource.data.customerId, request.resource.data.customerId) &&
+        request.resource.data.get('originalCustomerId', null) == resource.data.get('originalCustomerId', resource.data.customerId);
       allow delete: if false;
     }
 

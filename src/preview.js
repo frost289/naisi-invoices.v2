@@ -29,7 +29,8 @@ export function updatePreview(els) {
   items.forEach(it => {
     grandTotal += it.total;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${it.qty}</td><td>${it.desc || '—'}</td><td class="num">${mwk(it.price)}</td><td class="num">${mwk(it.total)}</td>`;
+    const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; return td; };
+    tr.append(cell(String(it.qty)), cell(it.desc || '—'), cell(mwk(it.price), 'num'), cell(mwk(it.total), 'num'));
     els.pvItemsBody.appendChild(tr);
   });
   if (items.length === 0) {

@@ -1,8 +1,8 @@
 # What changed in the Firestore rules (RC2 -> RC3)
 
-File: `rules/firestore.rules.FINAL-CANDIDATE` (675 lines; RC2 was 395). Exact line diff: `firestore.rules.RC2-to-RC3.diff` (in the evidence pack).
+File: `rules/firestore.rules` (675 lines; RC2 was 395). Exact line diff: `firestore.rules.RC2-to-RC3.diff` (in the evidence pack).
 
-**It is a complete replacement file, not a patch to paste in.** The repository does not contain the rules currently live in Firebase. Before publishing, compare the live rules with the RC2 file (`git show c9de8de:rules/firestore.rules.FINAL-CANDIDATE`). If they differ, merge deliberately.
+**It is a complete replacement file, not a patch to paste in.** The repository does not contain the rules currently live in Firebase. Before publishing, compare the live rules with the RC2 file (`git show c9de8de:rules/firestore.rules`). If they differ, merge deliberately.
 
 **STATUS: NOT TESTED ON AN EMULATOR.** Do not publish until `run-rules-tests.bat` (170 cases) passes. Publish rules and app together; old app tabs must be closed and reloaded (see RELEASE-CHECKLIST.md).
 

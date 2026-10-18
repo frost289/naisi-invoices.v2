@@ -51,7 +51,7 @@ export function watchCounterState(onChange) {
 //   - writes an append-only audit record (previous value, new value, who, why, server time) in the SAME commit,
 //   - can never cause a number to be issued twice: every issued number is also stored once in `invoiceNumbers`,
 //     and the invoice commit is refused if its number is already there (see commitInvoice).
-// The security rules enforce all of this too (rules/firestore.rules.FINAL-CANDIDATE, `counters` and `counterAdjustments`).
+// The security rules enforce all of this too (rules/firestore.rules, `counters` and `counterAdjustments`).
 export const MAX_COUNTER = 99_999_999;
 export const MIN_REASON = 3;
 export const MAX_REASON = 300;

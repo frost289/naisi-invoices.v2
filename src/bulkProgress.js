@@ -117,10 +117,10 @@ export function runBulkJob({ title, intro, startLabel, orders, runOne, followUp 
           <td>${esc(r.order.orderNo || r.order.id)}</td>
           <td>${esc(r.order.customerName || '—')}</td>
           <td class="num">${mwk(r.amount ?? r.order.grandTotal ?? 0)}</td>
-          <td style="color:${STATE_COLOR[r.state]}; font-weight:600;">
-            ${STATE_LABEL[r.state]}${r.invoiceNo ? ` · ${esc(r.invoiceNo)}` : ''}
+          <td style="color:${esc(STATE_COLOR[r.state])}; font-weight:600;">
+            ${esc(STATE_LABEL[r.state])}${r.invoiceNo ? ` · ${esc(r.invoiceNo)}` : ''}
             ${r.text ? `<div style="font-weight:400; font-size:0.75rem; color:var(--muted);">${esc(r.text)}</div>` : ''}
-            ${r.retryPdf ? `<button type="button" class="list-action-btn" data-pdf="${i}" style="margin-top:4px;">Download PDF</button>` : ''}
+            ${r.retryPdf ? `<button type="button" class="list-action-btn" data-pdf="${esc(i)}" style="margin-top:4px;">Download PDF</button>` : ''}
           </td>
         </tr>`).join('');
       const finished = rows.filter(r => r.state !== 'waiting' && r.state !== 'working').length;
@@ -150,16 +150,16 @@ export function runBulkJob({ title, intro, startLabel, orders, runOne, followUp 
       const invoiced = rows.filter(r => r.invoiceNo && r.state === 'done');
       const noPdf = rows.filter(r => r.retryPdf);
       const lines = [
-        `<strong>${done.length}</strong> done` +
-          (skipped.length ? ` · <strong>${skipped.length}</strong> already done earlier` : '') +
-          (failed.length ? ` · <strong style="color:#b3261e;">${failed.length} failed</strong>` : ''),
+        `<strong>${esc(done.length)}</strong> done` +
+          (skipped.length ? ` · <strong>${esc(skipped.length)}</strong> already done earlier` : '') +
+          (failed.length ? ` · <strong style="color:#b3261e;">${esc(failed.length)} failed</strong>` : ''),
       ];
       if (invoiced.length) {
         const nos = invoiced.map(r => r.invoiceNo).sort();
         const total = invoiced.reduce((s, r) => s + (r.amount || 0), 0);
         lines.push(`Invoices issued: ${esc(nos[0])}${nos.length > 1 ? ` to ${esc(nos.at(-1))}` : ''} · Total ${mwk(total)}`);
       }
-      if (noPdf.length) lines.push(`<strong>${noPdf.length}</strong> invoice(s) saved but the PDF did not download — use "Download PDF" on those rows. They are NOT duplicated by doing so.`);
+      if (noPdf.length) lines.push(`<strong>${esc(noPdf.length)}</strong> invoice(s) saved but the PDF did not download — use "Download PDF" on those rows. They are NOT duplicated by doing so.`);
       if (failed.length) lines.push('Failed: ' + failed.map(r => `${esc(r.order.orderNo)} (${esc(r.text)})`).join('; '));
       summaryEl.innerHTML = lines.join('<br>');
       summaryEl.style.display = 'block';

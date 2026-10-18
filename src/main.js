@@ -42,6 +42,7 @@ import {
 import { orderRevisionKey } from './orderRevision.js';
 import { invoiceOrderForBulk } from './invoiceFlow.js';
 import { wholeNumber } from './numbers.js';
+import { validateOrderLines } from './orderLines.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelOrder, validateCancelReason,
   editOrderWithStock, receiveStockCases, fetchAllStockMovementsPage, fetchStockMovementsForProduct, casesToPacks
@@ -84,7 +85,7 @@ function formatItemsSummary(items) {
 }
 
 function googleMapsUrl(lat, lng) {
-  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+  return `https://www.google.com/maps/search/?api=1&query=${Number(lat)},${Number(lng)}`;
 }
 
 const loginScreen = document.getElementById('loginScreen');
@@ -638,7 +639,7 @@ async function initApp(user, role) {
     function render(matches) {
       if (!matches.length) { suggestionsEl.style.display = 'none'; suggestionsEl.innerHTML = ''; return; }
       suggestionsEl.innerHTML = matches.slice(0, 8).map(l => `
-        <div class="suggestion-item" data-name="${l.name}"><span class="sug-name">${l.name}</span></div>
+        <div class="suggestion-item" data-name="${esc(l.name)}"><span class="sug-name">${esc(l.name)}</span></div>
       `).join('');
       suggestionsEl.style.display = 'block';
     }
@@ -720,10 +721,10 @@ async function initApp(user, role) {
 
     return new Promise((resolve) => {
       dupMatchesList.innerHTML = matches.map(m => `
-        <div class="suggestion-item" data-id="${m.customer.id}" style="border:1px solid var(--line); border-radius:8px; margin-bottom:8px; padding:10px 12px;">
-          <div style="font-weight:700;">${m.customer.name}</div>
-          <div style="font-size:0.78rem; color:var(--muted);">${m.customer.phone || 'No phone'} · ${m.customer.location || 'No location'}</div>
-          <div style="font-size:0.72rem; color:#b3261e; margin-top:4px;">Matches on: ${m.reasons.join(', ')}</div>
+        <div class="suggestion-item" data-id="${esc(m.customer.id)}" style="border:1px solid var(--line); border-radius:8px; margin-bottom:8px; padding:10px 12px;">
+          <div style="font-weight:700;">${esc(m.customer.name)}</div>
+          <div style="font-size:0.78rem; color:var(--muted);">${esc(m.customer.phone || 'No phone')} · ${esc(m.customer.location || 'No location')}</div>
+          <div style="font-size:0.72rem; color:#b3261e; margin-top:4px;">Matches on: ${esc(m.reasons.join(', '))}</div>
           <button type="button" class="list-action-btn" data-action="use-existing" style="margin-top:6px;">Use This Customer</button>
         </div>
       `).join('');
@@ -796,9 +797,9 @@ async function initApp(user, role) {
     function renderSuggestions(matches) {
       if (!matches.length) { custSuggestions.style.display = 'none'; custSuggestions.innerHTML = ''; return; }
       custSuggestions.innerHTML = matches.slice(0, 8).map(c => `
-        <div class="suggestion-item" data-id="${c.id}">
-          <span class="sug-name">${c.name}</span>
-          <span class="sug-meta">${c.phone || ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+        <div class="suggestion-item" data-id="${esc(c.id)}">
+          <span class="sug-name">${esc(c.name)}</span>
+          <span class="sug-meta">${esc(c.phone || '')}${esc(c.phone && c.location ? ' · ' : '')}${esc(c.location || '')}</span>
         </div>
       `).join('');
       custSuggestions.style.display = 'block';
@@ -994,9 +995,9 @@ async function initApp(user, role) {
     // Only managers choose or change a visit day. Reps (and a manager previewing the rep screen) see it as text.
     if (!isManager) return c.assignedDay ? esc(VISIT_DAY_FULL_NAMES[c.assignedDay] || c.assignedDay) : '<span style="color:var(--muted);">Awaiting scheduling</span>';
     const options = ['<option value="">—</option>'].concat(
-      VISIT_DAYS.map(d => `<option value="${d}" ${c.assignedDay === d ? 'selected' : ''}>${d}</option>`)
+      VISIT_DAYS.map(d => `<option value="${esc(d)}" ${esc(c.assignedDay === d ? 'selected' : '')}>${esc(d)}</option>`)
     ).join('');
-    return `<select class="customer-day-select" data-id="${c.id}" style="min-width:68px; padding:4px; font-size:0.78rem; border:1.5px solid var(--line); border-radius:6px;">${options}</select>`;
+    return `<select class="customer-day-select" data-id="${esc(c.id)}" style="min-width:68px; padding:4px; font-size:0.78rem; border:1.5px solid var(--line); border-radius:6px;">${options}</select>`;
   }
 
   function customerStatusCellHtml(c) {
@@ -1025,13 +1026,13 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = c.id;
       tr.innerHTML = `
-        <td>${c.name}</td><td>${c.phone ? formatPhoneForDisplay(c.phone) : ''}</td><td>${c.location || ''}</td>
+        <td>${esc(c.name)}</td><td>${esc(c.phone ? formatPhoneForDisplay(c.phone) : '')}</td><td>${esc(c.location || '')}</td>
         <td>${customerDayCellHtml(c)}</td>
         <td>${customerMapCellHtml(c)}</td>
         <td>${customerStatusCellHtml(c)}</td>
         <td>
           <button type="button" class="list-action-btn" data-action="edit">Edit</button>
-          ${isManager ? `<button type="button" class="list-action-btn ${isActive ? 'exp-delete-btn' : ''}" data-action="${isActive ? 'deactivate' : 'reactivate'}">${isActive ? 'Deactivate' : 'Reactivate'}</button>` : ''}
+          ${isManager ? `<button type="button" class="list-action-btn ${esc(isActive ? 'exp-delete-btn' : '')}" data-action="${esc(isActive ? 'deactivate' : 'reactivate')}">${esc(isActive ? 'Deactivate' : 'Reactivate')}</button>` : ''}
         </td>
       `;
       customerListBody.appendChild(tr);
@@ -1054,7 +1055,7 @@ async function initApp(user, role) {
     const banner = document.getElementById('customersNoPinBanner');
     banner.style.display = missing > 0 ? 'block' : 'none';
     banner.innerHTML = missing > 0
-      ? `<strong>📍 ${missing} active customer${missing === 1 ? '' : 's'} still ${missing === 1 ? 'has' : 'have'} no pinned location.</strong><p>Deliveries need a pin. Tick the box below to list them, then tap "Set Location" on each.</p>`
+      ? `<strong>📍 ${esc(missing)} active customer${esc(missing === 1 ? '' : 's')} still ${esc(missing === 1 ? 'has' : 'have')} no pinned location.</strong><p>Deliveries need a pin. Tick the box below to list them, then tap "Set Location" on each.</p>`
       : '';
     customerSearchHint.textContent = term ? `Searching ${loadedCustomers.length} loaded customer${loadedCustomers.length === 1 ? '' : 's'}.` : '';
   }
@@ -1098,13 +1099,13 @@ async function initApp(user, role) {
       const c = loadedCustomers.find(c => c.id === id);
       if (!c) return;
       tr.innerHTML = `
-        <td><input class="customer-edit-input" data-field="name" value="${c.name || ''}"></td>
+        <td><input class="customer-edit-input" data-field="name" value="${esc(c.name || '')}"></td>
         <td>
-          <input class="customer-edit-input" data-field="phone" value="${c.phone ? formatPhoneForDisplay(c.phone) : ''}">
+          <input class="customer-edit-input" data-field="phone" value="${esc(c.phone ? formatPhoneForDisplay(c.phone) : '')}">
           <p class="customer-edit-phone-error" style="color:#b3261e; font-size:0.7rem; display:none; margin-top:2px;"></p>
         </td>
         <td style="position:relative;">
-          <input class="customer-edit-input customer-edit-location" data-field="location" value="${c.location || ''}" autocomplete="off">
+          <input class="customer-edit-input customer-edit-location" data-field="location" value="${esc(c.location || '')}" autocomplete="off">
           <div class="suggestions-dropdown customer-edit-location-suggestions" style="display:none;"></div>
         </td>
         <td>${customerDayCellHtml(c)}</td>
@@ -1237,21 +1238,21 @@ async function initApp(user, role) {
 
     function renderScheduleDayTabs() {
       scheduleDayTabs.innerHTML = VISIT_DAYS.map(d => `
-        <button type="button" class="list-action-btn schedule-day-tab" data-day="${d}" style="${d === currentScheduleDay ? 'background:var(--leaf); color:#fff; border-color:var(--leaf);' : ''}">${scheduleDayLabels[d]}</button>
+        <button type="button" class="list-action-btn schedule-day-tab" data-day="${esc(d)}" style="${esc(d === currentScheduleDay ? 'background:var(--leaf); color:#fff; border-color:var(--leaf);' : '')}">${esc(scheduleDayLabels[d])}</button>
       `).join('');
     }
 
     function renderScheduleDayList() {
       const customersForDay = customersCache.filter(c => c.active !== false && c.assignedDay === currentScheduleDay);
       scheduleDayList.innerHTML = customersForDay.length
-        ? `<p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${customersForDay.length} customer${customersForDay.length === 1 ? '' : 's'} on ${scheduleDayLabels[currentScheduleDay]}</p>` +
+        ? `<p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${esc(customersForDay.length)} customer${esc(customersForDay.length === 1 ? '' : 's')} on ${esc(scheduleDayLabels[currentScheduleDay])}</p>` +
           customersForDay.map(c => `
             <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line);">
               <span>${esc(c.name)}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${esc(c.location)}</span>` : ''}</span>
               ${customerDayCellHtml(c)}
             </div>
           `).join('')
-        : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${scheduleDayLabels[currentScheduleDay]} yet — set a day per customer in the Manage Customers table above.</p>`;
+        : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${esc(scheduleDayLabels[currentScheduleDay])} yet — set a day per customer in the Manage Customers table above.</p>`;
     }
 
     // Customers with no visit day yet: shown to managers so none is forgotten. They are not on any rep's list and not targets.
@@ -1338,20 +1339,20 @@ async function initApp(user, role) {
       const skipped = rows.filter(r => r.status === 'skip');
       const optionsFor = (r) => `<option value="">- choose the right customer -</option>` + r.candidates.map(id => {
         const c = customersCache.find(x => x.id === id);
-        return c ? `<option value="${esc(id)}" ${choices[r.line] === id ? 'selected' : ''}>${esc(c.name)}${c.location ? ' - ' + esc(c.location) : ''} (now: ${importDayLabel(c.assignedDay)})</option>` : '';
+        return c ? `<option value="${esc(id)}" ${esc(choices[r.line] === id ? 'selected' : '')}>${esc(c.name)}${c.location ? ' - ' + esc(c.location) : ''} (now: ${esc(importDayLabel(c.assignedDay))})</option>` : '';
       }).join('');
       const line = (r) => {
         const m = moveByLine.get(r.line), n = noteByLine.get(r.line);
         if (r.status === 'matched' || (r.status === 'choose' && choices[r.line])) {
           const c = customersCache.find(x => x.id === (r.customerId || choices[r.line]));
-          if (m) return `<label style="display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><input type="checkbox" class="import-move" data-line="${r.line}" ${off.has(r.line) ? '' : 'checked'}> <span style="flex:1;">${esc(m.name)}${r.status === 'choose' ? ' <em>(you chose)</em>' : ''}</span><span style="color:var(--muted);">${importDayLabel(m.from)} → <strong>${scheduleDayLabels[m.to]}</strong></span></label>`;
+          if (m) return `<label style="display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><input type="checkbox" class="import-move" data-line="${esc(r.line)}" ${esc(off.has(r.line) ? '' : 'checked')}> <span style="flex:1;">${esc(m.name)}${r.status === 'choose' ? ' <em>(you chose)</em>' : ''}</span><span style="color:var(--muted);">${esc(importDayLabel(m.from))} → <strong>${esc(scheduleDayLabels[m.to])}</strong></span></label>`;
           return `<div class="import-note" style="padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem; color:var(--muted);">${esc(c ? c.name : r.planName)}: ${esc(n ? n.why : 'no change')}</div>`;
         }
-        if (r.status === 'choose') return `<div style="padding:6px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><strong>${esc(r.planName)}</strong> → ${scheduleDayLabels[r.day]} <span style="color:var(--muted);">(${esc(r.how)})</span><br><select class="import-choice" data-line="${r.line}" style="max-width:100%;">${optionsFor(r)}</select></div>`;
+        if (r.status === 'choose') return `<div style="padding:6px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><strong>${esc(r.planName)}</strong> → ${esc(scheduleDayLabels[r.day])} <span style="color:var(--muted);">(${esc(r.how)})</span><br><select class="import-choice" data-line="${esc(r.line)}" style="max-width:100%;">${optionsFor(r)}</select></div>`;
         return '';
       };
       importResult.innerHTML = `
-        <p class="numbering-hint" id="importSummary">${rows.length} rows read: ${moves.length} change${moves.length === 1 ? '' : 's'} ready, ${notes.length} already correct or not possible, ${need} need your choice, ${missing.length} not found in the app, ${skipped.length} skipped.</p>
+        <p class="numbering-hint" id="importSummary">${esc(rows.length)} rows read: ${esc(moves.length)} change${esc(moves.length === 1 ? '' : 's')} ready, ${esc(notes.length)} already correct or not possible, ${esc(need)} need your choice, ${esc(missing.length)} not found in the app, ${esc(skipped.length)} skipped.</p>
         ${rows.map(line).join('')}
         ${missing.length ? `<p class="numbering-hint" id="importMissing" style="margin-top:8px;"><strong>Not found in the app</strong> (add each with a map pin first, then import again): ${missing.map(r => esc(r.planName)).join(', ')}.</p>` : ''}
         ${skipped.length ? `<p class="numbering-hint" style="margin-top:8px;">Skipped (not existing customers or no valid day): ${skipped.map(r => esc(r.planName) + ' (' + esc(r.note) + ')').join('; ')}</p>` : ''}
@@ -1390,7 +1391,7 @@ async function initApp(user, role) {
       });
       await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
       importState = null; document.getElementById('importDaysFile').value = '';
-      importResult.innerHTML = `<p id="importDone" style="font-size:0.9rem;"><strong>${res.applied.length} changed.</strong>` +
+      importResult.innerHTML = `<p id="importDone" style="font-size:0.9rem;"><strong>${esc(res.applied.length)} changed.</strong>` +
         (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
         (res.failed.length ? ` ${res.failed.length} failed: ${res.failed.map(m => esc(m.name) + ' (' + esc(m.error) + ')').join('; ')}.` : '') + '</p>';
       showToast(`${res.applied.length} visit day${res.applied.length === 1 ? '' : 's'} updated.`, res.failed.length ? 'error' : 'success');
@@ -1401,7 +1402,7 @@ async function initApp(user, role) {
     const suggestPanel = document.getElementById('suggestSchedulePanel');
     const suggestResult = document.getElementById('suggestResult');
     document.getElementById('suggestDayChecks').innerHTML = DEFAULT_DAYS.map(d =>
-      `<label style="font-size:0.85rem; display:flex; align-items:center; gap:4px;"><input type="checkbox" class="suggest-day" value="${d}" checked> ${scheduleDayLabels[d]}</label>`).join('');
+      `<label style="font-size:0.85rem; display:flex; align-items:center; gap:4px;"><input type="checkbox" class="suggest-day" value="${esc(d)}" checked> ${esc(scheduleDayLabels[d])}</label>`).join('');
     document.getElementById('suggestScheduleToggleBtn').addEventListener('click', () => {
       suggestPanel.style.display = suggestPanel.style.display === 'none' ? 'block' : 'none';
     });
@@ -1410,12 +1411,12 @@ async function initApp(user, role) {
     function renderSuggestion(r) {
       const dayRows = DEFAULT_DAYS.map(d => {
         const b = r.before.perDay.find(x => x.day === d), a = r.after.perDay.find(x => x.day === d);
-        return (b || a) ? `<tr><td>${scheduleDayLabels[d]}</td><td>${b ? b.count : 0} → ${a ? a.count : 0}</td><td>${b ? kmText(b.km) : '-'} → ${a ? kmText(a.km) : '-'}</td></tr>` : '';
+        return (b || a) ? `<tr><td>${esc(scheduleDayLabels[d])}</td><td>${esc(b ? b.count : 0)} → ${esc(a ? a.count : 0)}</td><td>${esc(b ? kmText(b.km) : '-')} → ${esc(a ? kmText(a.km) : '-')}</td></tr>` : '';
       }).join('');
       const moveRows = r.moves.map((m, i) => `<label style="display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem;">
-          <input type="checkbox" class="suggest-move" data-i="${i}" checked> <span style="flex:1;">${esc(m.name)}</span>
-          <span style="color:var(--muted);">${m.from ? scheduleDayLabels[m.from] : 'no day'} → <strong>${scheduleDayLabels[m.to]}</strong></span></label>`).join('');
-      const skipped = r.skipped.length ? `<p class="numbering-hint" id="suggestSkipped" style="margin-top:8px;">${r.skipped.length} shop${r.skipped.length === 1 ? '' : 's'} could not be placed because there is no map pin (they are left as they are): ${r.skipped.map(x => esc(x.name)).join(', ')}.</p>` : '';
+          <input type="checkbox" class="suggest-move" data-i="${esc(i)}" checked> <span style="flex:1;">${esc(m.name)}</span>
+          <span style="color:var(--muted);">${esc(m.from ? scheduleDayLabels[m.from] : 'no day')} → <strong>${esc(scheduleDayLabels[m.to])}</strong></span></label>`).join('');
+      const skipped = r.skipped.length ? `<p class="numbering-hint" id="suggestSkipped" style="margin-top:8px;">${esc(r.skipped.length)} shop${esc(r.skipped.length === 1 ? '' : 's')} could not be placed because there is no map pin (they are left as they are): ${r.skipped.map(x => esc(x.name)).join(', ')}.</p>` : '';
       suggestResult.innerHTML = `
         <table style="width:100%; font-size:0.82rem; border-collapse:collapse; margin-bottom:8px;"><thead><tr style="text-align:left; color:var(--muted);"><th>Day</th><th>Shops (now → suggested)</th><th>Approx. route (now → suggested)</th></tr></thead><tbody>${dayRows}</tbody></table>
         <p class="numbering-hint" id="suggestTotals">Total approx. route (straight-line): ${kmText(r.before.totalKm)} now → ${kmText(r.after.totalKm)} suggested.</p>
@@ -1452,7 +1453,7 @@ async function initApp(user, role) {
       });
       await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
       currentSuggestion = null;
-      suggestResult.innerHTML = `<p id="suggestSummary" style="font-size:0.9rem;"><strong>${res.applied.length} changed.</strong>` +
+      suggestResult.innerHTML = `<p id="suggestSummary" style="font-size:0.9rem;"><strong>${esc(res.applied.length)} changed.</strong>` +
         (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
         (res.failed.length ? ` ${res.failed.length} failed: ${res.failed.map(m => esc(m.name) + ' (' + esc(m.error) + ')').join('; ')}.` : '') + '</p>';
       showToast(`${res.applied.length} visit day${res.applied.length === 1 ? '' : 's'} updated.`, res.failed.length ? 'error' : 'success');
@@ -1473,11 +1474,11 @@ async function initApp(user, role) {
     function renderLocationsList() {
       locationsList.innerHTML = locationsCache.length
         ? locationsCache.map(l => `
-            <span style="display:inline-flex; align-items:center; gap:6px; background:${l.pendingReview ? '#fff4e0' : '#f7f6f2'}; border-radius:20px; padding:6px 8px 6px 14px; font-size:0.82rem;">
-              ${l.name}
+            <span style="display:inline-flex; align-items:center; gap:6px; background:${esc(l.pendingReview ? '#fff4e0' : '#f7f6f2')}; border-radius:20px; padding:6px 8px 6px 14px; font-size:0.82rem;">
+              ${esc(l.name)}
               ${l.pendingReview ? `<span style="color:#7a5210; font-weight:700; font-size:0.68rem; text-transform:uppercase;">New</span>
-                <button type="button" class="map-pin-btn-small" data-action="review-location" data-id="${l.id}" style="border:none; background:none; color:var(--forest-2); padding:2px 6px;" title="Mark reviewed">✓</button>` : ''}
-              <button type="button" class="map-pin-btn-small" data-action="delete-location" data-id="${l.id}" style="border:none; background:none; color:#b3261e; padding:2px 6px;">✕</button>
+                <button type="button" class="map-pin-btn-small" data-action="review-location" data-id="${esc(l.id)}" style="border:none; background:none; color:var(--forest-2); padding:2px 6px;" title="Mark reviewed">✓</button>` : ''}
+              <button type="button" class="map-pin-btn-small" data-action="delete-location" data-id="${esc(l.id)}" style="border:none; background:none; color:#b3261e; padding:2px 6px;">✕</button>
             </span>
           `).join('')
         : `<p style="color:var(--muted); font-size:0.82rem;">No approved locations yet — add your first one above.</p>`;
@@ -1553,9 +1554,9 @@ async function initApp(user, role) {
         const matches = customersCache.filter(c => (c.name || '').toLowerCase().includes(q)).slice(0, 8);
         if (!matches.length) { suggestionsEl.style.display = 'none'; return; }
         suggestionsEl.innerHTML = matches.map(c => `
-          <div class="suggestion-item" data-id="${c.id}">
-            <span class="sug-name">${c.name}</span>
-            <span class="sug-meta">${c.phone ? formatPhoneForDisplay(c.phone) : ''}${c.phone && c.location ? ' · ' : ''}${c.location || ''}</span>
+          <div class="suggestion-item" data-id="${esc(c.id)}">
+            <span class="sug-name">${esc(c.name)}</span>
+            <span class="sug-meta">${esc(c.phone ? formatPhoneForDisplay(c.phone) : '')}${esc(c.phone && c.location ? ' · ' : '')}${esc(c.location || '')}</span>
           </div>
         `).join('');
         suggestionsEl.style.display = 'block';
@@ -1590,15 +1591,15 @@ async function initApp(user, role) {
           : '';
         mergePreview.innerHTML = `
           <strong>${esc(mergeAwayCustomer.name)}</strong> will be removed as a customer. Its
-          <strong>${counts.orders}</strong> order(s), <strong>${counts.visits}</strong> visit(s), and
-          <strong>${counts.invoices}</strong> invoice(s) will move onto <strong>${esc(mergeKeepCustomer.name)}</strong>
+          <strong>${esc(counts.orders)}</strong> order(s), <strong>${esc(counts.visits)}</strong> visit(s), and
+          <strong>${esc(counts.invoices)}</strong> invoice(s) will move onto <strong>${esc(mergeKeepCustomer.name)}</strong>
           (amounts, numbers, statuses and invoice links are not changed; its schedule history is kept).
           ${blockedNote}
           <br><span style="color:var(--muted); font-size:0.78rem;">Note: only invoices created since this merge feature shipped carry the link needed to move — older invoices won't be found by this count.</span>
         `;
         mergeConfirmBtn.style.display = 'block';
       } catch (err) {
-        mergePreview.innerHTML = `<span style="color:#b3261e;">Could not check activity: ${err.message}</span>`;
+        mergePreview.innerHTML = `<span style="color:#b3261e;">Could not check activity: ${esc(err.message)}</span>`;
       }
     }
 
@@ -1666,11 +1667,11 @@ async function initApp(user, role) {
         const tr = document.createElement('tr');
         tr.dataset.id = p.id;
         tr.innerHTML = `
-          <td>${p.productName}</td>
-          <td>${p.packLabel}</td>
-          <td style="font-family:'JetBrains Mono',monospace;">${p.quantity ?? '—'}</td>
-          <td style="font-family:'JetBrains Mono',monospace;">${p.unitsPerCase ?? '—'}</td>
-          <td style="font-family:'JetBrains Mono',monospace; ${stock <= 0 ? 'color:#b3261e; font-weight:700;' : ''}">${stock}</td>
+          <td>${esc(p.productName)}</td>
+          <td>${esc(p.packLabel)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${esc(p.quantity ?? '—')}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${esc(p.unitsPerCase ?? '—')}</td>
+          <td style="font-family:'JetBrains Mono',monospace; ${esc(stock <= 0 ? 'color:#b3261e; font-weight:700;' : '')}">${esc(stock)}</td>
           <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
           <td>
             <button type="button" class="list-action-btn" data-action="edit">Edit</button>
@@ -1739,12 +1740,12 @@ async function initApp(user, role) {
       if (btn.dataset.action === 'edit') {
         if (!p) return;
         tr.innerHTML = `
-          <td><input class="customer-edit-input" data-field="productName" value="${p.productName}"></td>
-          <td><input class="customer-edit-input" data-field="packLabel" value="${p.packLabel}"></td>
-          <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${p.quantity ?? 0}"></td>
-          <td><input class="customer-edit-input" data-field="unitsPerCase" type="number" min="0" step="1" value="${p.unitsPerCase ?? ''}" placeholder="—"></td>
-          <td style="font-family:'JetBrains Mono',monospace;">${p.stockOnHand ?? 0}</td>
-          <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${p.price}"></td>
+          <td><input class="customer-edit-input" data-field="productName" value="${esc(p.productName)}"></td>
+          <td><input class="customer-edit-input" data-field="packLabel" value="${esc(p.packLabel)}"></td>
+          <td><input class="customer-edit-input" data-field="quantity" type="number" min="0" step="1" value="${esc(p.quantity ?? 0)}"></td>
+          <td><input class="customer-edit-input" data-field="unitsPerCase" type="number" min="0" step="1" value="${esc(p.unitsPerCase ?? '')}" placeholder="—"></td>
+          <td style="font-family:'JetBrains Mono',monospace;">${esc(p.stockOnHand ?? 0)}</td>
+          <td><input class="customer-edit-input" data-field="price" type="number" min="0" step="1" value="${esc(p.price)}"></td>
           <td>
             <button type="button" class="list-action-btn" data-action="save">Save</button>
             <button type="button" class="list-action-btn" data-action="cancel">Cancel</button>
@@ -1942,13 +1943,13 @@ async function initApp(user, role) {
         const changeText = m.delta > 0 ? `+${m.delta}` : `${m.delta}`;
         const reasonOrOrder = m.orderNo ? `Order ${m.orderNo}` : (m.reason || '—');
         tr.innerHTML = `
-          <td style="font-size:0.78rem; white-space:nowrap;">${formatMovementTimestamp(m.createdAt)}</td>
-          <td>${m.productName || '—'}${m.packLabel ? ' — ' + m.packLabel : ''}</td>
-          <td>${stockMovementTypeLabels[m.type] || m.type || '—'}</td>
-          <td style="font-family:'JetBrains Mono',monospace; ${m.delta < 0 ? 'color:#b3261e;' : 'color:var(--forest-2);'}">${changeText}</td>
-          <td style="font-family:'JetBrains Mono',monospace;">${m.newStock ?? '—'}</td>
-          <td style="font-size:0.78rem; color:var(--muted);">${reasonOrOrder}</td>
-          <td style="font-size:0.72rem; color:var(--muted);">${displayNameForEmail(m.createdByEmail)}</td>
+          <td style="font-size:0.78rem; white-space:nowrap;">${esc(formatMovementTimestamp(m.createdAt))}</td>
+          <td>${esc(m.productName || '—')}${esc(m.packLabel ? ' — ' + m.packLabel : '')}</td>
+          <td>${esc(stockMovementTypeLabels[m.type] || m.type || '—')}</td>
+          <td style="font-family:'JetBrains Mono',monospace; ${esc(m.delta < 0 ? 'color:#b3261e;' : 'color:var(--forest-2);')}">${esc(changeText)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;">${esc(m.newStock ?? '—')}</td>
+          <td style="font-size:0.78rem; color:var(--muted);">${esc(reasonOrOrder)}</td>
+          <td style="font-size:0.72rem; color:var(--muted);">${esc(displayNameForEmail(m.createdByEmail))}</td>
         `;
         stockMovementBody.appendChild(tr);
       });
@@ -1981,7 +1982,7 @@ async function initApp(user, role) {
     function refreshMovementProductFilterOptions() {
       const current = stockMovementProductFilter.value;
       stockMovementProductFilter.innerHTML = `<option value="all">All products</option>` +
-        loadedProducts.map(p => `<option value="${p.id}">${p.productName} — ${p.packLabel}</option>`).join('');
+        loadedProducts.map(p => `<option value="${esc(p.id)}">${esc(p.productName)} — ${esc(p.packLabel)}</option>`).join('');
       if ([...stockMovementProductFilter.options].some(o => o.value === current)) {
         stockMovementProductFilter.value = current;
       }
@@ -2153,6 +2154,7 @@ async function initApp(user, role) {
 
       try {
         const items = getItems(itemsBody);
+        { const lv = validateOrderLines(items); if (!lv.ok) { showToast(lv.problems[0], 'error'); return; } }
         const meta = {
           date: els.invoiceDate.value,
           customer: els.custName.value || '-',
@@ -2254,15 +2256,15 @@ async function initApp(user, role) {
         const productsSummary = formatItemsSummary(inv.items);
         const hasWhatsApp = !!toWhatsAppNumber(inv.phone);
         tr.innerHTML = `
-          <td>${inv.invoiceNo}</td>
-          <td>${formatDate(inv.date)}</td>
-          <td>${inv.customer}</td>
-          <td class="inv-products-cell" title="${productsSummary}">${productsSummary}</td>
+          <td>${esc(inv.invoiceNo)}</td>
+          <td>${esc(formatDate(inv.date))}</td>
+          <td>${esc(inv.customer)}</td>
+          <td class="inv-products-cell" title="${esc(productsSummary)}">${esc(productsSummary)}</td>
           <td>${mwk(inv.grandTotal || 0)}</td>
           <td>
-            <button type="button" class="list-action-btn" data-action="edit" data-id="${inv.id}">Edit</button>
-            <button type="button" class="list-action-btn" data-action="download" data-id="${inv.id}">Download</button>
-            ${hasWhatsApp ? `<button type="button" class="list-action-btn" data-action="whatsapp" data-id="${inv.id}">WhatsApp</button>` : ''}
+            <button type="button" class="list-action-btn" data-action="edit" data-id="${esc(inv.id)}">Edit</button>
+            <button type="button" class="list-action-btn" data-action="download" data-id="${esc(inv.id)}">Download</button>
+            ${hasWhatsApp ? `<button type="button" class="list-action-btn" data-action="whatsapp" data-id="${esc(inv.id)}">WhatsApp</button>` : ''}
           </td>
         `;
         listBody.appendChild(tr);
@@ -2455,6 +2457,7 @@ async function initApp(user, role) {
       const customerName = giCustName.value.trim();
       const items = getItems(giItemsBody);
       giErrorNote.style.display = 'none';
+      { const lv = validateOrderLines(items); if (!lv.ok) { giErrorNote.textContent = lv.problems[0]; giErrorNote.style.display = 'block'; return; } }
 
       if (!customerName) {
         giErrorNote.textContent = 'Customer name cannot be empty.';
@@ -2565,12 +2568,12 @@ async function initApp(user, role) {
           const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
           return `
             <tr>
-              <td><input type="checkbox" class="pending-bulk-checkbox" data-id="${o.id}"></td>
-              <td>${o.orderNo}</td>
-              <td>${o.customerName}</td>
-              <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
+              <td><input type="checkbox" class="pending-bulk-checkbox" data-id="${esc(o.id)}"></td>
+              <td>${esc(o.orderNo)}</td>
+              <td>${esc(o.customerName)}</td>
+              <td class="inv-products-cell" title="${esc(itemsSummary)}">${esc(itemsSummary)}</td>
               <td>${mwk(o.grandTotal || 0)}</td>
-              <td><button type="button" class="list-action-btn" data-action="generate-invoice" data-id="${o.id}">Generate Invoice</button></td>
+              <td><button type="button" class="list-action-btn" data-action="generate-invoice" data-id="${esc(o.id)}">Generate Invoice</button></td>
             </tr>
           `;
         }).join('');
@@ -2663,7 +2666,7 @@ async function initApp(user, role) {
   let loadedExpenses = [], expensesCursor = null, expensesHasMore = true;
   const expensesGuard = createPagedLoadGuard();
 
-  function badgeHtml(cat) { return `<span class="exp-badge exp-badge-${cat}">${cat}</span>`; }
+  function badgeHtml(cat) { return `<span class="exp-badge exp-badge-${esc(cat)}">${esc(cat)}</span>`; }
 
   function renderExpenseSummary() {
     const el = document.getElementById('expenseSummary');
@@ -2680,7 +2683,7 @@ async function initApp(user, role) {
         <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
       </div>
       <div class="exp-grand-total">
-        <span>Grand Total (${loadedExpenses.length} record${loadedExpenses.length !== 1 ? 's' : ''} loaded)</span>
+        <span>Grand Total (${esc(loadedExpenses.length)} record${esc(loadedExpenses.length !== 1 ? 's' : '')} loaded)</span>
         <span class="exp-grand-amount">${mwk(grand)}</span>
       </div>
     `;
@@ -2693,17 +2696,17 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = exp.id;
       const notesShort = exp.notes ? (exp.notes.length > 40 ? exp.notes.substring(0, 40) + '…' : exp.notes) : '—';
-      const byCell = isManager ? `<td style="font-size:0.72rem; color:var(--muted);">${displayNameForEmail(exp.createdByEmail)}</td>` : '';
+      const byCell = isManager ? `<td style="font-size:0.72rem; color:var(--muted);">${esc(displayNameForEmail(exp.createdByEmail))}</td>` : '';
       const canEdit = isManager || exp.createdBy === user.uid;
       const actions = `
         ${canEdit ? `<button type="button" class="list-action-btn" data-action="edit">Edit</button>` : ''}
         ${isManager ? `<button type="button" class="list-action-btn exp-delete-btn" data-action="delete">Delete</button>` : ''}
       `;
       tr.innerHTML = `
-        <td>${formatDate(exp.date)}</td>
+        <td>${esc(formatDate(exp.date))}</td>
         <td>${badgeHtml(exp.category)}</td>
         <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(exp.amount || 0)}</td>
-        <td style="color:var(--muted); font-size:0.78rem;">${notesShort}</td>
+        <td style="color:var(--muted); font-size:0.78rem;">${esc(notesShort)}</td>
         ${byCell}
         <td>${actions}</td>
       `;
@@ -2752,7 +2755,7 @@ async function initApp(user, role) {
         expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
         const grand = Object.values(totals).reduce((a, b) => a + b, 0);
         expPeriodSummaryBody.innerHTML = `
-          <p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${label} — ${expenses.length} record${expenses.length === 1 ? '' : 's'}</p>
+          <p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${esc(label)} — ${esc(expenses.length)} record${esc(expenses.length === 1 ? '' : 's')}</p>
           <div class="exp-summary-tiles">
             <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
             <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
@@ -2766,7 +2769,7 @@ async function initApp(user, role) {
           </div>
         `;
       } catch (err) {
-        expPeriodSummaryBody.innerHTML = `<p style="color:#b3261e; font-size:0.82rem;">Could not load: ${err.message}</p>`;
+        expPeriodSummaryBody.innerHTML = `<p style="color:#b3261e; font-size:0.82rem;">Could not load: ${esc(err.message)}</p>`;
       }
     }
 
@@ -2852,18 +2855,18 @@ async function initApp(user, role) {
       if (!isManager && exp.createdBy !== user.uid) return;
       const byEditCell = isManager ? `<td></td>` : '';
       tr.innerHTML = `
-        <td><input class="customer-edit-input" data-field="date" type="date" value="${exp.date || ''}"></td>
+        <td><input class="customer-edit-input" data-field="date" type="date" value="${esc(exp.date || '')}"></td>
         <td>
           <select class="customer-edit-input" data-field="category">
-            <option ${exp.category === 'Transport' ? 'selected' : ''}>Transport</option>
-            <option ${exp.category === 'Meals' ? 'selected' : ''}>Meals</option>
-            <option value="Fuel" ${exp.category === 'Fuel' ? 'selected' : ''}>Fuel</option>
-            <option value="Stock" ${exp.category === 'Stock' ? 'selected' : ''}>Stock Purchase</option>
-            <option ${exp.category === 'Other' ? 'selected' : ''}>Other</option>
+            <option ${esc(exp.category === 'Transport' ? 'selected' : '')}>Transport</option>
+            <option ${esc(exp.category === 'Meals' ? 'selected' : '')}>Meals</option>
+            <option value="Fuel" ${esc(exp.category === 'Fuel' ? 'selected' : '')}>Fuel</option>
+            <option value="Stock" ${esc(exp.category === 'Stock' ? 'selected' : '')}>Stock Purchase</option>
+            <option ${esc(exp.category === 'Other' ? 'selected' : '')}>Other</option>
           </select>
         </td>
-        <td><input class="customer-edit-input" data-field="amount" type="number" min="0" step="1" value="${exp.amount || 0}"></td>
-        <td><input class="customer-edit-input" data-field="notes" value="${exp.notes || ''}"></td>
+        <td><input class="customer-edit-input" data-field="amount" type="number" min="0" step="1" value="${esc(exp.amount || 0)}"></td>
+        <td><input class="customer-edit-input" data-field="notes" value="${esc(exp.notes || '')}"></td>
         ${byEditCell}
         <td>
           <button type="button" class="list-action-btn" data-action="save">Save</button>
@@ -3011,8 +3014,8 @@ async function initApp(user, role) {
     const items = order.items || [];
     opItemsBody.innerHTML = items.map(it => `
       <tr>
-        <td>${it.qty}</td>
-        <td>${it.desc || '—'}</td>
+        <td>${esc(it.qty)}</td>
+        <td>${esc(it.desc || '—')}</td>
         <td class="num">${mwk(it.price || 0)}</td>
         <td class="num">${mwk((it.qty || 0) * (it.price || 0))}</td>
       </tr>
@@ -3028,7 +3031,7 @@ async function initApp(user, role) {
 
     if (shortages.length > 0) {
       opShortageWarning.innerHTML = '<strong>Stock is short for:</strong><br>' +
-        shortages.map(s => `${s.desc}: need ${s.needed}, have ${s.available}`).join('<br>');
+        shortages.map(s => `${esc(s.desc)}: need ${s.needed}, have ${s.available}`).join('<br>');
       opShortageWarning.style.display = 'block';
     } else {
       opShortageWarning.style.display = 'none';
@@ -3075,7 +3078,7 @@ async function initApp(user, role) {
     } catch (err) {
       if (err.isStockShortage && opOnApproveWithOverride) {
         opShortageWarning.innerHTML = '<strong>Stock is short for:</strong><br>' +
-          err.shortages.map(s => `${s.desc}: need ${s.needed}, have ${s.available}`).join('<br>');
+          err.shortages.map(s => `${esc(s.desc)}: need ${s.needed}, have ${s.available}`).join('<br>');
         opShortageWarning.style.display = 'block';
         opOverrideBtn.style.display = 'block';
       } else {
@@ -3120,7 +3123,7 @@ async function initApp(user, role) {
   });
 
   function orderStatusBadge(status) {
-    return `<span class="order-status-badge order-status-${status}">${status}</span>`;
+    return `<span class="order-status-badge order-status-${esc(status)}">${esc(status)}</span>`;
   }
 
   // Today / Yesterday / full-date section headers, same idea as a chat
@@ -3149,20 +3152,20 @@ async function initApp(user, role) {
       if (groupLabel !== lastGroupLabel) {
         lastGroupLabel = groupLabel;
         const groupTr = document.createElement('tr');
-        groupTr.innerHTML = `<td colspan="${groupColspan}" class="order-date-group-row">${groupLabel}</td>`;
+        groupTr.innerHTML = `<td colspan="${esc(groupColspan)}" class="order-date-group-row">${esc(groupLabel)}</td>`;
         orderListBody.appendChild(groupTr);
       }
       const tr = document.createElement('tr');
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
       const checkboxCell = isManager
-        ? `<td>${(o.status === 'Submitted' || o.status === 'Approved' || o.status === 'Invoicing') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${o.id}" ${selectedOrderIds.has(o.id) ? 'checked' : ''}>` : ''}</td>`
+        ? `<td>${(o.status === 'Submitted' || o.status === 'Approved' || o.status === 'Invoicing') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${esc(o.id)}" ${esc(selectedOrderIds.has(o.id) ? 'checked' : '')}>` : ''}</td>`
         : '';
       const baseCells = `
         ${checkboxCell}
-        <td>${o.orderNo}</td>
-        <td>${o.customerName}</td>
-        <td class="inv-products-cell" title="${itemsSummary}">${itemsSummary}</td>
+        <td>${esc(o.orderNo)}</td>
+        <td>${esc(o.customerName)}</td>
+        <td class="inv-products-cell" title="${esc(itemsSummary)}">${esc(itemsSummary)}</td>
         <td>${mwk(o.grandTotal || 0)}</td>
         <td>${orderStatusBadge(o.status)}</td>
       `;
@@ -3496,6 +3499,7 @@ async function initApp(user, role) {
       const customerLocation = eoCustLocation.value.trim();
       const notes = eoNotes.value.trim();
       const items = getItems(eoItemsBody);
+      { const lv = validateOrderLines(items); if (!lv.ok) { eoErrorNote.textContent = lv.problems[0]; eoErrorNote.style.display = 'block'; return; } }
 
       if (!customerName) {
         eoErrorNote.textContent = 'Customer name cannot be empty.';
@@ -3578,7 +3582,7 @@ async function initApp(user, role) {
       const q = moCustSearch.value.trim().toLowerCase();
       if (!q) { moCustSuggestions.style.display = 'none'; return; }
       const matches = customersCache.filter(c => c.active !== false && !c.mergeLock && (c.name || '').toLowerCase().includes(q)).slice(0, 8);
-      moCustSuggestions.innerHTML = matches.map(c => `<div class="suggestion-item" data-id="${esc(c.id)}"><span class="sug-name">${esc(c.name)}</span><span class="sug-meta">${esc(c.location || '')}${hasPin(c) ? '' : ' · ⚠ no pin'}</span></div>`).join('');
+      moCustSuggestions.innerHTML = matches.map(c => `<div class="suggestion-item" data-id="${esc(c.id)}"><span class="sug-name">${esc(c.name)}</span><span class="sug-meta">${esc(c.location || '')}${esc(hasPin(c) ? '' : ' · ⚠ no pin')}</span></div>`).join('');
       moCustSuggestions.style.display = matches.length ? 'block' : 'none';
     });
     moCustSuggestions.addEventListener('mousedown', (e) => {
@@ -3819,8 +3823,8 @@ async function initApp(user, role) {
       const last = visits[visits.length - 1];
       const more = visits.length > 1 ? ` · ${visits.length} visits` : '';
       return last.outcome === 'Order Placed'
-        ? `<span class="visit-status order">✓ Order ${esc(last.orderNo || '')}${more}</span>`
-        : `<span class="visit-status noorder">✓ No order: ${esc(last.reasonNoOrder || '')}${more}</span>`;
+        ? `<span class="visit-status order">✓ Order ${esc(last.orderNo || '')}${esc(more)}</span>`
+        : `<span class="visit-status noorder">✓ No order: ${esc(last.reasonNoOrder || '')}${esc(more)}</span>`;
     }
 
     function renderTodaysVisits() {
@@ -3849,10 +3853,10 @@ async function initApp(user, role) {
       todaysRouteList.innerHTML = list.map(c => {
         const visits = progress.visitsByCustomer.get(c.id);
         return `
-        <button type="button" class="todays-route-item ${visits ? 'visited' : ''}" data-id="${esc(c.id)}">
-          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="route-stop-badge">${todaysRouteInfo.get(c.id).stopNo}</span>` : ''}
+        <button type="button" class="todays-route-item ${esc(visits ? 'visited' : '')}" data-id="${esc(c.id)}">
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="route-stop-badge">${esc(todaysRouteInfo.get(c.id).stopNo)}</span>` : ''}
           <span class="todays-route-name">${esc(c.name)}</span>${visitStatusHtml(visits)}
-          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="todays-route-location">${formatKm(todaysRouteInfo.get(c.id).legKm)} from previous</span>` : ''}
+          ${todaysRouteInfo && todaysRouteInfo.get(c.id) ? `<span class="todays-route-location">${esc(formatKm(todaysRouteInfo.get(c.id).legKm))} from previous</span>` : ''}
           ${c.location ? `<span class="todays-route-location">${esc(c.location)}</span>` : ''}
           ${hasPin(c) ? '' : '<span class="no-pin-tag">📍 needs pin</span>'}
         </button>`;
@@ -3915,7 +3919,7 @@ async function initApp(user, role) {
       lvCustSuggestions.innerHTML = matches.slice(0, 8).map(c => `
         <div class="suggestion-item" data-id="${esc(c.id)}">
           <span class="sug-name">${esc(c.name)}</span>
-          <span class="sug-meta">${esc(c.phone || '')}${c.phone && c.location ? ' · ' : ''}${esc(c.location || '')}${c.assignedDay === weekdayOfDate(malawiDate()) ? '' : ' · not scheduled today'}${hasPin(c) ? '' : ' · ⚠ no pin'}</span>
+          <span class="sug-meta">${esc(c.phone || '')}${esc(c.phone && c.location ? ' · ' : '')}${esc(c.location || '')}${esc(c.assignedDay === weekdayOfDate(malawiDate()) ? '' : ' · not scheduled today')}${esc(hasPin(c) ? '' : ' · ⚠ no pin')}</span>
         </div>
       `).join('');
       lvCustSuggestions.style.display = 'block';
@@ -4041,10 +4045,10 @@ async function initApp(user, role) {
         const tr = document.createElement('tr');
         const reason = v.outcome === 'No Order' ? (v.reasonNoOrder || '—') : '—';
         tr.innerHTML = `
-          <td>${formatDate(v.date)}</td>
-          <td>${v.customerName}</td>
-          <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
-          <td>${reason}</td>
+          <td>${esc(formatDate(v.date))}</td>
+          <td>${esc(v.customerName)}</td>
+          <td>${esc(v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order')}</td>
+          <td>${esc(reason)}</td>
         `;
         myVisitsBody.appendChild(tr);
       });
@@ -4081,7 +4085,7 @@ async function initApp(user, role) {
     const delPeriod = document.getElementById('delPeriod');
     const delOverdueHours = document.getElementById('delOverdueHours');
     delOverdueHours.innerHTML = OVERDUE_HOUR_OPTIONS
-      .map(h => `<option value="${h}" ${h === DEFAULT_OVERDUE_HOURS ? 'selected' : ''}>${h} hours</option>`).join('');
+      .map(h => `<option value="${esc(h)}" ${esc(h === DEFAULT_OVERDUE_HOURS ? 'selected' : '')}>${esc(h)} hours</option>`).join('');
 
     let delData = null; // { delivered, failures, pending }
 
@@ -4102,18 +4106,18 @@ async function initApp(user, role) {
       });
 
       document.getElementById('delTiles').innerHTML = `
-        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Delivered</span><span class="exp-tile-amount">${stats.totals.delivered}</span></div>
-        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Failed attempts</span><span class="exp-tile-amount">${stats.totals.failed}</span></div>
-        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Pending</span><span class="exp-tile-amount">${stats.totals.pending}</span></div>
-        <div class="exp-tile del-tile-overdue"><span class="exp-tile-label">Overdue</span><span class="exp-tile-amount">${stats.totals.overdue}</span></div>`;
+        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Delivered</span><span class="exp-tile-amount">${esc(stats.totals.delivered)}</span></div>
+        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Failed attempts</span><span class="exp-tile-amount">${esc(stats.totals.failed)}</span></div>
+        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Pending</span><span class="exp-tile-amount">${esc(stats.totals.pending)}</span></div>
+        <div class="exp-tile del-tile-overdue"><span class="exp-tile-label">Overdue</span><span class="exp-tile-amount">${esc(stats.totals.overdue)}</span></div>`;
 
       document.getElementById('delPersonEmpty').style.display = stats.perDeliverer.length === 0 ? 'block' : 'none';
       document.getElementById('delPersonBody').innerHTML = stats.perDeliverer.map(p => `
         <tr>
           <td>${esc(displayNameForEmail(p.email))}</td>
-          <td>${p.today}</td><td>${p.week}</td><td><strong>${p.month}</strong></td>
-          <td>${p.failedPeriod}</td>
-          <td>${p.avgHours === null ? '—' : formatAge(p.avgHours)}</td>
+          <td>${esc(p.today)}</td><td>${esc(p.week)}</td><td><strong>${esc(p.month)}</strong></td>
+          <td>${esc(p.failedPeriod)}</td>
+          <td>${esc(p.avgHours === null ? '—' : formatAge(p.avgHours))}</td>
         </tr>`).join('');
 
       document.getElementById('delPendingEmpty').style.display = stats.pendingRows.length === 0 ? 'block' : 'none';
@@ -4121,24 +4125,24 @@ async function initApp(user, role) {
         const f = o.lastDeliveryFailure;
         const failText = f ? `${esc(f.reason || '')}${f.note ? ` — ${esc(f.note)}` : ''}${o.deliveryAttemptCount > 1 ? ` (${esc(o.deliveryAttemptCount)} tries)` : ''}` : '—';
         return `
-        <tr class="${o.overdue ? 'del-overdue' : ''}">
+        <tr class="${esc(o.overdue ? 'del-overdue' : '')}">
           <td>${esc(o.orderNo)}</td>
           <td>${esc(o.customerName)}</td>
           <td>${esc((o.customerLocation && o.customerLocation !== '-') ? o.customerLocation : '—')}</td>
           <td>${orderHasPin(o) ? '📍 ✓' : '<span class="no-pin-tag">⚠ No pin</span>'}</td>
-          <td>${formatAge(o.ageHours)}${o.overdue ? ' ⚠' : ''}</td>
+          <td>${esc(formatAge(o.ageHours))}${esc(o.overdue ? ' ⚠' : '')}</td>
           <td>${failText}</td>
         </tr>`;
       }).join('');
 
       document.getElementById('delAreaEmpty').style.display = stats.perArea.length === 0 ? 'block' : 'none';
       document.getElementById('delAreaBody').innerHTML = stats.perArea.map(a => `
-        <tr><td>${esc(a.area)}</td><td>${a.delivered}</td><td>${a.failed}</td><td>${a.pending}</td></tr>`).join('');
+        <tr><td>${esc(a.area)}</td><td>${esc(a.delivered)}</td><td>${esc(a.failed)}</td><td>${esc(a.pending)}</td></tr>`).join('');
 
       document.getElementById('delFailEmpty').style.display = stats.failuresInPeriod.length === 0 ? 'block' : 'none';
       document.getElementById('delFailBody').innerHTML = stats.failuresInPeriod.map(f => `
         <tr>
-          <td>${fmtWhen(f.at)}</td>
+          <td>${esc(fmtWhen(f.at))}</td>
           <td>${esc(f.orderNo)}</td>
           <td>${esc(f.customerName)}</td>
           <td>${esc(f.area)}</td>
@@ -4198,14 +4202,14 @@ async function initApp(user, role) {
       repSummaryEmpty.style.display = rows.length === 0 ? 'block' : 'none';
       repSummaryBody.innerHTML = rows.map(r => `
         <tr data-rep="${esc(r.rep)}">
-          <td>${nameOf(r.rep)}${r.totalVisits === 0 ? ' <span class="numbering-hint">(no visits recorded)</span>' : ''}</td>
+          <td>${esc(nameOf(r.rep))}${r.totalVisits === 0 ? ' <span class="numbering-hint">(no visits recorded)</span>' : ''}</td>
           ${r.reliableDays === 0
             ? '<td colspan="3" class="numbering-hint">not calculated (no reliable schedule for these dates)</td>'
-            : `<td>${r.scheduledCount}</td><td>${r.visitedCount}</td><td>${r.stillDueCount}</td>`}
-          <td>${r.ordersTaken}</td><td>${r.noOrderVisits}</td>
+            : `<td>${esc(r.scheduledCount)}</td><td>${esc(r.visitedCount)}</td><td>${esc(r.stillDueCount)}</td>`}
+          <td>${esc(r.ordersTaken)}</td><td>${esc(r.noOrderVisits)}</td>
           <td>${pctText(r.coveragePct)}</td><td>${pctText(r.conversionPct)}</td>
-          <td>${r.attributedOrders ? `${r.attributedOrders} order(s), ${r.attributedValue === null ? '—' : mwk(r.attributedValue)}` : '—'}${r.attributedCancelled ? ` <span class="numbering-hint">(${r.attributedCancelled} cancelled)</span>` : ''}</td>
-          <td>${r.closedVisits}</td><td>${pctText(r.conversionExclClosedPct)}</td>
+          <td>${r.attributedOrders ? `${esc(r.attributedOrders)} order(s), ${esc(r.attributedValue === null ? '—' : mwk(r.attributedValue))}` : '—'}${r.attributedCancelled ? ` <span class="numbering-hint">(${esc(r.attributedCancelled)} cancelled)</span>` : ''}</td>
+          <td>${esc(r.closedVisits)}</td><td>${pctText(r.conversionExclClosedPct)}</td>
         </tr>`).join('');
       // The limitation is stated plainly - no figure is shown for a date without a reliable schedule record.
       if (report.limitation) { perfScheduleWarning.textContent = report.limitation; perfScheduleWarning.style.display = 'block'; }
@@ -4214,20 +4218,20 @@ async function initApp(user, role) {
       const due = rows.flatMap(r => r.due.map(d => ({ rep: r.rep, ...d })));
       dueEmpty.style.display = due.length ? 'none' : 'block';
       dueBody.innerHTML = due.sort((a, b) => a.date.localeCompare(b.date) || a.rep.localeCompare(b.rep)).map(d => `
-        <tr><td>${formatDate(d.date)}</td><td>${nameOf(d.rep)}</td><td>${esc(d.customer.name)}</td><td>${esc(d.customer.location || '')}</td></tr>`).join('');
+        <tr><td>${esc(formatDate(d.date))}</td><td>${esc(nameOf(d.rep))}</td><td>${esc(d.customer.name)}</td><td>${esc(d.customer.location || '')}</td></tr>`).join('');
 
       const noOrder = rows.flatMap(r => r.noOrder).sort((a, b) => b.date.localeCompare(a.date));
       noOrderEmpty.style.display = noOrder.length ? 'none' : 'block';
       noOrderBody.innerHTML = noOrder.map(v => `
-        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
+        <tr><td>${esc(formatDate(v.date))}</td><td>${esc(nameOf(v.repEmail))}</td><td>${esc(v.customerName)}</td>
         <td>${esc(v.reasonNoOrder || '—')}</td><td>${esc(v.reasonNotes || '')}</td></tr>`).join('');
 
       const orders = rows.flatMap(r => r.orders).sort((a, b) => b.date.localeCompare(a.date));
       ordersTakenEmpty.style.display = orders.length ? 'none' : 'block';
       ordersTakenBody.innerHTML = orders.map(v => `
-        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
+        <tr><td>${esc(formatDate(v.date))}</td><td>${esc(nameOf(v.repEmail))}</td><td>${esc(v.customerName)}</td>
         <td>${v.orderId ? `<button type="button" class="list-action-btn" data-view-order="${esc(v.orderId)}">${esc(v.orderNo || 'View order')}</button>` : '—'}</td>
-        <td>${typeof v.orderValue === 'number' ? mwk(v.orderValue) : '—'}</td></tr>`).join('');
+        <td>${esc(typeof v.orderValue === 'number' ? mwk(v.orderValue) : '—')}</td></tr>`).join('');
       const valued = rows.reduce((s, r) => s + r.valuedOrders, 0), unvalued = rows.reduce((s, r) => s + r.unvaluedOrders, 0);
       const total = rows.reduce((s, r) => s + (r.valueTotal || 0), 0);
       ordersValueNote.textContent = orders.length
@@ -4241,10 +4245,10 @@ async function initApp(user, role) {
         .sort((a, b) => b.date.localeCompare(a.date));
       allVisitsEmpty.style.display = shown.length ? 'none' : 'block';
       allVisitsBody.innerHTML = shown.map(v => `
-        <tr><td>${formatDate(v.date)}</td><td>${nameOf(v.repEmail)}</td><td>${esc(v.customerName)}</td>
-        <td>${v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order'}</td>
+        <tr><td>${esc(formatDate(v.date))}</td><td>${esc(nameOf(v.repEmail))}</td><td>${esc(v.customerName)}</td>
+        <td>${esc(v.outcome === 'Order Placed' ? '✓ Order Placed' : '✕ No Order')}</td>
         <td>${v.outcome === 'No Order' ? esc(v.reasonNoOrder || '—') + (v.reasonNotes ? ': ' + esc(v.reasonNotes) : '') : '—'}</td>
-        <td>${v.wasScheduled === true ? 'Yes' : v.wasScheduled === false ? 'No' : '—'}</td></tr>`).join('');
+        <td>${esc(v.wasScheduled === true ? 'Yes' : v.wasScheduled === false ? 'No' : '—')}</td></tr>`).join('');
 
     }
 
@@ -4278,7 +4282,7 @@ async function initApp(user, role) {
           perfReps = reps;
           const prev = perfRepFilter.value;
           const all = [...new Set([...reps, ...visits.map(v => v.repEmail)].filter(Boolean).map(e => e.trim().toLowerCase()))].sort();
-          perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${nameOf(r)}</option>`).join('');
+          perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${esc(nameOf(r))}</option>`).join('');
           perfRepFilter.value = all.includes(prev) ? prev : 'all';
           perfReport = { visits, from, to, history, attributedOrders };      // the range that was FETCHED, not whatever the boxes say now
           drawPerformance();
@@ -4376,26 +4380,26 @@ async function initApp(user, role) {
       const statusOrder = ['Submitted', 'Approved', 'Invoiced', 'Rejected', 'Cancelled'];
       const statusBreakdown = statusOrder
         .filter(s => summary.orders.byStatus[s])
-        .map(s => `<div class="summary-breakdown-row"><span>${s}</span><span>${summary.orders.byStatus[s]}</span></div>`)
+        .map(s => `<div class="summary-breakdown-row"><span>${esc(s)}</span><span>${esc(summary.orders.byStatus[s])}</span></div>`)
         .join('') || `<div class="summary-breakdown-row"><span style="color:var(--muted);">No orders in this range</span></div>`;
 
       const expenseBreakdown = Object.entries(summary.expenses.byCategory)
         .filter(([, amt]) => amt > 0)
-        .map(([cat, amt]) => `<div class="summary-breakdown-row"><span>${cat}</span><span>${mwk(amt)}</span></div>`)
+        .map(([cat, amt]) => `<div class="summary-breakdown-row"><span>${esc(cat)}</span><span>${mwk(amt)}</span></div>`)
         .join('') || `<div class="summary-breakdown-row"><span style="color:var(--muted);">No expenses in this range</span></div>`;
 
       const topProductsHtml = summary.topProducts.length
-        ? summary.topProducts.map(p => `<div class="summary-breakdown-row"><span>${p.desc}</span><span>${p.qty} units</span></div>`).join('')
+        ? summary.topProducts.map(p => `<div class="summary-breakdown-row"><span>${esc(p.desc)}</span><span>${esc(p.qty)} units</span></div>`).join('')
         : `<div class="summary-breakdown-row"><span style="color:var(--muted);">No items ordered in this range</span></div>`;
 
       sumResultsBody.innerHTML = `
         <div class="summary-grid">
-          <div class="summary-tile"><span class="summary-tile-label">Orders</span><span class="summary-tile-value">${summary.orders.total}</span></div>
-          <div class="summary-tile"><span class="summary-tile-label">Invoices</span><span class="summary-tile-value">${summary.invoices.count}</span></div>
+          <div class="summary-tile"><span class="summary-tile-label">Orders</span><span class="summary-tile-value">${esc(summary.orders.total)}</span></div>
+          <div class="summary-tile"><span class="summary-tile-label">Invoices</span><span class="summary-tile-value">${esc(summary.invoices.count)}</span></div>
           <div class="summary-tile summary-tile-positive"><span class="summary-tile-label">Revenue</span><span class="summary-tile-value">${mwk(summary.invoices.revenue)}</span></div>
           <div class="summary-tile summary-tile-negative"><span class="summary-tile-label">Expenses</span><span class="summary-tile-value">${mwk(summary.expenses.total)}</span></div>
-          <div class="summary-tile ${summary.netCashflow >= 0 ? 'summary-tile-positive' : 'summary-tile-negative'}"><span class="summary-tile-label">Net</span><span class="summary-tile-value">${mwk(summary.netCashflow)}</span></div>
-          <div class="summary-tile"><span class="summary-tile-label">Visits</span><span class="summary-tile-value">${summary.visits.total}</span><span class="summary-tile-sub">${summary.visits.successRate}% placed an order</span></div>
+          <div class="summary-tile ${esc(summary.netCashflow >= 0 ? 'summary-tile-positive' : 'summary-tile-negative')}"><span class="summary-tile-label">Net</span><span class="summary-tile-value">${mwk(summary.netCashflow)}</span></div>
+          <div class="summary-tile"><span class="summary-tile-label">Visits</span><span class="summary-tile-value">${esc(summary.visits.total)}</span><span class="summary-tile-sub">${esc(summary.visits.successRate)}% placed an order</span></div>
         </div>
         <div class="summary-section-title">Orders by Status</div>
         ${statusBreakdown}
@@ -4572,7 +4576,7 @@ async function initDeliveryApp(user) {
   }
 
   function directionsUrl(pin) {
-    return `https://www.google.com/maps/dir/?api=1&destination=${pin.lat},${pin.lng}&travelmode=driving`;
+    return `https://www.google.com/maps/dir/?api=1&destination=${Number(pin.lat)},${Number(pin.lng)}&travelmode=driving`;
   }
 
   function renderDeliveryEmpty() {
@@ -4592,11 +4596,11 @@ async function initDeliveryApp(user) {
     card.dataset.id = order.id;
     const stop = deliveryStopInfo && deliveryStopInfo.get(order.id);
     card.innerHTML = `
-      ${stop ? `<div class="delivery-stop-badge">Stop ${stop.stopNo} · ${esc(formatKm(stop.legKm))} from previous</div>` : ''}
+      ${stop ? `<div class="delivery-stop-badge">Stop ${esc(stop.stopNo)} · ${esc(formatKm(stop.legKm))} from previous</div>` : ''}
       <div class="delivery-card-name">${esc(order.customerName || '—')}</div>
       ${pin
         ? `<div class="delivery-card-location">📍 Pinned location${areaLabel ? ` · ${esc(areaLabel)}` : ''}</div>
-           <a href="${directionsUrl(pin)}" target="_blank" rel="noopener" class="delivery-map-btn">🗺️ Navigate to Pin</a>`
+           <a href="${esc(directionsUrl(pin))}" target="_blank" rel="noopener" class="delivery-map-btn">🗺️ Navigate to Pin</a>`
         : `<div class="delivery-card-nopin">⚠ No pinned location saved for this customer.<br>Tell the manager.</div>`}
       ${failure ? `<div class="delivery-card-failed">Last try failed: ${esc(failure.reason || '')}${failure.note ? ` — ${esc(failure.note)}` : ''}${order.deliveryAttemptCount > 1 ? ` (${esc(order.deliveryAttemptCount)} tries)` : ''}</div>` : ''}
       <div class="delivery-items">${itemsHtml}</div>
@@ -4606,7 +4610,7 @@ async function initDeliveryApp(user) {
       <button type="button" class="delivery-fail-btn" data-action="fail-open" data-id="${esc(order.id)}">✕ NOT DELIVERED</button>
       <div class="delivery-fail-panel" style="display:none;">
         <div class="delivery-fail-title">Why was it not delivered?</div>
-        ${FAIL_REASONS.map(r => `<button type="button" class="delivery-reason-btn" data-action="fail-reason" data-code="${r.code}" data-id="${esc(order.id)}"><span>${r.icon}</span> ${esc(r.label)}</button>`).join('')}
+        ${FAIL_REASONS.map(r => `<button type="button" class="delivery-reason-btn" data-action="fail-reason" data-code="${esc(r.code)}" data-id="${esc(order.id)}"><span>${esc(r.icon)}</span> ${esc(r.label)}</button>`).join('')}
         <div class="delivery-fail-other" style="display:none;">
           <textarea class="delivery-fail-note" placeholder="Write the reason..."></textarea>
           <button type="button" class="delivery-deliver-btn delivery-fail-save" data-action="fail-save-other" data-id="${esc(order.id)}">SAVE REASON</button>
@@ -4678,14 +4682,14 @@ async function initDeliveryApp(user) {
       // Google Maps multi-stop link (first 10 stops; Maps limits waypoints).
       const first = ordered.slice(0, 10);
       const dest = first[first.length - 1];
-      const waypoints = first.slice(0, -1).map(p => `${p.lat},${p.lng}`).join('|');
+      const waypoints = first.slice(0, -1).map(p => `${Number(p.lat)},${Number(p.lng)}`).join('|');
       const mapsUrl = `https://www.google.com/maps/dir/?api=1` +
-        `&destination=${dest.lat},${dest.lng}` + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=driving`;
+        `&destination=${Number(dest.lat)},${Number(dest.lng)}` + (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : '') + `&travelmode=driving`;
       deliveryRouteSummary.style.display = 'block';
       deliveryRouteSummary.innerHTML =
-        `Shortest route from ${esc(startLabel(start))}: about <strong>${esc(formatKm(totalKm))}</strong> (straight-line), ${ordered.length} stop${ordered.length === 1 ? '' : 's'}.` +
+        `Shortest route from ${esc(startLabel(start))}: about <strong>${esc(formatKm(totalKm))}</strong> (straight-line), ${esc(ordered.length)} stop${esc(ordered.length === 1 ? '' : 's')}.` +
         `${loadedDeliveries.length > ordered.length ? ` ${loadedDeliveries.length - ordered.length} without a pin are listed last.` : ''}` +
-        `<br><a href="${mapsUrl}" target="_blank" rel="noopener" class="delivery-map-btn" style="margin-top:10px;">🗺️ Open route in Google Maps${ordered.length > 10 ? ' (first 10 stops)' : ''}</a>`;
+        `<br><a href="${esc(mapsUrl)}" target="_blank" rel="noopener" class="delivery-map-btn" style="margin-top:10px;">🗺️ Open route in Google Maps${esc(ordered.length > 10 ? ' (first 10 stops)' : '')}</a>`;
       await rerenderDeliveryList();
     } catch (err) {
       showToast('Could not sort the route: ' + err.message, 'error');

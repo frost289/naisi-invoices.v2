@@ -333,17 +333,18 @@ export async function mergeCustomers(keepId, mergeId, { uid, email, chunk = MERG
     if (stuck.length) throw mergeBlocked(stuck);          // lock kept: resumable, nothing deleted
     const all = [
       ...ordersSnap.docs.map(d => ({ ref: d.ref, coll: 'orders' })),
-      ...visitsSnap.docs.map(d => ({ ref: d.ref, coll: 'visits' })),
+      ...visitsSnap.docs.map(d => ({ ref: d.ref, coll: 'visits', data: d.data() })),
       ...invoicesSnap.docs.map(d => ({ ref: d.ref, coll: 'invoices' })),
     ];
     if (all.length === 0) break;
     for (let i = 0; i < all.length; i += chunk) {
       const batch = writeBatch(db);
-      for (const { ref, coll } of all.slice(i, i + chunk)) {
+      for (const { ref, coll, data } of all.slice(i, i + chunk)) {
         if (coll === 'orders') {
           batch.update(ref, { customerId: keepId, customerName: keep.name, customerPhone: keep.phone || '-', customerLocation: keep.location || '-' });
         } else if (coll === 'visits') {
-          batch.update(ref, { customerId: keepId, customerName: keep.name });
+          // Keep the shop the visit was recorded against (once, never overwritten) so history can still tell the merged shops apart.
+          batch.update(ref, { customerId: keepId, customerName: keep.name, originalCustomerId: (data && data.originalCustomerId) || mergeId });
         } else {
           batch.update(ref, { customerId: keepId, customer: keep.name, phone: keep.phone || '-', location: keep.location || '-' });
         }
@@ -362,7 +363,7 @@ export async function mergeCustomers(keepId, mergeId, { uid, email, chunk = MERG
   const finish = writeBatch(db);
   finish.set(doc(db, 'customerMerges', mergeId), {
     keepId, keepName: keep.name || '', mergedName: (await getDoc(mergeRef)).data().name || '',
-    moved: totals, mergedBy: uid, mergedByEmail: email, mergedAt: serverTimestamp(),
+    moved: totals, visitsKeepOriginal: true, mergedBy: uid, mergedByEmail: email, mergedAt: serverTimestamp(),
   });
   finish.delete(mergeRef);
   await finish.commit();

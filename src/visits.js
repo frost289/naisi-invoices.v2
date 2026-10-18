@@ -1,4 +1,5 @@
 import { db } from './firebase.js';
+import { MAX_ORDER_LINES } from './orderLines.js';
 import {
   collection, doc, getDocs, runTransaction, serverTimestamp,
   query, where, orderBy, limit, startAfter
@@ -36,6 +37,7 @@ export function validateNoOrderInput({ reason, notes }) {
 
 export function validateOrderItems(items) {
   if (!Array.isArray(items) || items.length === 0) return 'Add at least one item.';
+  if (items.length > MAX_ORDER_LINES) return `An order can have at most ${MAX_ORDER_LINES} lines. Split it into two orders.`;
   for (const [i, it] of items.entries()) {
     const n = i + 1;
     if (!it || typeof it !== 'object') return `Item ${n} is not valid.`;

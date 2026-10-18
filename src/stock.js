@@ -1,4 +1,5 @@
 import { db } from './firebase.js';
+import { assertOrderLines, round2 } from './orderLines.js';
 import {
   doc, runTransaction, collection, serverTimestamp,
   query, where, orderBy, limit, startAfter, getDocs
@@ -160,9 +161,14 @@ export async function approveOrderWithStock(order, { uid, email, allowNegativeSt
       throw makeError('This order was changed after you loaded it. Refresh the list and review it before approving.', { code: 'order-changed' });
     }
 
+    // Defense in depth (finding 3): the STORED lines are validated again; a negative or fractional quantity can never move stock.
+    assertOrderLines(current.items, current.grandTotal, makeError);
     const groups = groupTrackedLines(current.items);
     // Firestore transactions require all reads before any writes.
     const products = await readProducts(tx, [...groups.keys()]);
+    for (const [pid, lines] of groups) {
+      if (!products.get(pid).snap.exists()) throw makeError(`A product on this order no longer exists (${[...new Set(lines.map(l => l.desc))].join(', ')}). Edit the order before approving.`, { code: 'unknown-product', productId: pid });
+    }
 
     if (!allowNegativeStock) {
       const shortages = [];
@@ -245,6 +251,7 @@ export async function cancelOrder(order, { reason, uid, email }) {
     }
     // Stock was deducted only when an order was approved (stockApplied false = it was explicitly released already).
     const restoreStock = current.status === 'Approved' && current.stockApplied !== false;
+    if (restoreStock) assertOrderLines(current.items, current.grandTotal, makeError);   // never "restore" stock from invalid lines
     const groups = restoreStock ? groupTrackedLines(current.items) : new Map();
     const products = await readProducts(tx, [...groups.keys()]);     // reads before writes
 
@@ -281,7 +288,8 @@ export async function cancelOrder(order, { reason, uid, email }) {
 // Stock is only touched for Approved orders (stock is deducted on approval);
 // as before, an edit that increases quantities is not blocked by low stock.
 export async function editOrderWithStock(orderId, { expectedRevision = null, details, items }, { uid, email }) {
-  const grandTotal = (items || []).reduce((sum, it) => sum + (it.total || 0), 0);
+  const grandTotal = round2((items || []).reduce((sum, it) => sum + (it.total || 0), 0));
+  assertOrderLines(items, grandTotal, makeError);
   const next = {
     customerId: details.customerId || null,
     customerName: details.customerName, customerPhone: details.customerPhone, customerLocation: details.customerLocation,
@@ -303,6 +311,7 @@ export async function editOrderWithStock(orderId, { expectedRevision = null, det
       throw makeError('This order was changed by someone else after you opened it. Close this window, reopen the order and make your edit again.', { code: 'order-changed' });
     }
 
+    if (current.status === 'Approved') assertOrderLines(current.items, current.grandTotal, makeError);   // stock follows the stored lines
     const deltas = new Map(); // productId -> change to stock (negative = more stock consumed)
     if (current.status === 'Approved') {
       const oldBy = new Map(), newBy = new Map();

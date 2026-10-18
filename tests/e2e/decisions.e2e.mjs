@@ -376,6 +376,33 @@ try {
     expect(!(await page.locator('#suggestScheduleToggleBtn').isVisible()) && !(await page.locator('#importDaysToggleBtn').isVisible()), 'planner/import visible to a rep');
     return 'hidden';
   });
+  await R.check('E53', 'Stored HTML/script injection: malicious saved customer, product, order, invoice, expense and visit text shows as plain text for a manager and never runs', async () => {
+    const EVIL = `"><img src=x onerror="window.__pwn=(window.__pwn||0)+1"><script>window.__pwn=77</script><b id=evilb>x</b>`;
+    const tricky = `O'Brien "Tea" & Co <500g>`;
+    await logout();
+    await fresh({ extra: {
+      'customers/cEvil': { name: EVIL, phone: EVIL, location: EVIL, active: true, assignedDay: 'Thu', lat: -13.98, lng: 33.78 },
+      'customers/cTricky': { name: tricky, phone: '0999', location: tricky, active: true, assignedDay: 'Thu', lat: -13.98, lng: 33.78 },
+      'products/pEvil': { productName: EVIL, packLabel: EVIL, quantity: 1, price: 10, stockOnHand: 5 },
+      'orders/oEvil': { orderNo: 'ORD-2026-0099', status: 'Submitted', customerId: 'cEvil', customerName: EVIL, customerPhone: EVIL, customerLocation: EVIL, items: [{ qty: 1, desc: EVIL, price: 10, total: 10, productId: null }], grandTotal: 10, createdBy: 'u_rep1', createdByEmail: 'rep1@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T07:00:00Z') } },
+      'orders/oEvil2': { orderNo: 'ORD-2026-0098', status: 'Cancelled', cancelReason: EVIL, cancelledByEmail: 'mgr@naisi.test', customerId: 'cTricky', customerName: tricky, items: [{ qty: 1, desc: tricky, price: 10, total: 10 }], grandTotal: 10, createdBy: 'u_rep1', createdByEmail: 'rep1@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T07:30:00Z') } },
+      'invoices/iEvil': { invoiceNo: 'NF-INV-2026-0999', date: '2026-10-15', customer: EVIL, phone: EVIL, location: EVIL, terms: EVIL, items: [{ qty: 1, desc: EVIL, price: 10, total: 10 }], grandTotal: 10, createdBy: 'u_rep1', createdByEmail: 'rep1@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T07:40:00Z') } },
+      'expenses/eEvil': { date: '2026-10-15', category: 'Other', amount: 5, notes: EVIL, createdBy: 'u_rep1', createdByEmail: 'rep1@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T07:45:00Z') } },
+      'visits/v_u_rep1_evil': { date: '2026-10-15', repId: 'u_rep1', repEmail: 'rep1@naisi.test', customerId: 'cEvil', customerName: EVIL, outcome: 'No Order', reasonNoOrder: EVIL, reasonNotes: EVIL, createdAt: { __ts: Date.parse('2026-10-15T07:50:00Z') } },
+    } });
+    await login('mgr@naisi.test');
+    await page.waitForSelector('#navOrdersBtn', { state: 'visible' });
+    for (const id of ['navOrdersBtn', 'navInvoicesBtn', 'navCustomersBtn', 'navProductsBtn', 'navExpensesBtn', 'navPerformanceBtn', 'navDeliveriesBtn', 'navSummaryBtn', 'navFormBtn']) {
+      if (await page.locator('#' + id).isVisible()) { await page.click('#' + id); await page.waitForTimeout(400); }
+    }
+    const res = await page.evaluate(() => ({ pwn: window.__pwn ?? null, imgs: document.querySelectorAll('img[src="x"]').length, injected: !!document.getElementById('evilb'), scripts: [...document.querySelectorAll('script')].filter(s => /__pwn/.test(s.textContent)).length }));
+    eq(res, { pwn: null, imgs: 0, injected: false, scripts: 0 }, 'injected content ran or became elements');
+    await page.click('#navCustomersBtn'); await page.waitForTimeout(300);
+    const txt = await bodyText();
+    expect(txt.includes(tricky), 'legitimate punctuation (apostrophe, quotes, ampersand, angle brackets) must display unchanged');
+    expect(txt.includes('onerror='), 'the malicious text should be visible as plain text');
+    return 'plain text, nothing executed';
+  });
   await R.check('E52', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
 } finally {
   fs.writeFileSync(`${OUT}/e2e-decisions-results.json`, JSON.stringify(R.rows, null, 2));

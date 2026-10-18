@@ -4,11 +4,13 @@ const it1 = [{ productId: 'p1', desc: 'A', qty: 2, price: 100, total: 200 }];
 const ord = (id, status, over = {}) => ({ id, status, customerName: 'Shop', items: it1, grandTotal: 200, ...over });
 const inv = (id, over = {}) => ({ id, invoiceNo: 'N-' + id, customer: 'Shop', items: it1, grandTotal: 200, ...over });
 const types = (r) => r.findings.map(f => f.type).sort();
+// every optional input supplied (and empty/consistent), so a result can be CLEAN; individual tests override what they need
+const ALL = (over = {}) => ({ cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'ZZ', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, ...over });
 
 describe('reconcile (read-only classification)', () => {
   it('clean data: only info', () => {
-    const r = reconcile({ orders: [ord('o1', 'Invoiced', { invoiceId: 'ord_o1', invoiceNo: 'N-ord_o1' })], invoices: [inv('ord_o1', { orderId: 'o1' })] });
-    expect(r.safeToEnableResume).toBe(true); expect(r.findings).toEqual([]);
+    const r = reconcile({ orders: [ord('o1', 'Invoiced', { invoiceId: 'ord_o1', invoiceNo: 'N-ord_o1' })], invoices: [inv('ord_o1', { orderId: 'o1', kind: 'order' })], ...ALL({ invoiceNumbers: [{ id: 'N-ord_o1' }] }) });
+    expect(r.safeToEnableResume).toBe(true); expect(r.findings).toEqual([]); expect(r.status).toBe('CLEAN');
   });
   it('legacy orphan: Approved order, no link, matching unlinked invoice -> POSSIBLE_ORPHAN (not auto-fixed)', () => {
     const r = reconcile({ orders: [ord('o1', 'Approved')], invoices: [inv('legacy1')] });
@@ -20,7 +22,7 @@ describe('reconcile (read-only classification)', () => {
     expect(types(reconcile({ orders: [ord('o1', 'Invoicing')], invoices: [inv('legacy1')] }))).toEqual(['POSSIBLE_ORPHAN', 'STUCK_INVOICING', 'UNLINKED_INVOICE']);
   });
   it('stand-alone invoice with no matching order is info only', () => {
-    const r = reconcile({ orders: [], invoices: [inv('s1', { customer: 'Walk-in' })] });
+    const r = reconcile({ orders: [], invoices: [inv('s1', { customer: 'Walk-in', kind: 'order' })], ...ALL({ invoiceNumbers: [{ id: 'N-s1' }] }) });
     expect(r.findings).toHaveLength(1); expect(r.findings[0].severity).toBe('info'); expect(r.safeToEnableResume).toBe(true);
   });
   it('different total or items is NOT matched as an orphan', () => {
@@ -46,7 +48,7 @@ describe('reconcile (read-only classification)', () => {
 describe('reconcile RC3 checks (read-only)', () => {
   const cancelled = (id, over = {}) => ord(id, 'Cancelled', { items: [{ productId: 'p1', desc: 'A', qty: 2, price: 100, total: 200 }], ...over });
   const rec = (id, stockRestored) => ({ id, orderId: id, stockRestored });
-  const mv = (orderId, delta, type = 'order-cancelled') => ({ orderId, delta, type });
+  const mv = (orderId, delta, type = 'order-cancelled') => ({ orderId, productId: 'p1', delta, type });
   it('a cancelled order without a record is flagged', () => {
     expect(types(reconcile({ orders: [cancelled('o1')], invoices: [], cancellations: [] }))).toEqual(['CANCELLED_NO_RECORD']);
   });
@@ -70,7 +72,7 @@ describe('reconcile RC3 checks (read-only)', () => {
   });
   it('explicit stand-alone invoices are never orphan candidates; legacy invoices without kind are info only', () => {
     expect(types(reconcile({ orders: [ord('o1', 'Approved')], invoices: [inv('s1', { kind: 'standalone' })] }))).toEqual([]);
-    const r = reconcile({ orders: [], invoices: [inv('old1', { orderId: 'x' })], invoiceNumbers: [{ id: 'N-old1' }] });
+    const r = reconcile({ orders: [], invoices: [inv('old1', { orderId: 'x' })], ...ALL({ invoiceNumbers: [{ id: 'N-old1' }] }) });
     expect(types(r)).toEqual(['LEGACY_INVOICE_NO_KIND']); expect(r.safeToEnableResume).toBe(true);
   });
   it('a manager-entered order with a visit link, a paused merge and a schedule changed without history are flagged', () => {
@@ -82,5 +84,71 @@ describe('reconcile RC3 checks (read-only)', () => {
   it('is pure: inputs are not modified', () => {
     const input = { orders: [cancelled('o1')], invoices: [], cancellations: [rec('o1', true)], stockMovements: [mv('o1', 2)] };
     const copy = JSON.stringify(input); reconcile(input); expect(JSON.stringify(input)).toBe(copy);
+  });
+});
+
+// ---------------- F5: stock reconciliation compares by order AND product; incomplete is not clean ----------------
+const deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(deepFreeze); Object.freeze(o); } return o; };
+describe('F5 cancellation stock restoration is checked per order AND per product', () => {
+  const two = [{ productId: 'p1', desc: 'A', qty: 2, price: 10, total: 20 }, { productId: 'p2', desc: 'B', qty: 3, price: 10, total: 30 }, { desc: 'Custom line', qty: 4, price: 5, total: 20 }];
+  const order = (over = {}) => ord('o1', 'Cancelled', { items: two, ...over });
+  const rec = [{ id: 'o1', orderId: 'o1', stockRestored: true }];
+  const m = (productId, delta, orderId = 'o1') => ({ id: Math.random().toString(36).slice(2), orderId, productId, delta, type: 'order-cancelled' });
+  const run = (moves, extra = {}) => reconcile({ orders: [order()], invoices: [], cancellations: rec, stockMovements: moves, ...extra });
+  const problems = (r) => r.findings.filter(f => /^CANCEL_/.test(f.type)).map(f => `${f.type}:${f.productId}:${f.problem}`).sort();
+
+  it('THE REPRODUCTION: order needs p1=2 and p2=3 restored, movements restore p1=5 and p2=0 (same total of 5) -> flagged for BOTH products', () => {
+    const r = run([m('p1', 5), m('p2', 0)]);
+    expect(problems(r)).toEqual(['CANCEL_STOCK_MISMATCH:p1:wrong-quantity', 'CANCEL_STOCK_MISMATCH:p2:wrong-quantity']);
+    expect(r.findings.find(f => f.productId === 'p1')).toMatchObject({ orderIds: ['o1'], expected: 2, actual: 5 });
+    expect(r.findings.find(f => f.productId === 'p2')).toMatchObject({ expected: 3, actual: 0 });
+  });
+  it('a correct restore is clean (custom lines are not stock-tracked and are not expected)', () => {
+    expect(problems(run([m('p1', 2), m('p2', 3)]))).toEqual([]);
+  });
+  it('missing: one product never restored', () => expect(problems(run([m('p1', 2)]))).toEqual(['CANCEL_STOCK_MISMATCH:p2:missing']));
+  it('unexpected: a product the order never had was increased', () => {
+    expect(problems(run([m('p1', 2), m('p2', 3), m('p9', 4)]))).toEqual(['CANCEL_STOCK_MISMATCH:p9:unexpected']);
+  });
+  it('duplicated: the same product restored twice (even if each entry looks plausible)', () => {
+    const t = problems(run([m('p1', 2), m('p1', 2), m('p2', 3)]));
+    expect(t).toContain('CANCEL_NOT_RESTORED_TWICE:p1:duplicate'); expect(t).toContain('CANCEL_STOCK_MISMATCH:p1:wrong-quantity');
+  });
+  it('a movement that points at the wrong order does not count for this one', () => {
+    expect(problems(run([m('p1', 2), m('p2', 3, 'other')]))).toEqual(['CANCEL_STOCK_MISMATCH:p2:missing']);
+  });
+  it('two lines of one product are summed; a deleted product is not expected when the product list is supplied', () => {
+    const o = order({ items: [{ productId: 'p1', qty: 1 }, { productId: 'p1', qty: 2 }, { productId: 'gone', qty: 5 }] });
+    const base = { orders: [o], invoices: [], cancellations: rec };
+    expect(problems(reconcile({ ...base, stockMovements: [m('p1', 1), m('p1', 2)], products: [{ id: 'p1' }] }))).toEqual([]);
+    expect(problems(reconcile({ ...base, stockMovements: [m('p1', 1), m('p1', 2)] }))).toEqual(['CANCEL_STOCK_MISMATCH:gone:missing']);
+  });
+  it('a restore movement with no product or order cannot be checked: reported, never ignored', () => {
+    const r = run([m('p1', 2), m('p2', 3), { id: 'x', type: 'order-cancelled', delta: 1 }]);
+    expect(r.findings.some(f => f.type === 'MOVEMENT_UNATTRIBUTED')).toBe(true);
+  });
+  it('is read-only: frozen inputs are accepted and unchanged', () => {
+    const input = deepFreeze({ orders: [order()], invoices: [], cancellations: rec, stockMovements: [m('p1', 5), m('p2', 0)] });
+    expect(() => reconcile(input)).not.toThrow();
+  });
+});
+
+describe('F5 an incomplete assessment is never reported as safe', () => {
+  const full = (over = {}) => ({ orders: [], invoices: [], cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'NF-INV', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, ...over });
+  it('with every input and nothing wrong: CLEAN and safe', () => {
+    const r = reconcile(full());
+    expect(r).toMatchObject({ status: 'CLEAN', safeToEnableResume: true, skippedChecks: [] });
+  });
+  it('orders + invoices only: INCOMPLETE, not safe, and the skipped checks are listed', () => {
+    const r = reconcile({ orders: [], invoices: [] });
+    expect(r.status).toBe('INCOMPLETE'); expect(r.safeToEnableResume).toBe(false);
+    expect(r.skippedChecks.map(c => c.input).sort()).toEqual(['cancellations', 'counter', 'customers', 'invoiceNumbers', 'scheduleChanges', 'scheduleConfig', 'stockMovements']);
+  });
+  it('cancellation records but no stock movements: the stock check did not run -> INCOMPLETE', () => {
+    const r = reconcile(full({ stockMovements: null }));
+    expect(r.status).toBe('INCOMPLETE'); expect(r.skippedChecks.map(c => c.input)).toEqual(['stockMovements']);
+  });
+  it('a finding beats incomplete: status FINDINGS when something is wrong', () => {
+    expect(reconcile(full({ orders: [ord('o1', 'Cancelled')] })).status).toBe('FINDINGS');
   });
 });

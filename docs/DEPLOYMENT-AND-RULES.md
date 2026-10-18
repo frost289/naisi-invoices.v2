@@ -1,6 +1,6 @@
 # Deployment, legacy-data reconciliation and rules
 
-> RC3 update: read RC3-OWNER-DECISIONS.md, MIGRATION.md and RELEASE-CHECKLIST.md first. The rules to deploy are `rules/firestore.rules.FINAL-CANDIDATE` (RC3). Old manager clients must be refreshed before the rules deploy. Merge chunks and baseline chunks are 8 because rules may use at most 20 lookups per batch.
+> RC3 update: read RC3-OWNER-DECISIONS.md, MIGRATION.md and RELEASE-CHECKLIST.md first. The rules to deploy are `rules/firestore.rules` (RC3). Old manager clients must be refreshed before the rules deploy. Merge chunks and baseline chunks are 8 because rules may use at most 20 lookups per batch.
 
 Status: **procedure and proposals only.** Nothing here has been run against the real Firebase project. The deployed `firestore.rules` is not in the repository (it is git-ignored), so every rules statement below is unverified until someone with that file runs `tests/rules/invoicing.rules.test.js` against it.
 

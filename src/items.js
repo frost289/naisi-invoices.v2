@@ -1,3 +1,5 @@
+import { esc } from "./ui.js";
+import { round2 } from './orderLines.js';
 export function mwk(n) {
   return 'MWK ' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -8,18 +10,23 @@ export function addItemRow(itemsBody, onChange, qty, desc, price, productName = 
   itemCounter++;
   const tr = document.createElement('tr');
   tr.dataset.id = itemCounter;
+  // Static markup only; every saved value is assigned as a DOM property below, so it can never be parsed as HTML.
   tr.innerHTML = `
-    <td class="qty-col"><input type="number" min="0" step="1" class="qty-input" value="${qty ?? 1}"></td>
+    <td class="qty-col"><input type="number" min="0" step="1" class="qty-input"></td>
     <td>
-      <input type="text" class="desc-input" placeholder="e.g. Angel Yeast 10g" value="${desc ?? ''}" ${locked ? 'readonly' : ''}>
-      <input type="hidden" class="product-name-input" value="${productName ?? ''}">
-      <input type="hidden" class="pack-label-input" value="${packLabel ?? ''}">
-      <input type="hidden" class="pack-quantity-input" value="${packQuantity ?? ''}">
-      <input type="hidden" class="product-id-input" value="${productId ?? ''}">
+      <input type="text" class="desc-input" placeholder="e.g. Angel Yeast 10g">
+      <input type="hidden" class="product-name-input">
+      <input type="hidden" class="pack-label-input">
+      <input type="hidden" class="pack-quantity-input">
+      <input type="hidden" class="product-id-input">
     </td>
-    <td class="price-col"><input type="number" min="0" step="0.01" class="price-input" value="${price ?? ''}" placeholder="0.00" ${locked ? 'readonly' : ''}></td>
+    <td class="price-col"><input type="number" min="0" step="0.01" class="price-input" placeholder="0.00"></td>
     <td class="del-col">${locked ? '' : '<button type="button" class="del-btn" title="Remove item">&times;</button>'}</td>
   `;
+  const setVal = (sel, v) => { tr.querySelector(sel).value = v ?? ''; };
+  setVal('.qty-input', qty ?? 1); setVal('.desc-input', desc); setVal('.product-name-input', productName);
+  setVal('.pack-label-input', packLabel); setVal('.pack-quantity-input', packQuantity); setVal('.product-id-input', productId); setVal('.price-input', price);
+  if (locked) { tr.querySelector('.desc-input').readOnly = true; tr.querySelector('.price-input').readOnly = true; }
   itemsBody.appendChild(tr);
   tr.querySelectorAll('.qty-input, .desc-input, .price-input').forEach(inp => inp.addEventListener('input', onChange));
   if (!locked) {
@@ -69,9 +76,9 @@ export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products, l
       btn.type = 'button';
       btn.className = 'quick-add-btn';
       btn.innerHTML = `
-        <span class="qa-name">${p.productName}</span>
-        <span class="qa-pack">${p.packLabel} · Qty: ${p.quantity ?? '—'}</span>
-        <span class="qa-stock ${stock <= 0 ? 'qa-stock-low' : ''}">Stock: ${stock}</span>
+        <span class="qa-name">${esc(p.productName)}</span>
+        <span class="qa-pack">${esc(p.packLabel)} · Qty: ${esc(p.quantity ?? '—')}</span>
+        <span class="qa-stock ${esc(stock <= 0 ? 'qa-stock-low' : '')}">Stock: ${esc(stock)}</span>
         <span class="qa-price">${mwk(p.price)}</span>
       `;
       btn.addEventListener('click', () => {
@@ -98,7 +105,7 @@ export function getItems(itemsBody) {
     const productId = row.querySelector('.product-id-input')?.value || '';
     if (desc || qty || price) {
       items.push({
-        qty, desc, price, total: qty * price,
+        qty, desc, price, total: round2(qty * price),
         productName: productName || null,
         packLabel: packLabel || null,
         packQuantity: packQuantityRaw !== '' ? parseFloat(packQuantityRaw) : null,

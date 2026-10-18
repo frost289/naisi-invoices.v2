@@ -397,23 +397,23 @@ describe('decision 7 - dated schedule history', () => {
   it('merges: before the merge both shops were targets on their own days; a shop merged away is not a target from the merge day', () => {
     // a = Thursday shop, b = Friday shop, b merged into a on Thursday 15 Oct.
     const idx = build([C('a', 'Thu'), C('b', 'Fri')], [], [{ id: 'b', keepId: 'a', mergedAt: tsOn('2026-10-15') }]);
-    expect(targets(idx, '2026-10-09')).toEqual(['a']);            // Friday before the merge: b's target is credited to the survivor a
+    expect(targets(idx, '2026-10-09')).toEqual(['b']);            // Friday before the merge: b was its OWN target then (F4: a later merge must not rewrite an earlier date)
     expect(targets(idx, '2026-10-16')).toEqual([]);               // Friday after the merge: b no longer exists as a target
     expect(targets(idx, '2026-10-08')).toEqual(['a']);
     expect(H.resolveCustomerId(idx, 'b')).toBe('a');
   });
-  it('merged shops with the SAME day count once (their visits all belong to the survivor, so coverage can never exceed 100%)', () => {
+  it('merged shops with the SAME day were two targets before the merge and are one (the survivor) from the merge day (F4)', () => {
     const idx = build([C('a'), C('b')], [], [{ id: 'b', keepId: 'a', mergedAt: tsOn('2026-10-15') }]);
-    expect(targets(idx, '2026-10-08')).toEqual(['a']);
+    expect(targets(idx, '2026-10-08')).toEqual(['a', 'b']);
     expect(targets(idx, '2026-10-15')).toEqual(['a']);
   });
-  it('a visit recorded against a merged-away customer id still counts for the surviving shop', () => {
+  it('a visit recorded against the merged-away shop before the merge counts for THAT shop on that date (F4); the survivor is still due', () => {
     const idx = build([C('a'), C('b')], [], [{ id: 'b', keepId: 'a', mergedAt: tsOn('2026-10-14') }]);
     const v = [{ date: '2026-10-08', repEmail: 'r@x', customerId: 'b', outcome: 'No Order', reasonNoOrder: 'Shop closed', reasonNotes: '' }];
     const r = vs.buildPerformanceReport({ index: idx, visits: v, reps: ['r@x'], from: '2026-10-08', to: '2026-10-08' }).rows[0];
-    expect(r.scheduledCount).toBe(1);
+    expect(r.scheduledCount).toBe(2);
     expect(r.visitedCount).toBe(1);
-    expect(r.coveragePct).toBe(100);
+    expect(r.coveragePct).toBe(50);
   });
   it('mismatch detection flags a customer changed without a history entry', () => {
     const idx = build([C('a', 'Thu')]);

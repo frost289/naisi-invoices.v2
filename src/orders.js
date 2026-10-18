@@ -153,7 +153,7 @@ export async function revertInvoiceGeneration(id, attemptToken) {
     if (!orderSnap.exists()) return;
     const o = orderSnap.data();
     if (o.status !== 'Invoicing' || !attemptToken || o.invoicingAttempt !== attemptToken) return;
-    tx.update(orderRef, { status: 'Approved', invoicingAttempt: null, invoicingLeaseStartedAt: null, updatedAt: serverTimestamp() });
+    tx.update(orderRef, { status: 'Approved', invoicingAttempt: null, invoicingAttemptEnded: attemptToken, invoicingLeaseStartedAt: null, updatedAt: serverTimestamp() });
   });
 }
 
@@ -230,7 +230,7 @@ export async function commitInvoice({ orderId = null, attemptToken = null, invoi
     if (orderRef) {
       tx.update(orderRef, {
         status: 'Invoiced', invoiceId: targetId, invoiceNo,
-        invoicingAttempt: null, invoicingLeaseStartedAt: null,
+        invoicingAttempt: null, invoicingAttemptEnded: attemptToken, invoicingLeaseStartedAt: null,
         invoicedAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
     }

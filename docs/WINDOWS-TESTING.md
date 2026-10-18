@@ -19,7 +19,7 @@ Do NOT run `firebase login`, `firebase deploy` or `git push`. Nothing in these s
 | Command | What it runs | Expected |
 |---|---|---|
 | `npm test` | 297 unit tests (in-memory stand-in) | 16 files, 297 passed |
-| `npm run test:rules` | the rules tests against `rules\firestore.rules.FINAL-CANDIDATE` on the local Firestore emulator (first run downloads about 60 MB) | 170 tests, all must pass (never run by the developer: this is the key QA step) |
+| `npm run test:rules` | the rules tests against `rules\firestore.rules` on the local Firestore emulator (first run downloads about 60 MB) | 170 tests, all must pass (never run by the developer: this is the key QA step) |
 | `npm run test:e2e` | 51 browser checks (E1-E41, E43-E52; in-memory backend) | 51 PASS |
 | `npm run test:all` | all three | |
 

@@ -15,6 +15,14 @@
 //   changes Wednesday's target; Tuesday and earlier are untouched. The date comes from the SERVER time of the change
 //   (createdAt), never from a phone's clock. Several changes on the same day: the last one decides that day.
 //
+// MERGES (finding 4): a merge is dated like any other change. From the merge day the merged-away shop is no longer a target and the
+//   survivor is. Before the merge day both shops are SEPARATE targets, exactly as they were, so a merge made today cannot change an
+//   earlier date. The merge re-points visits to the survivor, so each re-pointed visit keeps the shop it was recorded against in
+//   `originalCustomerId` (set once, never overwritten), and the customerMerges record says `visitsKeepOriginal: true`. A visit's shop on a date = its original shop followed forward through the
+//   merges that had happened by that date. Merges done BEFORE originalCustomerId existed cannot be told apart afterwards: such a
+//   visit (made before a merge that moved visits, and re-pointed to the survivor) is AMBIGUOUS, is never credited to any shop, and is
+//   reported (see visitIdentityAt and docs/SCHEDULE-HISTORY.md).
+//
 // OLDER DATA: dates before the history began have NO reliable schedule. Reports show that limitation and
 // do not calculate targets or percentages for those dates (nothing is estimated from today's schedule).
 import { malawiDate, weekdayOfDate, datesInRange } from './malawiTime.js';
@@ -50,7 +58,7 @@ export function buildScheduleIndex({ config = null, changes = [], merges = [] } 
     list.sort((a, b) => (a.eff < b.eff ? -1 : a.eff > b.eff ? 1 : (a.ms - b.ms) || (a.id < b.id ? -1 : 1)));
   }
   const mergeInto = new Map();
-  for (const m of merges) mergeInto.set(m.id, { keepId: m.keepId, date: malawiDateOfTimestamp(m.mergedAt) });
+  for (const m of merges) mergeInto.set(m.id, { keepId: m.keepId, date: malawiDateOfTimestamp(m.mergedAt), movedVisits: (m.moved && typeof m.moved.visits === 'number') ? m.moved.visits : null, keepsOriginal: m.visitsKeepOriginal === true });
   return { startDate, byCustomer, mergeInto };
 }
 
@@ -63,6 +71,35 @@ export function resolveCustomerId(index, id) {
     cur = m.keepId;
   }
   return cur;
+}
+
+// Date-aware: follow only the merges that had already happened on `date` (merge day included). A merge with no usable date is ignored, never guessed.
+export function resolveCustomerIdAt(index, id, date) {
+  let cur = id;
+  for (let i = 0; i < 50; i++) {
+    const m = index.mergeInto.get(cur);
+    if (!m || !m.date || m.date > date) return cur;
+    cur = m.keepId;
+  }
+  return cur;
+}
+
+// Which shop a recorded visit belongs to, as of the visit's own date.
+//   { id, ambiguous:false }                       the shop (original shop followed through the merges done by the visit date)
+//   { id:null, ambiguous:true, candidates:[ids] } a legacy visit that was re-pointed by a merge made after it, whose original shop was not kept
+export function visitIdentityAt(index, visit) {
+  if (visit.originalCustomerId) return { id: resolveCustomerIdAt(index, visit.originalCustomerId, visit.date), ambiguous: false, candidates: [] };
+  const X = visit.customerId;
+  // shops that were merged (directly or through a chain) into X, but only AFTER this visit's date, and whose merge moved visits (or the count is unknown)
+  const candidates = [];
+  for (const [y, m] of index.mergeInto) {
+    if (!m.date || m.date <= visit.date || m.movedVisits === 0 || m.keepsOriginal) continue;   // a merge made by the current app stamped every visit it moved
+    let cur = y, ok = false;
+    for (let i = 0; i < 50 && cur; i++) { const next = index.mergeInto.get(cur); if (!next) break; if (next.keepId === X) { ok = true; break; } cur = next.keepId; }
+    if (ok) candidates.push(y);
+  }
+  if (!candidates.length) return { id: resolveCustomerIdAt(index, X, visit.date), ambiguous: false, candidates: [] };
+  return { id: null, ambiguous: true, candidates: [X, ...candidates] };
 }
 
 // The state of one customer at the END of the given Malawi date, or null when no change had happened by then.
@@ -88,8 +125,9 @@ export function targetsForDate(index, date) {
   for (const customerId of index.byCustomer.keys()) {
     const st = customerStateAt(index, customerId, date);
     if (!st || !st.active || st.assignedDay !== weekday) continue;
-    const key = resolveCustomerId(index, customerId);   // two shops merged later count once
-    if (!seen.has(key)) seen.set(key, { customerId: key, customerName: st.customerName, originalCustomerId: customerId });
+    // Each shop is its own target on this date. A shop merged away stops being a target from its merge day (customerStateAt),
+    // so a LATER merge never changes an earlier date.
+    if (!seen.has(customerId)) seen.set(customerId, { customerId, customerName: st.customerName });
   }
   return { reliable: true, reason: null, targets: [...seen.values()] };
 }

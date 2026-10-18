@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-10-18).** This file describes RC3. The only authoritative status is `docs/RC4-RELEASE-REPORT.md`; any PASS or READY claim below does not apply to RC4.
+
 # Validation report (honest)
 
 ## Actually run, in the environment that produced this patch (15 Oct 2026)
