@@ -339,7 +339,7 @@
     </div>
     <div style="overflow-x:auto;">
     <table class="items-table" id="repSummaryTable" style="width:100%;">
-      <thead><tr><th>Rep</th><th>Scheduled</th><th>Visited</th><th>Still due</th><th>Orders (visits)</th><th>No order</th><th>Coverage</th><th>Conversion</th><th>Manager-entered orders</th></tr></thead>
+      <thead><tr><th>Rep</th><th>Scheduled</th><th>Visited</th><th>Still due</th><th>Orders (visits)</th><th>No order</th><th>Coverage</th><th>Conversion</th><th>Manager-entered orders</th><th>Of the visits: shop closed</th><th>Conversion excl. closed</th></tr></thead>
       <tbody id="repSummaryBody"></tbody>
     </table>
     </div>
@@ -478,6 +478,14 @@
         <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:8px;"><input type="radio" name="suggestScope" value="all"> Re-plan every shop (shows who would move; you can untick any)</label>
         <button type="button" class="list-action-btn" id="suggestCalcBtn">Calculate suggestion</button>
         <div id="suggestResult" style="margin-top:10px;"></div>
+      </div>
+    </div>
+    <div style="margin-bottom:12px;">
+      <button type="button" class="list-action-btn" id="importDaysToggleBtn">Import planned days from a spreadsheet</button>
+      <div id="importDaysPanel" style="display:none; border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:8px;">
+        <p class="numbering-hint" style="margin:0 0 8px;">Upload an Excel or CSV file with a <strong>Name</strong> column and a <strong>Day</strong> column (Mon to Sat); Phone and Area are optional. Every row is matched to an existing customer and shown for your review. Nothing is saved until you press Apply, and shops that cannot be matched clearly are never guessed. Changes take effect from today and are kept in the schedule history.</p>
+        <input type="file" id="importDaysFile" accept=".xlsx,.csv">
+        <div id="importDaysResult" style="margin-top:10px;"></div>
       </div>
     </div>
     <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;" id="scheduleDayTabs"></div>

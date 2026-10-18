@@ -112,6 +112,8 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
     }
     const orders = mine.filter(v => v.outcome === 'Order Placed');
     const noOrder = mine.filter(v => v.outcome === 'No Order');
+    // A closed shop COUNTS as a visit (owner decision, 18 Oct 2026) but is shown separately so contact visits stay visible.
+    const closed = noOrder.filter(v => v.reasonNoOrder === 'Shop closed');
     const valued = orders.filter(v => typeof v.orderValue === 'number' && Number.isFinite(v.orderValue));
     const attrMine = attributed.filter(o => repKey(o.attributedRepEmail) === rep && o.status !== 'Cancelled' && o.status !== 'Rejected');
     const attrValue = attrMine.reduce((s, o) => s + (Number(o.grandTotal) || 0), 0);
@@ -119,6 +121,7 @@ export function buildPerformanceReport({ index, visits, reps, from, to, repFilte
       rep, scheduledCount, visitedCount, stillDueCount: scheduledCount - visitedCount, due,
       reliableDays: reliableDays.length, unreliableDays: unreliableDates.length,
       ordersTaken: orders.length, noOrderVisits: noOrder.length, totalVisits: mine.length,
+      closedVisits: closed.length, conversionExclClosedPct: pct(orders.length, mine.length - closed.length),
       coveragePct: pct(visitedCount, scheduledCount), conversionPct: pct(orders.length, mine.length),
       orders, noOrder, extraVisits: extra,
       // order VALUE: only visits that carry a recorded value are summed; others are counted, never treated as 0

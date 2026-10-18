@@ -72,6 +72,8 @@ import {
 } from './deliveries.js';
 import { orderStops, getStartPoint, startLabel, formatKm } from './routing.js';
 import { suggestSchedule, applySuggestions, DEFAULT_DAYS } from './scheduleSuggest.js';
+import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from './scheduleImport.js';
+import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
 
 initOfflineBanner();
@@ -1317,6 +1319,83 @@ async function initApp(user, role) {
         refreshWeeklySchedule();
       }
     });
+
+    // ---- Import planned days from a spreadsheet (manager). Reviewed rows are applied through the same guarded, dated schedule change. ----
+    const importPanel = document.getElementById('importDaysPanel');
+    const importResult = document.getElementById('importDaysResult');
+    document.getElementById('importDaysToggleBtn').addEventListener('click', () => {
+      importPanel.style.display = importPanel.style.display === 'none' ? 'block' : 'none';
+    });
+    let importState = null;     // { rows, choices: {line: customerId}, off: Set(line) }
+    const importDayLabel = (d) => d ? scheduleDayLabels[d] : 'no day';
+    function renderImport() {
+      const { rows, choices, off } = importState;
+      const { moves, notes } = buildMoves(rows, customersCache, choices);
+      const moveByLine = new Map(moves.map(m => [m.line, m]));
+      const noteByLine = new Map(notes.map(n => [n.line, n]));
+      const need = rows.filter(r => r.status === 'choose' && !choices[r.line]).length;
+      const missing = rows.filter(r => r.status === 'missing');
+      const skipped = rows.filter(r => r.status === 'skip');
+      const optionsFor = (r) => `<option value="">- choose the right customer -</option>` + r.candidates.map(id => {
+        const c = customersCache.find(x => x.id === id);
+        return c ? `<option value="${esc(id)}" ${choices[r.line] === id ? 'selected' : ''}>${esc(c.name)}${c.location ? ' - ' + esc(c.location) : ''} (now: ${importDayLabel(c.assignedDay)})</option>` : '';
+      }).join('');
+      const line = (r) => {
+        const m = moveByLine.get(r.line), n = noteByLine.get(r.line);
+        if (r.status === 'matched' || (r.status === 'choose' && choices[r.line])) {
+          const c = customersCache.find(x => x.id === (r.customerId || choices[r.line]));
+          if (m) return `<label style="display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><input type="checkbox" class="import-move" data-line="${r.line}" ${off.has(r.line) ? '' : 'checked'}> <span style="flex:1;">${esc(m.name)}${r.status === 'choose' ? ' <em>(you chose)</em>' : ''}</span><span style="color:var(--muted);">${importDayLabel(m.from)} → <strong>${scheduleDayLabels[m.to]}</strong></span></label>`;
+          return `<div class="import-note" style="padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem; color:var(--muted);">${esc(c ? c.name : r.planName)}: ${esc(n ? n.why : 'no change')}</div>`;
+        }
+        if (r.status === 'choose') return `<div style="padding:6px 0; border-bottom:1px solid var(--line); font-size:0.85rem;"><strong>${esc(r.planName)}</strong> → ${scheduleDayLabels[r.day]} <span style="color:var(--muted);">(${esc(r.how)})</span><br><select class="import-choice" data-line="${r.line}" style="max-width:100%;">${optionsFor(r)}</select></div>`;
+        return '';
+      };
+      importResult.innerHTML = `
+        <p class="numbering-hint" id="importSummary">${rows.length} rows read: ${moves.length} change${moves.length === 1 ? '' : 's'} ready, ${notes.length} already correct or not possible, ${need} need your choice, ${missing.length} not found in the app, ${skipped.length} skipped.</p>
+        ${rows.map(line).join('')}
+        ${missing.length ? `<p class="numbering-hint" id="importMissing" style="margin-top:8px;"><strong>Not found in the app</strong> (add each with a map pin first, then import again): ${missing.map(r => esc(r.planName)).join(', ')}.</p>` : ''}
+        ${skipped.length ? `<p class="numbering-hint" style="margin-top:8px;">Skipped (not existing customers or no valid day): ${skipped.map(r => esc(r.planName) + ' (' + esc(r.note) + ')').join('; ')}</p>` : ''}
+        ${moves.length ? '<button type="button" class="list-action-btn" id="importApplyBtn" style="margin-top:10px; background:var(--leaf); color:#fff; border-color:var(--leaf);">Apply ticked changes</button> <span id="importProgress" style="font-size:0.82rem; margin-left:8px;"></span>' : ''}`;
+    }
+    document.getElementById('importDaysFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        let table;
+        if (/\.csv$/i.test(file.name)) table = parseCsv(await file.text());
+        else { const wb = new ExcelJS.Workbook(); await wb.xlsx.load(await file.arrayBuffer()); table = rowsFromWorksheet(wb.worksheets[0]); }
+        await loadCustomersCache();                      // match against the latest saved customers
+        importState = { rows: planImport(readTable(table), customersCache), choices: {}, off: new Set() };
+        renderImport();
+      } catch (err) { importState = null; importResult.innerHTML = ''; showToast('Could not read the file: ' + err.message, 'error'); }
+    });
+    importResult.addEventListener('change', (e) => {
+      if (!importState) return;
+      const sel = e.target.closest('.import-choice');
+      if (sel) { if (sel.value) importState.choices[sel.dataset.line] = sel.value; else delete importState.choices[sel.dataset.line]; importState.choices = { ...importState.choices }; renderImport(); return; }
+      const cb = e.target.closest('.import-move');
+      if (cb) { const l = Number(cb.dataset.line); if (cb.checked) importState.off.delete(l); else importState.off.add(l); }
+    });
+    importResult.addEventListener('click', async (e) => {
+      const btn = e.target.closest('#importApplyBtn');
+      if (!btn || !importState) return;
+      const chosen = buildMoves(importState.rows, customersCache, Object.fromEntries(Object.entries(importState.choices).map(([k, v]) => [Number(k), v]))).moves.filter(m => !importState.off.has(m.line));
+      if (!chosen.length) { showToast('Nothing is ticked.', 'error'); return; }
+      if (!confirm(`Change the visit day of ${chosen.length} shop${chosen.length === 1 ? '' : 's'}? This takes effect from today and is saved in the schedule history.`)) return;
+      btn.disabled = true;
+      const prog = document.getElementById('importProgress');
+      const res = await applySuggestions(chosen, {
+        setDay: (id, to, from) => setCustomerVisitDay(id, to, { uid: user.uid, email: user.email, expectedDay: from }),
+        onProgress: (d, t) => { prog.textContent = `${d} of ${t}...`; },
+      });
+      await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
+      importState = null; document.getElementById('importDaysFile').value = '';
+      importResult.innerHTML = `<p id="importDone" style="font-size:0.9rem;"><strong>${res.applied.length} changed.</strong>` +
+        (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
+        (res.failed.length ? ` ${res.failed.length} failed: ${res.failed.map(m => esc(m.name) + ' (' + esc(m.error) + ')').join('; ')}.` : '') + '</p>';
+      showToast(`${res.applied.length} visit day${res.applied.length === 1 ? '' : 's'} updated.`, res.failed.length ? 'error' : 'success');
+    });
+
 
     // ---- Suggest schedule by distance (manager). Proposes only; applying goes through setCustomerVisitDay (dated history). ----
     const suggestPanel = document.getElementById('suggestSchedulePanel');
@@ -4126,6 +4205,7 @@ async function initApp(user, role) {
           <td>${r.ordersTaken}</td><td>${r.noOrderVisits}</td>
           <td>${pctText(r.coveragePct)}</td><td>${pctText(r.conversionPct)}</td>
           <td>${r.attributedOrders ? `${r.attributedOrders} order(s), ${r.attributedValue === null ? '—' : mwk(r.attributedValue)}` : '—'}${r.attributedCancelled ? ` <span class="numbering-hint">(${r.attributedCancelled} cancelled)</span>` : ''}</td>
+          <td>${r.closedVisits}</td><td>${pctText(r.conversionExclClosedPct)}</td>
         </tr>`).join('');
       // The limitation is stated plainly - no figure is shown for a date without a reliable schedule record.
       if (report.limitation) { perfScheduleWarning.textContent = report.limitation; perfScheduleWarning.style.display = 'block'; }

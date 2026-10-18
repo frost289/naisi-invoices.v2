@@ -1,6 +1,8 @@
 // Real-browser (Chromium) checks for the RC3 owner decisions (E26+). Same backend as visits.e2e.mjs:
 // in-memory Firestore stand-in + fake sign-in. NOT the emulator and NOT the real rules (see docs/WINDOWS-TESTING.md).
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
+const ExcelJS = createRequire(import.meta.url)('../../node_modules/exceljs');
 import { serveDist, newBrowser, Results, expect, eq } from './harness.mjs';
 import { seedData, THU } from './seed.mjs';
 
@@ -209,6 +211,7 @@ try {
     expect(await page.locator('#scheduleHistoryStartBox').isVisible(), 'start box not shown');
     const cells = await page.$$eval('#repSummaryBody tr', trs => trs.map(tr => [...tr.children].map(td => td.innerText.replace(/\s+/g, ' ').trim())));
     expect(cells.every(r => /not calculated/i.test(r[1]) && !/%/.test(r[6]) ), 'targets/percentages were calculated: ' + JSON.stringify(cells[0]));
+    expect(/shop closed/i.test(await page.innerText('#repSummaryTable thead')) && /excl\. closed/i.test(await page.innerText('#repSummaryTable thead')), 'closed-shop columns missing from the report header');
     await shot('32-history-not-started');
     return cells[0].join(' | ');
   });
@@ -315,12 +318,65 @@ try {
     eq(JSON.stringify((await store('customers')).map(c => [c.id, c.assignedDay])), before, 'nothing ticked must change nothing');
     return 'no change without Apply';
   });
+  // ---------------- bulk import of planned days ----------------
+  await logout();
+  const tw = (n) => geo('Twin Shop', -13.95, 33.80 + n * 0.001, null);
+  await fresh({ extra: { 'customers/t1': tw(1), 'customers/t2': tw(2) } });
+  await login('mgr@naisi.test');
+  await nav('navCustomersBtn');
+  const csv = 'Name,Day,Phone\nAlpha Shop,Fri,\nBravo Shop,Mon,\nCharlie Shop,Tue,\nEcho Friday,Fri,\nTwin Shop,Wed,\nGhost Mart,Sat,\nNew-shop prospect - Chiuzira,Mon,\n';
+  const upload = async (name, buffer, type = 'text/csv') => { await page.setInputFiles('#importDaysFile', { name, mimeType: type, buffer }); await page.waitForSelector('#importSummary', { timeout: 8000 }); };
+  const dayOfCust = async (id) => (await doc('customers/' + id)).assignedDay;
+  await R.check('E47', 'Import planned days: rows are matched and shown for review; clear matches ready, ambiguous shop needs a choice, unknown shop listed as not found, prospect skipped; NOTHING saved yet', async () => {
+    await page.click('#importDaysToggleBtn');
+    await upload('plan.csv', Buffer.from(csv));
+    const sum = await page.innerText('#importSummary');
+    expect(/3 changes ready/.test(sum) && /1 need your choice/.test(sum) && /1 not found/.test(sum) && /1 skipped/.test(sum), 'summary: ' + sum);
+    expect(/Ghost Mart/.test(await page.innerText('#importMissing')), 'missing list');
+    eq([await dayOfCust('c1'), await dayOfCust('c2'), (await store('scheduleChanges')).filter(c => c.kind === 'schedule').length], ['Thu', 'Thu', 0], 'nothing may be saved by reading the file');
+    await shot('36-import-days-review');
+    return sum;
+  });
+  await R.check('E48', 'Unticked shops stay as they are; the ambiguous shop gets the day only after the manager chooses it; each change has one dated history entry', async () => {
+    await page.uncheck('.import-move[data-line="3"]');
+    await page.selectOption('.import-choice', 't2');
+    await page.waitForSelector('.import-move[data-line="6"]');
+    await page.click('#importApplyBtn');
+    await page.waitForSelector('#importDone', { timeout: 8000 });
+    eq([await dayOfCust('c1'), await dayOfCust('c2'), await dayOfCust('c3'), await dayOfCust('t1'), await dayOfCust('t2')], ['Fri', 'Thu', 'Tue', null, 'Wed'], 'days after apply');
+    const hist = (await store('scheduleChanges')).filter(c => c.kind === 'schedule');
+    eq(hist.map(h => h.customerId).sort(), ['c1', 'c3', 't2'], 'history entries'); expect(hist.every(h => h.changedByEmail === 'mgr@naisi.test'), 'actor');
+    expect(/3 changed/.test(await page.innerText('#importDone')), await page.innerText('#importDone'));
+    return 'c1 Fri, c3 Tue, t2 Wed; Bravo and Twin#1 untouched';
+  });
+  await R.check('E49', 'A shop another manager scheduled after the file was read is SKIPPED, not overwritten; re-importing an unchanged plan changes nothing', async () => {
+    await upload('plan2.csv', Buffer.from('Name,Day\nBravo Shop,Mon\nCharlie Shop,Tue\n'));
+    await fake(() => window.__fake.put('customers/c2', { name: 'Bravo Shop', phone: '0999000000', location: 'Area 25', active: true, assignedDay: 'Sat', lat: -13.98, lng: 33.78 }));
+    await page.click('#importApplyBtn'); await page.waitForSelector('#importDone', { timeout: 8000 });
+    const t = await page.innerText('#importDone');
+    eq(await dayOfCust('c2'), 'Sat', "the other manager's choice must stay"); expect(/skipped/i.test(t) && /Bravo Shop/.test(t), t);
+    const before = (await store('scheduleChanges')).length;
+    await upload('plan3.csv', Buffer.from('Name,Day\nCharlie Shop,Tue\n'));
+    expect(/0 changes ready/.test(await page.innerText('#importSummary')), await page.innerText('#importSummary'));
+    eq((await store('scheduleChanges')).length, before, 'no history for an unchanged shop');
+    return t;
+  });
+  await R.check('E50', 'An Excel (.xlsx) file works the same; a file without Name and Day columns is refused with a clear message and saves nothing', async () => {
+    const wb = new ExcelJS.Workbook(); const ws = wb.addWorksheet('Plan'); ws.addRow(['Customer', 'Planned day']); ws.addRow(['Echo Friday', 'Thu']);
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+    await upload('plan.xlsx', buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(/1 change ready/.test(await page.innerText('#importSummary')), await page.innerText('#importSummary'));
+    await page.setInputFiles('#importDaysFile', { name: 'bad.csv', mimeType: 'text/csv', buffer: Buffer.from('Shop,Phone\nAlpha,1\n') });
+    await toast(/Name.*Day/);
+    eq(await dayOfCust('c5'), 'Fri', 'nothing saved');
+    return 'xlsx ok; bad sheet refused';
+  });
   await logout(); await login('rep1@naisi.test'); await page.waitForSelector('#todaysRouteCard', { state: 'visible' });
-  await R.check('E47', 'A rep cannot see the schedule planner (manager only)', async () => {
-    expect(!(await page.locator('#suggestScheduleToggleBtn').isVisible()), 'planner visible to a rep');
+  await R.check('E51', 'A rep cannot see the schedule planner or the days import (manager only)', async () => {
+    expect(!(await page.locator('#suggestScheduleToggleBtn').isVisible()) && !(await page.locator('#importDaysToggleBtn').isVisible()), 'planner/import visible to a rep');
     return 'hidden';
   });
-  await R.check('E48', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
+  await R.check('E52', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
 } finally {
   fs.writeFileSync(`${OUT}/e2e-decisions-results.json`, JSON.stringify(R.rows, null, 2));
   await browser.close(); server.close();

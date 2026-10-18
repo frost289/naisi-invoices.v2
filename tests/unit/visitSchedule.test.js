@@ -38,6 +38,18 @@ describe('rep day progress', () => {
     const p = s.repDayProgress({ customers: cust, visits: [visit({ customerId: 'e' })], date: '2026-10-15' });
     expect(p.visitedCount).toBe(0); expect(p.stillDue).toHaveLength(4); expect(p.noOrderVisits).toBe(1);
   });
+  it('a closed shop COUNTS as a visit and is also shown separately; conversion is given with and without closed shops', () => {
+    const v = [visit({ repEmail: 'r1@x', customerId: 'a', outcome: 'Order Placed', orderId: 'o1', orderNo: 'ORD-1', orderValue: 500 }),
+      visit({ repEmail: 'r1@x', customerId: 'b', reasonNoOrder: 'Shop closed' }), visit({ repEmail: 'r1@x', customerId: 'c', reasonNoOrder: 'Shop closed' }),
+      visit({ repEmail: 'r1@x', customerId: 'd', reasonNoOrder: 'Price too high' })];
+    const r = s.buildPerformanceReport({ index: idx(cust), visits: v, reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
+    expect([r.totalVisits, r.noOrderVisits, r.closedVisits]).toEqual([4, 3, 2]);
+    expect([r.conversionPct, r.conversionExclClosedPct]).toEqual([25, 50]);          // 1/4 of all visits; 1/2 of the visits where the owner was met
+  });
+  it('conversion excluding closed shops is not calculated when every visit was a closed shop', () => {
+    const r = s.buildPerformanceReport({ index: idx(cust), visits: [visit({ repEmail: 'r1@x', customerId: 'a', reasonNoOrder: 'Shop closed' })], reps: ['r1@x'], from: '2026-10-15', to: '2026-10-15' }).rows[0];
+    expect([r.closedVisits, r.totalVisits, r.conversionExclClosedPct]).toEqual([1, 1, null]);
+  });
   it('ignores visits from other dates', () => {
     const p = s.repDayProgress({ customers: cust, visits: [visit({ date: '2026-10-14' })], date: '2026-10-15' });
     expect(p.visitedCount).toBe(0); expect(p.totalVisits).toBe(0);
