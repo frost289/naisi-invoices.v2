@@ -5,7 +5,7 @@ const ord = (id, status, over = {}) => ({ id, status, customerName: 'Shop', item
 const inv = (id, over = {}) => ({ id, invoiceNo: 'N-' + id, customer: 'Shop', items: it1, grandTotal: 200, ...over });
 const types = (r) => r.findings.map(f => f.type).sort();
 // every optional input supplied (and empty/consistent), so a result can be CLEAN; individual tests override what they need
-const ALL = (over = {}) => ({ cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'ZZ', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, ...over });
+const ALL = (over = {}) => ({ cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'ZZ', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, products: [{ id: 'p1' }], ...over });
 
 describe('reconcile (read-only classification)', () => {
   it('clean data: only info', () => {
@@ -134,7 +134,7 @@ describe('F5 cancellation stock restoration is checked per order AND per product
 });
 
 describe('F5 an incomplete assessment is never reported as safe', () => {
-  const full = (over = {}) => ({ orders: [], invoices: [], cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'NF-INV', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, ...over });
+  const full = (over = {}) => ({ orders: [], invoices: [], cancellations: [], stockMovements: [], invoiceNumbers: [], counter: { prefix: 'NF-INV', counter: 1 }, customers: [], scheduleChanges: [], scheduleConfig: {}, products: [{ id: 'p1' }], ...over });
   it('with every input and nothing wrong: CLEAN and safe', () => {
     const r = reconcile(full());
     expect(r).toMatchObject({ status: 'CLEAN', safeToEnableResume: true, skippedChecks: [] });
@@ -142,7 +142,7 @@ describe('F5 an incomplete assessment is never reported as safe', () => {
   it('orders + invoices only: INCOMPLETE, not safe, and the skipped checks are listed', () => {
     const r = reconcile({ orders: [], invoices: [] });
     expect(r.status).toBe('INCOMPLETE'); expect(r.safeToEnableResume).toBe(false);
-    expect(r.skippedChecks.map(c => c.input).sort()).toEqual(['cancellations', 'counter', 'customers', 'invoiceNumbers', 'scheduleChanges', 'scheduleConfig', 'stockMovements']);
+    expect(r.skippedChecks.map(c => c.input).sort()).toEqual(['cancellations', 'counter', 'customers', 'invoiceNumbers', 'products', 'scheduleChanges', 'scheduleConfig', 'stockMovements']);
   });
   it('cancellation records but no stock movements: the stock check did not run -> INCOMPLETE', () => {
     const r = reconcile(full({ stockMovements: null }));

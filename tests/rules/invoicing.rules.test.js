@@ -1700,3 +1700,72 @@ describe('RC5-B2. cross-role matrix for the order write paths (manager, rep, del
     await assertSucceeds(saveOrderBatch(as('rep1')));
   });
 });
+
+// =============================================================================================
+// RC6-P3. The ACTUAL custom-line policy on INVOICE line edits (docs/RC6-RELEASE-REPORT.md section P3). EMULATOR-ONLY: not executed in the
+// authoring sandbox. Invoice mode accepts tracked lines, explicit custom:true lines and (historical compatibility) lines with no productId
+// and no `custom` key; it refuses every malformed marker. Order mode (approve/edit) is covered by RC5-B / RC5-B2.
+describe('RC6-P3. invoice line edits: custom:true and the historical no-flag line are accepted; malformed markers are refused', () => {
+  const base = { orderId: 'o1', kind: 'order', invoiceNo: 'NF-INV-2026-0370', items: [{ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1' }], createdBy: 'mgr', grandTotal: 10, customer: 'Shop', createdAt: Timestamp.now() };
+  const edit = (items, who = 'mgr') => updateDoc(doc(as(who), 'invoices', 'ord_p3'), { items, grandTotal: items.reduce((s, i) => s + i.total, 0) });
+  beforeEach(async () => { await adminSet(['invoices', 'ord_p3'], base); });
+  it('manager: explicit custom:true freight (fractional) is accepted', async () => { await assertSucceeds(edit([{ qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }])); });
+  it('manager: HISTORICAL line with no productId and no custom key is accepted on an invoice (compatibility with old data and stale clients)', async () => { await assertSucceeds(edit([{ qty: 1, desc: 'Freight', price: 100, total: 100 }])); });
+  it('manager: custom:false, custom:"true", custom:null and custom together with a productId are all refused', async () => {
+    for (const bad of [{ custom: false }, { custom: 'true' }, { custom: null }, { productId: 'p1', custom: true }])
+      await assertFails(edit([{ qty: 1, desc: 'X', price: 100, total: 100, ...bad }]));
+  });
+  it('manager: a tracked line with a fractional quantity is refused; a tracked whole-number line is accepted', async () => {
+    await assertFails(edit([{ qty: 1.5, desc: 'Amanda', price: 100, total: 150, productId: 'p1' }]));
+    await assertSucceeds(edit([{ qty: 3, desc: 'Amanda', price: 100, total: 300, productId: 'p1' }]));
+  });
+  it('rep, deliverer, stranger and anonymous cannot edit invoice lines at all', async () => {
+    for (const who of ['rep1', 'deliv', 'stranger', 'anon']) await assertFails(edit([{ qty: 1, desc: 'F', price: 1, total: 1, custom: true }], who));
+  });
+});
+
+// =============================================================================================
+// RC6-MAX. The maximum supported order size (12 lines) through the REAL app functions: approve (12 products, 12 movements), edit, invoice, cancel
+// with restore. EMULATOR-ONLY: not executed in the authoring sandbox. Acceptance: all succeed with no "exceeded" / "maximum" rule-evaluation
+// or document-access error. If any fails with such an error, MAX_ORDER_LINES must be lowered (src/money.js, the unrolled rules, tests) and the owner told.
+describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation transactions', () => {
+  const ids = Array.from({ length: 12 }, (_, i) => 'p' + (i + 1));
+  const items12 = (qty = 1) => ids.map((pid, i) => ({ productId: pid, desc: 'Product ' + (i + 1), qty, price: 100, total: qty * 100 }));
+  const seed = async (orderId, status = 'Submitted') => {
+    for (const pid of ids) await adminSet(['products', pid], { productName: pid, packLabel: '100g', stockOnHand: 50, unitsPerCase: 1 });
+    await adminSet(['orders', orderId], { orderNo: 'ORD-2026-0777', status, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: items12(), grandTotal: 1200, stockApplied: status === 'Approved' });
+  };
+  const stock = async () => Promise.all(ids.map(async (p) => (await adminGet('products', p)).stockOnHand));
+  it('approve: all 12 products are deducted once; a repeat is refused and changes nothing', async () => {
+    await seed('o12a'); const m = await appAs('mgr');
+    await m.stock.approveOrderWithStock({ id: 'o12a', items: items12() }, MGR);
+    must((await stock()).every((s) => s === 49), 'every product should be 49: ' + (await stock()));
+    let again; try { await m.stock.approveOrderWithStock({ id: 'o12a', items: items12() }, MGR); } catch (e) { again = e; }
+    must(!!again && (await stock()).every((s) => s === 49), 'a repeated approval must be refused without changing stock');
+  });
+  it('edit (Approved, quantity of every line changes): stock is adjusted by the exact differences', async () => {
+    await seed('o12b'); const m = await appAs('mgr');
+    await m.stock.approveOrderWithStock({ id: 'o12b', items: items12() }, MGR);
+    await m.stock.editOrderWithStock('o12b', { details: {}, items: items12(3) }, MGR);
+    must((await stock()).every((s) => s === 47), 'every product should be 47 after editing 1 -> 3: ' + (await stock()));
+  });
+  it('invoice: a 12-line invoice commit succeeds once and a second attempt is refused', async () => {
+    await seed('o12c'); const m = await appAs('mgr');
+    await m.stock.approveOrderWithStock({ id: 'o12c', items: items12() }, MGR);
+    const inv = await m.orders.issueInvoiceForOrder({ orderId: 'o12c', meta: { items: items12(), customer: 'Shop', customerId: 'c1', date: '2026-10-15' }, uid: 'mgr' });
+    must(inv.invoiceId === 'ord_o12c', 'unexpected invoice id ' + inv.invoiceId);
+    let second; try { await m.orders.issueInvoiceForOrder({ orderId: 'o12c', meta: { items: items12(), customer: 'Shop', customerId: 'c1', date: '2026-10-15' }, uid: 'mgr' }); } catch (e) { second = e; }
+    must(!!second, 'a second invoice for the same order must be refused');
+  });
+  it('cancel with restore: all 12 products return to their original stock exactly once', async () => {
+    await seed('o12d'); const m = await appAs('mgr');
+    await m.stock.approveOrderWithStock({ id: 'o12d', items: items12() }, MGR);
+    await m.stock.cancelOrder({ id: 'o12d', ...(await adminGet('orders', 'o12d')) }, { reason: 'Customer cancelled', uid: 'mgr', email: 'mgr@example.com' });
+    must((await stock()).every((s) => s === 50), 'stock should be back to 50: ' + (await stock()));
+  });
+  it('13 lines is refused by the app validator before any write (and by the rules if sent raw, see RC5-B)', async () => {
+    const m = await appAs('mgr');
+    const problem = m.visits.validateOrderItems([...items12(), { productId: 'p13', desc: 'x', qty: 1, price: 1, total: 1 }]);
+    must(typeof problem === 'string' && problem.length > 0, 'validateOrderItems must return a problem for 13 lines, got ' + problem);
+  });
+});

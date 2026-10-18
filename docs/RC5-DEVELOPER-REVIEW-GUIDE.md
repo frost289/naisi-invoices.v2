@@ -1,3 +1,5 @@
+> **RC6 NOTICE (SUPERSEDED-BY-RC6):** `docs/RC6-RELEASE-REPORT.md` and `docs/RC6-OPERATIONS-PLAN.md` win where they disagree with this document. Corrected: the stuck-Invoicing classifier (unsafe in RC5), the preflight now REQUIRES the product catalogue, and the RC5 statement that `custom:true` is mandatory on invoices (invoice rules keep a historical no-flag allowance; see RC6 report P3).
+
 # RC5 developer review guide
 
 ## 1. Highest-risk changes (review in this order)

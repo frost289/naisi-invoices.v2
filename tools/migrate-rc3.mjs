@@ -15,7 +15,10 @@ if (apply && filesDir) { console.error('--apply cannot be combined with --files.
 let data = {};
 if (filesDir) {
   const rd = (n) => existsSync(`${filesDir}/${n}.json`) ? JSON.parse(readFileSync(`${filesDir}/${n}.json`, 'utf8')) : null;
-  data = { orders: rd('orders') || [], invoices: rd('invoices') || [], invoiceNumbers: rd('invoiceNumbers') || [], counter: rd('counter'), cancellations: rd('orderCancellations') || [], scheduleConfig: rd('scheduleHistory') };
+  const raw = { orders: rd('orders'), invoices: rd('invoices'), invoiceNumbers: rd('invoiceNumbers'), cancellations: rd('orderCancellations'), products: rd('products'), counter: rd('counter') };
+  // RC6: a missing export file is reported (assessment INCOMPLETE), never treated as an empty collection.
+  const missingInputs = Object.entries(raw).filter(([, v]) => v === null).map(([k]) => k + '.json').filter(n => n !== 'products.json');
+  data = { orders: raw.orders || [], invoices: raw.invoices || [], invoiceNumbers: raw.invoiceNumbers || [], counter: raw.counter, cancellations: raw.cancellations || [], products: Array.isArray(raw.products) ? raw.products : null, missingInputs, scheduleConfig: rd('scheduleHistory') };
 } else {
   if (!/^(127\.0\.0\.1|localhost):\d+$/.test(HOST)) { console.error(`Refusing: ${HOST} is not a local emulator address.`); process.exit(1); }
   try { if (!/Ok/i.test(await (await fetch(`http://${HOST}/`)).text())) throw 0; } catch { console.error(`No Firestore emulator at ${HOST}. Nothing was read or written.`); process.exit(1); }
@@ -24,7 +27,7 @@ if (filesDir) {
     : 'timestampValue' in v ? { ms: Date.parse(v.timestampValue) } : 'arrayValue' in v ? (v.arrayValue.values || []).map(dec) : Object.fromEntries(Object.entries(v.mapValue?.fields || {}).map(([k, x]) => [k, dec(x)]));
   const list = async (c) => { const out = []; let tok = ''; do { const r = await (await fetch(`${base}/${c}?pageSize=300${tok ? '&pageToken=' + tok : ''}`, { headers: H })).json(); for (const d of r.documents || []) out.push({ id: d.name.split('/').pop(), ...Object.fromEntries(Object.entries(d.fields || {}).map(([k, v]) => [k, dec(v)])) }); tok = r.nextPageToken || ''; } while (tok); return out; };
   const one = async (p) => { const r = await fetch(`${base}/${p}`, { headers: H }); if (!r.ok) return null; const d = await r.json(); return Object.fromEntries(Object.entries(d.fields || {}).map(([k, v]) => [k, dec(v)])); };
-  data = { orders: await list('orders'), invoices: await list('invoices'), invoiceNumbers: await list('invoiceNumbers'), cancellations: await list('orderCancellations'), counter: await one('counters/naisiInvoice'), scheduleConfig: await one('config/scheduleHistory') };
+  data = { orders: await list('orders'), invoices: await list('invoices'), invoiceNumbers: await list('invoiceNumbers'), cancellations: await list('orderCancellations'), products: await list('products'), counter: await one('counters/naisiInvoice'), scheduleConfig: await one('config/scheduleHistory') };
 }
 const plan = planMigration(data);
 console.log(`MODE: ${apply ? 'APPLY (emulator only)' : 'DRY RUN (nothing is written)'}`);
@@ -32,6 +35,8 @@ for (const a of plan.actions) console.log(`  ACTION  ${a.type}  ${a.path}  ${JSO
 for (const r of plan.report) console.log(`  REVIEW  ${r.type}  ${(r.orderIds || r.invoiceIds || []).join(',')}  ${r.detail}`);
 console.log(`Summary: ${plan.actions.length} additive action(s), ${plan.report.length} item(s) for a person to review.`);
 console.log(`ASSESSMENT: ${plan.assessment}${plan.assessment === 'CLEAN' ? '' : ' (not a clean migration: resolve the REVIEW items above first)'}`);
+if (plan.missingInputs.length) console.log(`INCOMPLETE: these required inputs were not supplied: ${plan.missingInputs.join(', ')}. No assessment of those checks was made.`);
+console.log('A CLEAN assessment is data readiness only. It is NOT release approval.');
 if (apply) {
   const enc = (v) => v === null || v === undefined ? { nullValue: null } : typeof v === 'boolean' ? { booleanValue: v } : typeof v === 'number' ? { integerValue: String(v) } : typeof v === 'string' ? { stringValue: v } : v.ms ? { timestampValue: new Date(v.ms).toISOString() } : { stringValue: JSON.stringify(v) };
   const base = `http://${HOST}/v1/projects/${PROJECT}/databases/(default)/documents`;

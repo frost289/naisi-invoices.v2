@@ -11,10 +11,12 @@ const args = process.argv.slice(2);
 const [ordersPath, invoicesPath] = args;
 if (!ordersPath || !invoicesPath) { console.error('Usage: node tools/reconcile.mjs orders.json invoices.json [--stock f] [--cancellations f] [--numbers f] [--counter f] [--customers f] [--schedule f] [--history f] [--products f]'); process.exit(2); }
 const opt = (name) => { const i = args.indexOf('--' + name); return i > 0 && args[i + 1] ? JSON.parse(readFileSync(args[i + 1], 'utf8')) : null; };
+const productsFile = opt('products');
+if (productsFile !== null && !Array.isArray(productsFile)) { console.error('--products must be a JSON array of product documents (an empty array [] is allowed and means "no products exist").'); process.exit(2); }
 const orders = JSON.parse(readFileSync(ordersPath, 'utf8'));
 const invoices = JSON.parse(readFileSync(invoicesPath, 'utf8'));
 const { findings, counts, safeToEnableResume, status, skippedChecks } = reconcile({ orders, invoices, stockMovements: opt('stock'), cancellations: opt('cancellations'), invoiceNumbers: opt('numbers'),
-  counter: opt('counter'), customers: opt('customers'), scheduleChanges: opt('schedule'), scheduleConfig: opt('history'), products: opt('products') });
+  counter: opt('counter'), customers: opt('customers'), scheduleChanges: opt('schedule'), scheduleConfig: opt('history'), products: productsFile });
 console.log(`Orders: ${orders.length}  Invoices: ${invoices.length}`);
 console.log('Findings by type:', counts);
 for (const f of findings.filter(f => f.severity !== 'info')) {
@@ -23,10 +25,11 @@ for (const f of findings.filter(f => f.severity !== 'info')) {
 console.log('\nStatus:', status);
 if (skippedChecks.length) {
   console.log('These checks DID NOT RUN because their input was not supplied (the result is INCOMPLETE, not clean):');
-  for (const c of skippedChecks) console.log(`  --${{ stockMovements: 'stock', cancellations: 'cancellations', invoiceNumbers: 'numbers', counter: 'counter', customers: 'customers', scheduleChanges: 'schedule', scheduleConfig: 'history' }[c.input]}  ${c.covers}`);
+  for (const c of skippedChecks) console.log(`  --${{ stockMovements: 'stock', cancellations: 'cancellations', invoiceNumbers: 'numbers', counter: 'counter', customers: 'customers', scheduleChanges: 'schedule', scheduleConfig: 'history', products: 'products' }[c.input]}  ${c.covers}`);
 }
 if (status === 'CLEAN') console.log('All checks ran. No high/medium findings.');
 else if (status === 'FINDINGS') console.log('High/medium findings exist: resolve them by hand BEFORE enabling resume.');
 else console.log('Supply the missing files and run again. Do NOT treat this as safe.');
+// RC6: --products is REQUIRED for a complete assessment (the product catalogue export).
 // exit code: 0 = CLEAN, 1 = findings, 3 = incomplete
 process.exit(status === 'CLEAN' ? 0 : status === 'FINDINGS' ? 1 : 3);

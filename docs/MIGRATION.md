@@ -18,3 +18,6 @@ Tested on fake data only: `tests/unit/migrate.test.js`, plus the dry run in the 
 
 ## RC5 additions
 `reconcile.mjs` now checks every order and invoice for quantities, product identity, line totals, aggregate totals and the 12-line cap, and reports ids, statuses, reasons and recovery. Read `completeness`, `dataReadiness` and `releaseReadiness` separately: a clean data check is not release approval. Recovery of Approved malformed orders: docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md section 5.
+
+## RC6 additions
+`reconcile.mjs` now REQUIRES `--products` (the product catalogue export): without it the result is INCOMPLETE / NOT_ASSESSED (exit 3). `migrate-rc3.mjs --files` needs `products.json` and reports INCOMPLETE when any required export is missing. `stuck-invoicing.mjs` needs `--frozen-at` and `--exported-at`. See docs/RC6-OPERATIONS-PLAN.md.

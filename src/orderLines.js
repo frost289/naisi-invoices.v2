@@ -11,7 +11,8 @@ export function lineKind(it) {
   if (!it || typeof it !== 'object') return 'invalid';
   const pid = it.productId;
   if (pid !== undefined && pid !== null) return (typeof pid === 'string' && PRODUCT_ID_RE.test(pid) && it.custom === undefined) ? 'tracked' : 'invalid';
-  return it.custom === true ? 'custom' : 'untracked';        // 'untracked' = no stock identity and not declared custom: never acceptable
+  if (it.custom === true) return 'custom';
+  return it.custom === undefined ? 'untracked' : 'invalid';   // 'untracked' = no stock identity and no `custom` key at all (historical invoice lines only, see validateOrderLines); any other custom value is malformed (matches the rules: !('custom' in l))
 }
 
 export function validateOrderLines(items, grandTotal, { catalogueOnly = false, invoice = false } = {}) {

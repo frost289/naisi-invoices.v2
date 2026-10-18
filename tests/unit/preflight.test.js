@@ -105,7 +105,7 @@ describe('D. the migration planner no longer gives a misleading clean assessment
     expect(plan.report.some(r => r.type === 'INVALID_LINES' && r.orderIds.includes('bad'))).toBe(true);
   });
   it('CONTROL: valid data -> assessment CLEAN', () => {
-    const plan = planMigration({ orders: [O('a', 'Submitted', ok(1))], invoices: [], invoiceNumbers: [], counter: { prefix: 'NF-INV', counter: 1 }, cancellations: [], scheduleConfig: { startedAt: 1 } });
+    const plan = planMigration({ orders: [O('a', 'Submitted', ok(1))], invoices: [], invoiceNumbers: [], counter: { prefix: 'NF-INV', counter: 1 }, cancellations: [], scheduleConfig: { startedAt: 1 }, products: ok(1).map(i => ({ id: i.productId })) });   // RC6: the catalogue is a required input
     expect(plan.assessment).toBe('CLEAN');
   });
 });

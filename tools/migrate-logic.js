@@ -7,9 +7,12 @@
 //   NEEDS_REVIEW     old invoice with no order link and no kind (stand-alone? orphan?), duplicate numbers, cancelled orders with no record
 //   COUNTER_BEHIND   the counter would issue an existing number (fix in the app: Invoices -> Numbering, with a reason)
 //   INVALID_LINES    (RC5) an order/invoice whose lines RC5 cannot process (invalid or more than 12 lines). Open orders make the assessment BLOCKED.
+//   UNKNOWN_PRODUCT  (RC6) an order line whose product id is not in the supplied catalogue. Open orders make the assessment BLOCKED.
 //   HISTORY_NOT_STARTED  the schedule history has not been started (a manager does it in the app so the server clock is used)
 import { validateOrderLines } from '../src/orderLines.js';
-export function planMigration({ invoices = [], orders = [], invoiceNumbers = [], counter = null, cancellations = [], scheduleConfig = null }) {
+// RC6: `products` (the catalogue, an array; [] = a real empty catalogue) and `missingInputs` (names of export files that were not supplied)
+// make the assessment honest: with a required input missing the assessment is INCOMPLETE, never CLEAN.
+export function planMigration({ invoices = [], orders = [], invoiceNumbers = [], counter = null, cancellations = [], scheduleConfig = null, products = null, missingInputs = [] }) {
   const actions = [], report = [];
   const registered = new Set(invoiceNumbers.map(n => n.id || n.invoiceNo));
   const byNo = new Map();
@@ -43,8 +46,15 @@ export function planMigration({ invoices = [], orders = [], invoiceNumbers = [],
     const v = validateOrderLines(inv.items, inv.grandTotal, { invoice: true });
     if (!v.ok) report.push({ type: 'INVALID_LINES', open: false, invoiceIds: [inv.id], detail: `Invoice ${inv.invoiceNo || inv.id}: ${v.problems.join(' ')} (historical; only editing its lines is blocked).` });
   }
+  const known = Array.isArray(products) ? new Set(products.map(p => p.id)) : null;
+  if (known) for (const o of orders) {
+    const unknown = [...new Set((Array.isArray(o.items) ? o.items : []).filter(i => i && typeof i.productId === 'string' && !known.has(i.productId)).map(i => i.productId))];
+    if (unknown.length) report.push({ type: 'UNKNOWN_PRODUCT', open: OPEN.has(o.status), orderIds: [o.id], detail: `Order ${o.orderNo || o.id} (${o.status}) references product id(s) ${unknown.join(', ')} that are not in the catalogue. RC5/RC6 refuses to approve it until it is edited.` });
+  }
+  const missing = [...missingInputs, ...(known ? [] : ['products'])];
   if (!scheduleConfig) report.push({ type: 'HISTORY_NOT_STARTED', detail: 'Schedule history is not started. A manager starts it in the app; until then past dates show "no reliable history".' });
   // BLOCKED: RC5 cannot process an open order. REVIEW: something needs a person. CLEAN: nothing found. (Never "clean" while a record cannot be processed.)
-  const assessment = report.some(r => r.type === 'INVALID_LINES' && r.open) ? 'BLOCKED' : (report.length ? 'REVIEW' : 'CLEAN');
-  return { actions, report, assessment };
+  const blocked = report.some(r => (r.type === 'INVALID_LINES' || r.type === 'UNKNOWN_PRODUCT') && r.open);
+  const assessment = blocked ? 'BLOCKED' : (missing.length ? 'INCOMPLETE' : (report.length ? 'REVIEW' : 'CLEAN'));
+  return { actions, report, assessment, missingInputs: missing };
 }

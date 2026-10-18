@@ -60,6 +60,7 @@ const REQUIRED_INPUTS = [
   ['customers', 'customers: MERGE_PAUSED, SCHEDULE_MISMATCH'],
   ['scheduleChanges', 'schedule history entries: SCHEDULE_MISMATCH'],
   ['scheduleConfig', 'schedule history config: SCHEDULE_MISMATCH'],
+  ['products', 'product catalogue: UNKNOWN_PRODUCT (product identity of every stock-tracked order line) and the deleted-product cancellation check'],
 ];
 
 export function reconcile({ orders = [], invoices = [], stockMovements = null, cancellations = null, invoiceNumbers = null, counter = null,
@@ -121,7 +122,7 @@ export function reconcile({ orders = [], invoices = [], stockMovements = null, c
         const cur = byProd.get(m.productId) || byProd.set(m.productId, { qty: 0, entries: 0 }).get(m.productId);
         cur.qty += Number(m.delta) || 0; cur.entries += 1;
       }
-      const known = products ? new Set(products.map(p => p.id)) : null;   // when supplied, a deleted product is legitimately not restored
+      const known = Array.isArray(products) ? new Set(products.map(p => p.id)) : null;   // when supplied, a deleted product is legitimately not restored
       for (const o of orders) {
         if (o.status !== 'Cancelled') continue;
         const r = recById.get(o.id); if (!r) continue;               // CANCELLED_NO_RECORD already reported
@@ -174,7 +175,7 @@ export function reconcile({ orders = [], invoices = [], stockMovements = null, c
 
   // ---- RC5 preflight: order and invoice lines ----
   const OPEN = new Set(['Submitted', 'Approved', 'Invoicing']);
-  const knownProducts = products ? new Set(products.map(p => p.id)) : null;
+  const knownProducts = Array.isArray(products) ? new Set(products.map(p => p.id)) : null;
   const ledgerNet = (orderId) => {
     if (!stockMovements) return null;
     const net = {};
@@ -227,7 +228,7 @@ export function reconcile({ orders = [], invoices = [], stockMovements = null, c
 
   const counts = {};
   for (const f of findings) counts[f.type] = (counts[f.type] || 0) + 1;
-  const given = { cancellations, stockMovements, invoiceNumbers, counter, customers, scheduleChanges, scheduleConfig };
+  const given = { cancellations, stockMovements, invoiceNumbers, counter, customers, scheduleChanges, scheduleConfig, products: Array.isArray(products) ? products : null };   // RC6: the catalogue is REQUIRED; an explicitly empty list is a real (empty) catalogue and flags every product reference
   const skippedChecks = REQUIRED_INPUTS.filter(([k]) => given[k] === null || given[k] === undefined).map(([input, covers]) => ({ input, covers }));
   const attention = findings.some(f => f.severity !== 'info');
   const status = attention ? 'FINDINGS' : (skippedChecks.length ? 'INCOMPLETE' : 'CLEAN');
