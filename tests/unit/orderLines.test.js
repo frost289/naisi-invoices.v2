@@ -20,7 +20,7 @@ const bad = {
 
 describe('validateOrderLines', () => {
   it('accepts valid stock-tracked and custom lines, with a fractional custom quantity', () => {
-    const items = [line(2), { qty: 1.5, desc: 'Freight', price: 100, total: 150 }];
+    const items = [line(2), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }];
     expect(validateOrderLines(items, 350)).toEqual({ ok: true, problems: [] });
   });
   it.each(Object.keys(bad))('rejects %s', (k) => {
@@ -76,7 +76,7 @@ describe('the stored order is revalidated (defense in depth)', () => {
     expect(F.store.get('products/p1').stockOnHand).toBe(10);
   });
   it('custom lines stay allowed and are never stock-tracked', async () => {
-    seedProduct(10); seedOrder('o1', 'Submitted', { items: [line(2), { qty: 1.5, desc: 'Freight', price: 100, total: 150 }] });
+    seedProduct(10); seedOrder('o1', 'Submitted', { items: [line(2), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }] });
     await stock.approveOrderWithStock(withId('o1'), user);
     expect(F.store.get('products/p1').stockOnHand).toBe(8);
     expect(ledger()).toHaveLength(1);
@@ -88,5 +88,43 @@ describe('UI validator', () => {
     const { validateOrderItems } = await import('../../src/visits.js');
     expect(validateOrderItems(Array.from({ length: 13 }, () => line(1)))).toMatch(/at most 12/);
     expect(validateOrderItems(Array.from({ length: 12 }, () => line(1)))).toBe(null);
+  });
+});
+
+describe('RC5 D: recovery of an already Approved malformed order (no invented stock movement, no silent rewrite)', () => {
+  const badLines = [{ qty: -5, desc: 'x', price: 100, total: -500, productId: 'p1' }];
+  it('normal cancel is refused and points to the recovery path; nothing changes', async () => {
+    seedProduct(10); seedOrder('o1', 'Approved', { stockApplied: true, items: badLines, grandTotal: -500 });
+    await expect(stock.cancelOrder(withId('o1'), { reason: 'Mistaken order', ...user })).rejects.toMatchObject({ code: 'invalid-order-lines' });
+    expect(F.store.get('orders/o1').status).toBe('Approved');
+  });
+  it('recovery cancel: order kept as Cancelled with a RECOVERY reason, record says stockRestored:false, NO movement, stock untouched', async () => {
+    seedProduct(10); seedOrder('o1', 'Approved', { stockApplied: true, items: badLines, grandTotal: -500 });
+    const r = await stock.cancelOrder(withId('o1'), { reason: 'Negative line from import', recoverWithoutRestore: true, ...user });
+    expect(r).toMatchObject({ alreadyCancelled: false, stockRestored: false, priorStatus: 'Approved' });
+    expect(F.store.get('orders/o1')).toMatchObject({ status: 'Cancelled', stockApplied: false });
+    expect(F.store.get('orders/o1').cancelReason).toBe(stock.RECOVERY_REASON_PREFIX + 'Negative line from import');
+    expect(F.store.get('orderCancellations/o1')).toMatchObject({ stockRestored: false, priorStatus: 'Approved' });
+    expect(F.store.get('products/p1').stockOnHand).toBe(10);
+    expect(ledger()).toHaveLength(0);
+  });
+  it('a second recovery click is idempotent', async () => {
+    seedProduct(10); seedOrder('o1', 'Approved', { stockApplied: true, items: badLines, grandTotal: -500 });
+    await stock.cancelOrder(withId('o1'), { reason: 'Negative line', recoverWithoutRestore: true, ...user });
+    const again = await stock.cancelOrder(withId('o1'), { reason: 'Negative line', recoverWithoutRestore: true, ...user });
+    expect(again.alreadyCancelled).toBe(true);
+  });
+  it('recovery is REFUSED for a valid order (the normal restore cannot be skipped) and for a Submitted order', async () => {
+    seedProduct(5); seedOrder('o1', 'Approved', { stockApplied: true, items: [line(2)], grandTotal: 200 });
+    await expect(stock.cancelOrder(withId('o1'), { reason: 'Skip restore please', recoverWithoutRestore: true, ...user })).rejects.toMatchObject({ code: 'recovery-not-needed' });
+    expect(F.store.get('orders/o1').status).toBe('Approved');
+    seedOrder('o2', 'Submitted', { items: badLines, grandTotal: -500 });
+    await expect(stock.cancelOrder(withId('o2'), { reason: 'Skip restore please', recoverWithoutRestore: true, ...user })).rejects.toMatchObject({ code: 'recovery-not-needed' });
+  });
+  it('POSITIVE CONTROL: the normal cancel of a valid Approved order still restores stock exactly once', async () => {
+    seedProduct(5); seedOrder('o1', 'Approved', { stockApplied: true, items: [line(2)], grandTotal: 200 });
+    await stock.cancelOrder(withId('o1'), { reason: 'Customer cancelled', ...user });
+    await stock.cancelOrder(withId('o1'), { reason: 'Customer cancelled', ...user });
+    expect(F.store.get('products/p1').stockOnHand).toBe(7);
   });
 });

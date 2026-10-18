@@ -1,3 +1,5 @@
+> **RC5 NOTICE (SUPERSEDED-BY-RC5):** where this document disagrees with `docs/RC5-RELEASE-REPORT.md`, the RC5 report wins. In particular: there is NO rollback to RC3 and NO automatic ten-minute invoicing recovery (INVOICING_RESUME_ENABLED=false); use the freeze and stuck-Invoicing procedures in `docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md`. Reconcile/migration preflight now reports invalid and oversized orders (RC4 notes claiming this were wrong at the time).
+
 # RC4 release report (authoritative)
 
 Date: 2026-10-18. Base: RC3 (`7014b8e`, branch `claude/fixes-oct-2026`). This report replaces every earlier status claim (VALIDATION-REPORT.md, REVIEW-RESPONSE.md and the RC3 evidence are superseded).
@@ -53,7 +55,7 @@ See `docs/RC4-REVIEW-FIXES.md` (defect, fix, files, tests per finding, migration
 3. Deploy the new web build, tell ALL staff to close and reopen the app (hard refresh) BEFORE step 4: old clients do not write `invoicingAttemptEnded` and would be refused.
 4. Deploy `rules/firestore.rules` (`firebase deploy --only firestore:rules,firestore:indexes` run by the nephew, never by this tool).
 5. Pilot: one manager and two reps for one working day: place an order, approve, invoice, deliver, cancel a Submitted order, merge two test customers, import a plan. Watch for permission-denied messages.
-6. Rollback: see RC4-REVIEW-FIXES.md (RC3 rules + RC3 build together; no data rewritten).
+6. Rollback: withdrawn (RC3 is vulnerable). See RC5-DEVELOPER-ROLLOUT-GUIDE.md (freeze, fix forward).
 
 ## Remaining limitations and risks
 1. Rules never compiled or run (BLOCKED). The expression budget (1,000 per request) for 12-line orders and invoices, the document-access limits (10 per request, 20 per batch/transaction) and syntax are unverified. 12 lines was chosen conservatively; if the emulator shows budget errors, reduce the cap.

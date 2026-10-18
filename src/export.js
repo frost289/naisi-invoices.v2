@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { summarizeExpenses, isMoney } from './money.js';
 import Chart from 'chart.js/auto';
 
 function aggregateByDate(invoices) {
@@ -164,7 +165,7 @@ export async function buildAndDownloadExpenseReport(expenses, fromDate, toDate) 
   // Newest-first from the query, but a report reads better chronologically.
   [...expenses].reverse().forEach(e => {
     dataSheet.addRow({
-      date: e.date, category: e.category, amount: e.amount || 0,
+      date: e.date, category: e.category, amount: isMoney(e.amount) ? e.amount : 'INVALID AMOUNT',
       notes: e.notes || '', byEmail: e.createdByName || e.createdByEmail || '—',
     });
   });
@@ -172,9 +173,8 @@ export async function buildAndDownloadExpenseReport(expenses, fromDate, toDate) 
   dataSheet.getColumn('notes').alignment = { wrapText: true };
 
   const summarySheet = workbook.addWorksheet('Summary by Category');
-  const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
-  expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
-  const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+  const sum = summarizeExpenses(expenses);
+  const totals = sum.byCategory, grand = sum.total;
 
   summarySheet.getCell('A1').value = `Report range: ${fromDate} to ${toDate}`;
   summarySheet.getCell('A1').font = { bold: true, size: 12 };

@@ -86,11 +86,16 @@ export function resolveCustomerIdAt(index, id, date) {
 
 // Which shop a recorded visit belongs to, as of the visit's own date.
 //   { id, ambiguous:false }                       the shop (original shop followed through the merges done by the visit date)
-//   { id:null, ambiguous:true, candidates:[ids] } a legacy visit that was re-pointed by a merge made after it, whose original shop was not kept
+//   { id:null, ambiguous:true, candidates:[ids] } a visit that a LEGACY merge (made before origins were kept) re-pointed after the visit was recorded
+//
+// PROVENANCE (RC5): originalCustomerId proves only "the shop this visit pointed at when a merge that KEEPS origins moved it". It cannot recover what an
+// EARLIER legacy merge already lost. So the legacy-ambiguity test always runs, on the best starting point we have: the stamp if there is one,
+// else the visit's current shop. Example: legacy b->a (14th, origins not kept), then a new a->c (18th) stamps originalCustomerId=a on a visit of the 8th.
+// The stamp says "a", but that visit may really have been b's: it stays AMBIGUOUS between a and b. A visit recorded on or after the legacy merge date,
+// or a legacy merge that moved no visits, creates no uncertainty.
 export function visitIdentityAt(index, visit) {
-  if (visit.originalCustomerId) return { id: resolveCustomerIdAt(index, visit.originalCustomerId, visit.date), ambiguous: false, candidates: [] };
-  const X = visit.customerId;
-  // shops that were merged (directly or through a chain) into X, but only AFTER this visit's date, and whose merge moved visits (or the count is unknown)
+  const X = visit.originalCustomerId || visit.customerId;
+  // shops that were merged (directly or through a chain) into X, but only AFTER this visit's date, by a merge that did not keep origins and moved visits (or unknown count)
   const candidates = [];
   for (const [y, m] of index.mergeInto) {
     if (!m.date || m.date <= visit.date || m.movedVisits === 0 || m.keepsOriginal) continue;   // a merge made by the current app stamped every visit it moved

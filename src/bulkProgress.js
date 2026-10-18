@@ -116,7 +116,7 @@ export function runBulkJob({ title, intro, startLabel, orders, runOne, followUp 
         <tr>
           <td>${esc(r.order.orderNo || r.order.id)}</td>
           <td>${esc(r.order.customerName || '—')}</td>
-          <td class="num">${mwk(r.amount ?? r.order.grandTotal ?? 0)}</td>
+          <td class="num">${esc(mwk(r.amount ?? r.order.grandTotal ?? 0))}</td>
           <td style="color:${esc(STATE_COLOR[r.state])}; font-weight:600;">
             ${esc(STATE_LABEL[r.state])}${r.invoiceNo ? ` · ${esc(r.invoiceNo)}` : ''}
             ${r.text ? `<div style="font-weight:400; font-size:0.75rem; color:var(--muted);">${esc(r.text)}</div>` : ''}
@@ -157,7 +157,7 @@ export function runBulkJob({ title, intro, startLabel, orders, runOne, followUp 
       if (invoiced.length) {
         const nos = invoiced.map(r => r.invoiceNo).sort();
         const total = invoiced.reduce((s, r) => s + (r.amount || 0), 0);
-        lines.push(`Invoices issued: ${esc(nos[0])}${nos.length > 1 ? ` to ${esc(nos.at(-1))}` : ''} · Total ${mwk(total)}`);
+        lines.push(`Invoices issued: ${esc(nos[0])}${nos.length > 1 ? ` to ${esc(nos.at(-1))}` : ''} · Total ${esc(mwk(total))}`);
       }
       if (noPdf.length) lines.push(`<strong>${esc(noPdf.length)}</strong> invoice(s) saved but the PDF did not download — use "Download PDF" on those rows. They are NOT duplicated by doing so.`);
       if (failed.length) lines.push('Failed: ' + failed.map(r => `${esc(r.order.orderNo)} (${esc(r.text)})`).join('; '));

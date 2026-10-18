@@ -1,3 +1,5 @@
+> **RC5 NOTICE (SUPERSEDED-BY-RC5):** where this document disagrees with `docs/RC5-RELEASE-REPORT.md`, the RC5 report wins. In particular: there is NO rollback to RC3 and NO automatic ten-minute invoicing recovery (INVOICING_RESUME_ENABLED=false); use the freeze and stuck-Invoicing procedures in `docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md`. Reconcile/migration preflight now reports invalid and oversized orders (RC4 notes claiming this were wrong at the time).
+
 # Deployment, legacy-data reconciliation and rules
 
 > RC3 update: read RC3-OWNER-DECISIONS.md, MIGRATION.md and RELEASE-CHECKLIST.md first. The rules to deploy are `rules/firestore.rules` (RC3). Old manager clients must be refreshed before the rules deploy. Merge chunks and baseline chunks are 8 because rules may use at most 20 lookups per batch.

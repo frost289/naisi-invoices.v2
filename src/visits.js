@@ -1,5 +1,5 @@
 import { db } from './firebase.js';
-import { MAX_ORDER_LINES } from './orderLines.js';
+import { MAX_ORDER_LINES, PRODUCT_ID_RE } from './money.js';
 import {
   collection, doc, getDocs, runTransaction, serverTimestamp,
   query, where, orderBy, limit, startAfter
@@ -41,7 +41,7 @@ export function validateOrderItems(items) {
   for (const [i, it] of items.entries()) {
     const n = i + 1;
     if (!it || typeof it !== 'object') return `Item ${n} is not valid.`;
-    if (typeof it.productId !== 'string' || !it.productId) return `Item ${n} must be chosen from the product list.`;
+    if (typeof it.productId !== 'string' || !PRODUCT_ID_RE.test(it.productId) || it.custom !== undefined) return `Item ${n} must be chosen from the product list.`;
     if (!Number.isSafeInteger(it.qty) || it.qty <= 0) return `Item ${n}: quantity must be a whole number above 0.`;
     if (!Number.isFinite(it.price) || it.price < 0) return `Item ${n}: price is not valid.`;
     if (!Number.isFinite(it.total) || Math.abs(it.total - it.qty * it.price) > 0.01) return `Item ${n}: total does not match quantity x price.`;

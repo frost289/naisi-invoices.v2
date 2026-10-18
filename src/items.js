@@ -1,8 +1,6 @@
 import { esc } from "./ui.js";
-import { round2 } from './orderLines.js';
-export function mwk(n) {
-  return 'MWK ' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+import { mwk, round2 } from './money.js';
+export { mwk };
 
 let itemCounter = 0;
 
@@ -79,7 +77,7 @@ export function buildQuickAddGrid(quickAddGrid, itemsBody, onChange, products, l
         <span class="qa-name">${esc(p.productName)}</span>
         <span class="qa-pack">${esc(p.packLabel)} · Qty: ${esc(p.quantity ?? '—')}</span>
         <span class="qa-stock ${esc(stock <= 0 ? 'qa-stock-low' : '')}">Stock: ${esc(stock)}</span>
-        <span class="qa-price">${mwk(p.price)}</span>
+        <span class="qa-price">${esc(mwk(p.price))}</span>
       `;
       btn.addEventListener('click', () => {
         addItemRow(itemsBody, onChange, 1, `${p.productName} — ${p.packLabel}`, p.price, p.productName, p.packLabel, p.quantity, p.id, locked);
@@ -110,6 +108,8 @@ export function getItems(itemsBody) {
         packLabel: packLabel || null,
         packQuantity: packQuantityRaw !== '' ? parseFloat(packQuantityRaw) : null,
         productId: productId || null,
+        // A row without a catalogue product is, by being typed in, an EXPLICIT custom line (freight, discount...). Rep screens refuse these.
+        ...(productId ? {} : { custom: true }),
       });
     }
   });

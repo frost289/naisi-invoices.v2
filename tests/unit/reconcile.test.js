@@ -26,7 +26,7 @@ describe('reconcile (read-only classification)', () => {
     expect(r.findings).toHaveLength(1); expect(r.findings[0].severity).toBe('info'); expect(r.safeToEnableResume).toBe(true);
   });
   it('different total or items is NOT matched as an orphan', () => {
-    const r = reconcile({ orders: [ord('o1', 'Approved')], invoices: [inv('x', { grandTotal: 300, items: [{ ...it1[0], qty: 3 }] })] });
+    const r = reconcile({ orders: [ord('o1', 'Approved')], invoices: [inv('x', { grandTotal: 300, items: [{ ...it1[0], qty: 3, total: 300 }] })] });
     expect(types(r)).toEqual(['UNLINKED_INVOICE']);
   });
   it('Invoiced order whose invoice is missing / number differs -> BROKEN_LINK', () => {

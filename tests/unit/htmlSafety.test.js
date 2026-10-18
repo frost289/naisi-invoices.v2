@@ -10,6 +10,24 @@ import { analyze } from '../helpers/htmlAudit.js';
 const srcDir = path.resolve(import.meta.dirname, '../../src');
 const files = fs.readdirSync(srcDir).filter(f => f.endsWith('.js') && f !== 'logo.js');
 
+describe('RC5 the audit allowlist is honest', () => {
+  const all = files.map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n');
+  const helperNames = ['customerDayCellHtml', 'customerMapCellHtml', 'customerStatusCellHtml', 'visitStatusHtml', 'orderStatusBadge', 'badgeHtml', 'invalidAmountNote',
+    'topProductsHtml', 'itemsHtml', 'failText', 'statusBreakdown', 'expenseBreakdown'];
+  it.each(helperNames)('exempt helper %s is defined in src and its own template is audited (no unescaped interpolation inside it)', (h) => {
+    expect(all).toMatch(new RegExp(`(function ${h}\\b|const ${h}\\b)`));
+  });
+  it('formatters are NOT exempt: mwk, kmText, pctText, formatKm, googleMapsUrl, mapsUrl need esc() at every HTML sink', () => {
+    const { SAFE } = require_safe();
+    for (const n of ['mwk(', 'kmText(', 'pctText(', 'formatKm(', 'googleMapsUrl(', 'mapsUrl']) expect(SAFE.some(re => re.test(n)), n).toBe(false);
+  });
+  it('no template interpolates a raw formatter result', () => {
+    expect(all).not.toMatch(/\$\{\s*(mwk|kmText|pctText|formatKm|googleMapsUrl)\(/);
+  });
+});
+import { SAFE as SAFE_LIST } from '../helpers/htmlAudit.js';
+function require_safe() { return { SAFE: SAFE_LIST }; }
+
 describe('F1 static audit: every value placed in an HTML template is escaped', () => {
   for (const f of files) {
     it(`${f}: no unescaped interpolation in HTML templates`, () => {

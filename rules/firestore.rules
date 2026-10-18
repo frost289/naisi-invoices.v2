@@ -254,7 +254,7 @@ service cloud.firestore {
       return d.kind == 'order' && d.orderId is string &&
         id == 'ord_' + d.orderId &&
         get(orderPath(d.orderId)).data.status == 'Invoicing' &&
-        linesAndTotalOk(d) &&
+        linesAndTotalOk(d, 'invoice') &&
         getAfter(orderPath(d.orderId)).data.status == 'Invoiced' &&
         getAfter(orderPath(d.orderId)).data.invoiceId == id &&
         getAfter(orderPath(d.orderId)).data.invoiceNo == d.invoiceNo;
@@ -263,7 +263,7 @@ service cloud.firestore {
     // unidentified write (old client, hand-made request) is refused. Not for a customer being merged.
     function standaloneInvoiceOk(id, d) {
       return d.kind == 'standalone' && d.orderId == null &&
-        linesAndTotalOk(d) &&
+        linesAndTotalOk(d, 'invoice') &&
         d.get('requestId', null) is string &&
         id == 'sa_' + request.auth.uid + '_' + d.requestId &&
         customerFree(d.get('customerId', null));
@@ -286,7 +286,7 @@ service cloud.firestore {
       allow update: if isManager() &&
         !request.resource.data.diff(resource.data).affectedKeys()
           .hasAny(['orderId', 'invoiceNo', 'createdBy', 'createdAt', 'kind', 'requestId']) &&
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data)) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data, 'invoice')) &&
         invoiceCustomerOk();
       allow delete: if false;
     }
@@ -405,17 +405,20 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // RC5 finding A: an expense amount is a finite number, above 0 and at most 1000000000000. Anything else (a string, markup, NaN, Infinity,
+    // a negative, a missing amount) is refused for EVERY role, on create and on update, so saved markup can never reach a manager's screen.
+    function expenseAmountOk(d) { return d.get('amount', null) is number && d.amount > 0 && d.amount <= 1000000000000; }
     match /expenses/{expenseId} {
       // Anyone creating an expense must stamp it with their own uid.
-      allow create: if isManager() ||
+      allow create: if expenseAmountOk(request.resource.data) && (isManager() ||
         ((isSubmitter() || isDeliverer()) &&
-          request.resource.data.createdBy == request.auth.uid);
+          request.resource.data.createdBy == request.auth.uid));
       allow read: if isManager() ||
         ((isSubmitter() || isDeliverer()) && ownsCreatedBy());
       // Owners can edit their own expense but not re-assign it to someone else.
-      allow update: if isManager() ||
+      allow update: if expenseAmountOk(request.resource.data) && (isManager() ||
         ((isSubmitter() || isDeliverer()) && ownsCreatedBy() &&
-          request.resource.data.createdBy == resource.data.createdBy);
+          request.resource.data.createdBy == resource.data.createdBy));
       allow delete: if isManager();
     }
 
@@ -434,18 +437,35 @@ service cloud.firestore {
       allow delete: if isManager();
     }
 
-    // ---------- order lines and money (finding 3) ----------
+    // ---------- order lines and money (RC4 finding 3, RC5 finding B) ----------
     // Rules have no loops and a budget of 1,000 evaluated expressions per request, so the lines are checked by a BOUNDED, unrolled
-    // schema: 1 to 12 lines. A line is valid when quantity > 0 (and a whole number when it names a product, i.e. is stock-tracked),
-    // price >= 0 and total = quantity x price within 0.01 (currency policy: MWK, 2 decimals; the app computes qty x price once and
-    // stores it). A line with no productId is a custom line: it may have a fractional quantity and is never stock-tracked. A comparison
-    // on a missing or non-numeric field is an error in rules, which denies the write, so those cases are refused too.
-    function lineOk(l) {
-      return l.qty > 0 && l.qty <= 1000000 && l.price >= 0 && l.price <= 1000000000 &&
-        math.abs(l.total - l.qty * l.price) <= 0.01 &&
-        (l.get('productId', null) == null || (l.productId is string && l.productId.size() > 0 && l.qty is int));
+    // schema: 1 to 12 lines. The constants below are the ones in src/money.js (tests/unit/money.test.js compares them).
+    // Money: qty > 0 (<= 1000000), price >= 0 (<= 1000000000), |total - qty x price| <= 0.01 on the UNROUNDED product (the app stores
+    // round2(qty x price), which always passes), |grandTotal - sum of line totals| <= 0.01, grandTotal <= 1000000000000.
+    // A line is exactly one kind:
+    //   TRACKED  productId = a catalogue id (letters, digits, _ -, 1-64 chars), whole-number qty, no `custom` key. Stock is deducted for it.
+    //   CUSTOM   no productId and custom == true (freight, discount...). Never stock-tracked. Not allowed on a rep's or manager-entered goods order.
+    //   LEGACY   (invoices only) no productId and no `custom` key: invoices never move stock, and old invoices have this shape.
+    // modes: 'catalogue' = goods order creation (tracked only: a rep order can never skip stock identity),
+    //        'order' = a stored/edited order (tracked or explicit custom), 'invoice' = invoices (tracked, custom or legacy).
+    // Whether a tracked productId really exists in /products is checked by the approval transaction (src/stock.js), not here: an exists() per
+    // line would need 12 document reads, over the 10-per-request limit for a single write.
+    // A comparison on a missing or non-numeric field is an error in rules, which denies the write, so those cases are refused too.
+    // Cost note: a comparison on a missing or non-numeric field is an error, which denies the write, so there are no separate `is number`
+    // checks (each would add expressions, and 12 lines are evaluated against a budget of 1,000 per request that could not be tested here).
+    function lineMoneyOk(l) {
+      return l.qty > 0 && l.qty <= 1000000 && l.price >= 0 && l.price <= 1000000000 && math.abs(l.total - l.qty * l.price) <= 0.01;
     }
-    function lineAt(items, i) { return items.size() <= i || lineOk(items[i]); }
+    function lineTracked(l) {
+      return l.get('productId', null) is string && l.productId.matches('[A-Za-z0-9_-]{1,64}') && l.qty is int && !('custom' in l);
+    }
+    function lineCustom(l) { return l.get('productId', null) == null && l.get('custom', null) == true; }
+    function lineValid(l, mode) {
+      return lineMoneyOk(l) && (lineTracked(l) ||
+        (mode != 'catalogue' && lineCustom(l)) ||
+        (mode == 'invoice' && l.get('productId', null) == null && !('custom' in l)));
+    }
+    function lineAt(items, i, mode) { return items.size() <= i || lineValid(items[i], mode); }
     function linesSum(items) {
       return (items.size() > 0 ? items[0].total : 0) + (items.size() > 1 ? items[1].total : 0) + (items.size() > 2 ? items[2].total : 0) +
         (items.size() > 3 ? items[3].total : 0) + (items.size() > 4 ? items[4].total : 0) + (items.size() > 5 ? items[5].total : 0) +
@@ -453,11 +473,11 @@ service cloud.firestore {
         (items.size() > 9 ? items[9].total : 0) + (items.size() > 10 ? items[10].total : 0) + (items.size() > 11 ? items[11].total : 0);
     }
     // d is an order or an invoice document (the same line shape).
-    function linesAndTotalOk(d) {
+    function linesAndTotalOk(d, mode) {
       let items = d.get('items', null);
       return items is list && items.size() >= 1 && items.size() <= 12 &&
-        lineAt(items, 0) && lineAt(items, 1) && lineAt(items, 2) && lineAt(items, 3) && lineAt(items, 4) && lineAt(items, 5) &&
-        lineAt(items, 6) && lineAt(items, 7) && lineAt(items, 8) && lineAt(items, 9) && lineAt(items, 10) && lineAt(items, 11) &&
+        lineAt(items, 0, mode) && lineAt(items, 1, mode) && lineAt(items, 2, mode) && lineAt(items, 3, mode) && lineAt(items, 4, mode) && lineAt(items, 5, mode) &&
+        lineAt(items, 6, mode) && lineAt(items, 7, mode) && lineAt(items, 8, mode) && lineAt(items, 9, mode) && lineAt(items, 10, mode) && lineAt(items, 11, mode) &&
         d.get('grandTotal', null) is number && d.grandTotal >= 0 && d.grandTotal <= 1000000000000 &&
         math.abs(d.grandTotal - linesSum(items)) <= 0.01;
     }
@@ -467,7 +487,7 @@ service cloud.firestore {
     function orderBodyOk(d) {
       return d.status == 'Submitted' &&
         validPin(d.get('customerLat', null), d.get('customerLng', null)) &&
-        linesAndTotalOk(d) &&
+        linesAndTotalOk(d, 'catalogue') &&
         !('originalCustomerId' in d) &&
         d.customerId is string && customerUsable(d.customerId) &&
         get(customerPath(d.customerId)).data.name == d.customerName &&
@@ -571,7 +591,7 @@ service cloud.firestore {
         getAfter(cancellationPath(orderId)).data.cancelledBy == request.auth.uid &&
         getAfter(cancellationPath(orderId)).data.stockRestored is bool &&
         (resource.data.status == 'Approved' || getAfter(cancellationPath(orderId)).data.stockRestored == false) &&
-        (getAfter(cancellationPath(orderId)).data.stockRestored == false || linesAndTotalOk(resource.data));
+        (getAfter(cancellationPath(orderId)).data.stockRestored == false || linesAndTotalOk(resource.data, 'order'));
     }
     // Re-pointing an order to another customer happens ONLY in a merge (customer fields only, never an order in
     // Invoicing), or as an ordinary edit of an open order between two customers that are not being merged.
@@ -605,7 +625,7 @@ service cloud.firestore {
       return resource.data.status == 'Submitted' && request.resource.data.status == 'Approved' &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'stockApplied', 'approvedAt', 'updatedAt']) &&
         request.resource.data.get('stockApplied', false) == true &&
-        linesAndTotalOk(resource.data);
+        linesAndTotalOk(resource.data, 'order');
     }
     function rejectEntryOk() {
       return resource.data.status == 'Submitted' && request.resource.data.status == 'Rejected' &&
@@ -616,7 +636,7 @@ service cloud.firestore {
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customerName', 'customerPhone',
           'customerLocation', 'notes', 'items', 'grandTotal', 'updatedAt']) &&
         orderCustomerOk() &&
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data));
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['items', 'grandTotal']) || linesAndTotalOk(request.resource.data, 'order'));
     }
     function lockEntryOk() {
       return request.resource.data.status == 'Invoicing' &&

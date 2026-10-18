@@ -1,3 +1,5 @@
+> **RC5 NOTICE (SUPERSEDED-BY-RC5):** where this document disagrees with `docs/RC5-RELEASE-REPORT.md`, the RC5 report wins. In particular: there is NO rollback to RC3 and NO automatic ten-minute invoicing recovery (INVOICING_RESUME_ENABLED=false); use the freeze and stuck-Invoicing procedures in `docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md`. Reconcile/migration preflight now reports invalid and oversized orders (RC4 notes claiming this were wrong at the time).
+
 # RC4: fixes for the seven independent-review findings
 
 Release id: **RC4** (2026-10-18). Branch `claude/fixes-oct-2026`. The review text file (`NAISI-RC3-Updated-Review.txt`) was not attached; the findings were taken from the task prompt. Each finding was reproduced with a test that FAILS on the RC3 source (log: `evidence/fail-on-original-RC3.log`) and PASSES on RC4.
@@ -68,4 +70,4 @@ Authoritative status: `docs/RC4-RELEASE-REPORT.md`. Where this file or any older
 4. Legacy merges: ambiguous visits are reported, not rewritten.
 
 ## Rollback
-Redeploy the RC3 rules file and the RC3 build TOGETHER (outside business hours; tell staff to refresh). No data is rewritten by RC4. Fields RC4 adds (`originalCustomerId` on merged visits, `invoicingAttemptEnded` on orders, `visitsKeepOriginal` on merge records) stay in the documents; RC3 rules only look at the keys a write changes, so they do not block later writes. After a rollback the date-aware merge history is no longer applied by the client. An order left in `Invoicing` at the moment of the swap is released by the RC3 client after its 10-minute lease.
+**Withdrawn in RC5:** do not redeploy RC3 (known vulnerabilities). Use the freeze procedure in docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md.

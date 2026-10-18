@@ -6,7 +6,9 @@
 // Things it only REPORTS (a person must decide; the tool will not guess):
 //   NEEDS_REVIEW     old invoice with no order link and no kind (stand-alone? orphan?), duplicate numbers, cancelled orders with no record
 //   COUNTER_BEHIND   the counter would issue an existing number (fix in the app: Invoices -> Numbering, with a reason)
+//   INVALID_LINES    (RC5) an order/invoice whose lines RC5 cannot process (invalid or more than 12 lines). Open orders make the assessment BLOCKED.
 //   HISTORY_NOT_STARTED  the schedule history has not been started (a manager does it in the app so the server clock is used)
+import { validateOrderLines } from '../src/orderLines.js';
 export function planMigration({ invoices = [], orders = [], invoiceNumbers = [], counter = null, cancellations = [], scheduleConfig = null }) {
   const actions = [], report = [];
   const registered = new Set(invoiceNumbers.map(n => n.id || n.invoiceNo));
@@ -32,6 +34,17 @@ export function planMigration({ invoices = [], orders = [], invoiceNumbers = [],
     const clash = [...byNo.keys()].find(no => no.startsWith(counter.prefix + '-') && no.endsWith('-' + pad));
     if (clash) report.push({ type: 'COUNTER_BEHIND', detail: `Next number would be …-${pad}, already used by ${clash}. Raise the counter in the app (Invoices -> Numbering) with a reason.` });
   }
+  const OPEN = new Set(['Submitted', 'Approved', 'Invoicing']);
+  for (const o of orders) {
+    const v = validateOrderLines(o.items, o.grandTotal);
+    if (!v.ok) report.push({ type: 'INVALID_LINES', open: OPEN.has(o.status), orderIds: [o.id], detail: `Order ${o.orderNo || o.id} (${o.status}) cannot be processed by RC5: ${v.problems.join(' ')} Run tools/reconcile.mjs for the recovery steps.` });
+  }
+  for (const inv of invoices) {
+    const v = validateOrderLines(inv.items, inv.grandTotal, { invoice: true });
+    if (!v.ok) report.push({ type: 'INVALID_LINES', open: false, invoiceIds: [inv.id], detail: `Invoice ${inv.invoiceNo || inv.id}: ${v.problems.join(' ')} (historical; only editing its lines is blocked).` });
+  }
   if (!scheduleConfig) report.push({ type: 'HISTORY_NOT_STARTED', detail: 'Schedule history is not started. A manager starts it in the app; until then past dates show "no reliable history".' });
-  return { actions, report };
+  // BLOCKED: RC5 cannot process an open order. REVIEW: something needs a person. CLEAN: nothing found. (Never "clean" while a record cannot be processed.)
+  const assessment = report.some(r => r.type === 'INVALID_LINES' && r.open) ? 'BLOCKED' : (report.length ? 'REVIEW' : 'CLEAN');
+  return { actions, report, assessment };
 }

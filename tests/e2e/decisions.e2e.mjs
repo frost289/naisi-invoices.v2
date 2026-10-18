@@ -365,6 +365,7 @@ try {
     const wb = new ExcelJS.Workbook(); const ws = wb.addWorksheet('Plan'); ws.addRow(['Customer', 'Planned day']); ws.addRow(['Echo Friday', 'Thu']);
     const buf = Buffer.from(await wb.xlsx.writeBuffer());
     await upload('plan.xlsx', buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    await page.waitForFunction(() => /1 change ready/.test(document.querySelector('#importSummary')?.innerText || ''), null, { timeout: 5000 }).catch(() => {});   // RC5: wait for the async xlsx parse (timing flake seen once); the assertion below is unchanged
     expect(/1 change ready/.test(await page.innerText('#importSummary')), await page.innerText('#importSummary'));
     await page.setInputFiles('#importDaysFile', { name: 'bad.csv', mimeType: 'text/csv', buffer: Buffer.from('Shop,Phone\nAlpha,1\n') });
     await toast(/Name.*Day/);
@@ -402,6 +403,32 @@ try {
     expect(txt.includes(tricky), 'legitimate punctuation (apostrophe, quotes, ampersand, angle brackets) must display unchanged');
     expect(txt.includes('onerror='), 'the malicious text should be visible as plain text');
     return 'plain text, nothing executed';
+  });
+  await R.check('E54', 'Malicious or malformed saved expense.amount never creates elements or runs code for a manager or a rep; it is shown as "Invalid amount" and left out of totals', async () => {
+    const EVILAMT = `<img src=x onerror="window.__pwn=(window.__pwn||0)+1"><b id=evilamt>x</b>`;
+    const day = '2026-10-15';
+    const exp = (amount, by = 'rep1') => ({ date: day, category: 'Fuel', amount, notes: 'n', createdBy: 'u_' + by, createdByEmail: by + '@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T08:00:00Z') } });
+    await logout();
+    await fresh({ extra: {
+      'expenses/eGood': exp(1500),
+      'expenses/eEvil': exp(EVILAMT),
+      'expenses/eNaN': exp(NaN),
+      'expenses/eNull': exp(null),
+      'expenses/eNeg': exp(-40),
+    } });
+    const probe = async () => page.evaluate(() => ({ pwn: window.__pwn ?? null, imgs: document.querySelectorAll('img[src="x"]').length, injected: !!document.getElementById('evilamt') }));
+    for (const who of ['mgr@naisi.test', 'rep1@naisi.test']) {
+      await login(who);
+      await page.waitForSelector('#navExpensesBtn', { state: 'visible', timeout: 15000 });
+      await page.click('#navExpensesBtn'); await page.waitForTimeout(700);
+      eq(await probe(), { pwn: null, imgs: 0, injected: false }, `${who}: saved amount markup ran or became an element`);
+      const t = await bodyText();
+      expect(t.includes('Invalid amount'), `${who}: a malformed amount must be flagged, not shown as MWK 0.00`);
+      expect(t.includes('MWK 1,500.00'), `${who}: the valid expense still shows`);
+      expect(/NOT included in these totals/i.test(t), `${who}: totals must say malformed records are excluded`);
+      await logout();
+    }
+    return 'manager and rep: plain text only, flagged, excluded from totals';
   });
   await R.check('E52', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
 } finally {

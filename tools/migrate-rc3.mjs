@@ -31,6 +31,7 @@ console.log(`MODE: ${apply ? 'APPLY (emulator only)' : 'DRY RUN (nothing is writ
 for (const a of plan.actions) console.log(`  ACTION  ${a.type}  ${a.path}  ${JSON.stringify(a.data)}`);
 for (const r of plan.report) console.log(`  REVIEW  ${r.type}  ${(r.orderIds || r.invoiceIds || []).join(',')}  ${r.detail}`);
 console.log(`Summary: ${plan.actions.length} additive action(s), ${plan.report.length} item(s) for a person to review.`);
+console.log(`ASSESSMENT: ${plan.assessment}${plan.assessment === 'CLEAN' ? '' : ' (not a clean migration: resolve the REVIEW items above first)'}`);
 if (apply) {
   const enc = (v) => v === null || v === undefined ? { nullValue: null } : typeof v === 'boolean' ? { booleanValue: v } : typeof v === 'number' ? { integerValue: String(v) } : typeof v === 'string' ? { stringValue: v } : v.ms ? { timestampValue: new Date(v.ms).toISOString() } : { stringValue: JSON.stringify(v) };
   const base = `http://${HOST}/v1/projects/${PROJECT}/databases/(default)/documents`;

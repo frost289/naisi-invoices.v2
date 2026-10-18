@@ -1,4 +1,5 @@
 import { db } from './firebase.js';
+import { requireExpenseAmount } from './money.js';
 import {
   collection, addDoc, doc, updateDoc, deleteDoc,
   serverTimestamp, query, where, orderBy, limit, startAfter, getDocs
@@ -35,7 +36,7 @@ export async function fetchMyExpensesPage(uid, cursor = null) {
 export async function addExpense({ date, category, amount, notes, uid, email }) {
   await addDoc(collection(db, 'expenses'), {
     date, category,
-    amount: parseFloat(amount) || 0,
+    amount: requireExpenseAmount(amount),
     notes: notes || '',
     createdBy: uid,
     createdByEmail: email,
@@ -47,7 +48,7 @@ export async function addExpense({ date, category, amount, notes, uid, email }) 
 export async function updateExpense(id, { date, category, amount, notes }) {
   await updateDoc(doc(db, 'expenses', id), {
     date, category,
-    amount: parseFloat(amount) || 0,
+    amount: requireExpenseAmount(amount),
     notes: notes || '',
     updatedAt: serverTimestamp(),
   });

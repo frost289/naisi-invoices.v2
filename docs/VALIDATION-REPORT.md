@@ -1,3 +1,5 @@
+> **RC5 NOTICE (SUPERSEDED-BY-RC5):** where this document disagrees with `docs/RC5-RELEASE-REPORT.md`, the RC5 report wins. In particular: there is NO rollback to RC3 and NO automatic ten-minute invoicing recovery (INVOICING_RESUME_ENABLED=false); use the freeze and stuck-Invoicing procedures in `docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md`. Reconcile/migration preflight now reports invalid and oversized orders (RC4 notes claiming this were wrong at the time).
+
 > **SUPERSEDED (2026-10-18).** This file describes RC3. The only authoritative status is `docs/RC4-RELEASE-REPORT.md`; any PASS or READY claim below does not apply to RC4.
 
 # Validation report (honest)

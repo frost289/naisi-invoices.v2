@@ -43,6 +43,8 @@ import { orderRevisionKey } from './orderRevision.js';
 import { invoiceOrderForBulk } from './invoiceFlow.js';
 import { wholeNumber } from './numbers.js';
 import { validateOrderLines } from './orderLines.js';
+import { showBuildId } from './buildInfo.js';
+import { summarizeExpenses, isMoney } from './money.js';
 import {
   adjustStockManually, approveOrderWithStock, cancelOrder, validateCancelReason,
   editOrderWithStock, receiveStockCases, fetchAllStockMovementsPage, fetchStockMovementsForProduct, casesToPacks
@@ -84,8 +86,18 @@ function formatItemsSummary(items) {
   return items.map(it => `${it.qty}× ${it.desc || '—'}`).join(', ');
 }
 
+// Malformed stored amounts are never counted and never shown as 0: the screen says how many there are and which records (ids) to correct.
+function invalidAmountNote(invalid) {
+  if (!invalid.length) return '';
+  const ids = invalid.slice(0, 5).map(x => String(x.id || '?')).join(', ') + (invalid.length > 5 ? ', …' : '');
+  return `<p class="exp-invalid-note" style="color:#b3261e; font-size:0.8rem; margin-top:6px;">${esc(invalid.length)} expense record${esc(invalid.length === 1 ? '' : 's')} with an invalid amount ${esc(invalid.length === 1 ? 'is' : 'are')} NOT included in these totals (record ${esc(ids)}). Open and correct the amount.</p>`;
+}
+showBuildId();
+
 function googleMapsUrl(lat, lng) {
-  return `https://www.google.com/maps/search/?api=1&query=${Number(lat)},${Number(lng)}`;
+  const la = Number(lat), ln = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return '#';
+  return `https://www.google.com/maps/search/?api=1&query=${la},${ln}`;
 }
 
 const loginScreen = document.getElementById('loginScreen');
@@ -1009,7 +1021,7 @@ async function initApp(user, role) {
   function customerMapCellHtml(c) {
     const hasPin = typeof c.lat === 'number' && typeof c.lng === 'number';
     if (hasPin) {
-      return `<a href="${googleMapsUrl(c.lat, c.lng)}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
+      return `<a href="${esc(googleMapsUrl(c.lat, c.lng))}" target="_blank" rel="noopener" class="map-link-btn">View on Map</a>
          <button type="button" class="map-pin-btn-small" data-action="set-location" style="margin-left:6px;">📍</button>`;
     }
     // No pin yet. A location NAME is not a delivery point, so there is
@@ -1419,7 +1431,7 @@ async function initApp(user, role) {
       const skipped = r.skipped.length ? `<p class="numbering-hint" id="suggestSkipped" style="margin-top:8px;">${esc(r.skipped.length)} shop${esc(r.skipped.length === 1 ? '' : 's')} could not be placed because there is no map pin (they are left as they are): ${r.skipped.map(x => esc(x.name)).join(', ')}.</p>` : '';
       suggestResult.innerHTML = `
         <table style="width:100%; font-size:0.82rem; border-collapse:collapse; margin-bottom:8px;"><thead><tr style="text-align:left; color:var(--muted);"><th>Day</th><th>Shops (now → suggested)</th><th>Approx. route (now → suggested)</th></tr></thead><tbody>${dayRows}</tbody></table>
-        <p class="numbering-hint" id="suggestTotals">Total approx. route (straight-line): ${kmText(r.before.totalKm)} now → ${kmText(r.after.totalKm)} suggested.</p>
+        <p class="numbering-hint" id="suggestTotals">Total approx. route (straight-line): ${esc(kmText(r.before.totalKm))} now → ${esc(kmText(r.after.totalKm))} suggested.</p>
         ${r.moves.length ? `<div style="max-height:260px; overflow:auto; margin:8px 0;">${moveRows}</div>
           <button type="button" class="list-action-btn" id="suggestApplyBtn" style="background:var(--leaf); color:#fff; border-color:var(--leaf);">Apply ticked changes</button>
           <span id="suggestProgress" style="font-size:0.82rem; margin-left:8px;"></span>`
@@ -1672,7 +1684,7 @@ async function initApp(user, role) {
           <td style="font-family:'JetBrains Mono',monospace;">${esc(p.quantity ?? '—')}</td>
           <td style="font-family:'JetBrains Mono',monospace;">${esc(p.unitsPerCase ?? '—')}</td>
           <td style="font-family:'JetBrains Mono',monospace; ${esc(stock <= 0 ? 'color:#b3261e; font-weight:700;' : '')}">${esc(stock)}</td>
-          <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(p.price)}</td>
+          <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${esc(mwk(p.price))}</td>
           <td>
             <button type="button" class="list-action-btn" data-action="edit">Edit</button>
             <button type="button" class="list-action-btn" data-action="adjust-stock">Adjust Stock</button>
@@ -2027,7 +2039,7 @@ async function initApp(user, role) {
     // Never both at once (auto-contact AND auto-attach) — that
     // combination genuinely isn't possible from a plain website.
     async function sendInvoiceViaWhatsApp({ pdfDoc, filename, phone, customerName, invoiceNo, grandTotal }) {
-      const message = `Hi ${customerName}, here is your invoice ${invoiceNo} from Naisi Foods for ${mwk(grandTotal)}. The PDF is attached.`;
+      const message = `Hi ${customerName}, here is your invoice ${invoiceNo} from Naisi Foods for ${esc(mwk(grandTotal))}. The PDF is attached.`;
 
       if (pdfDoc && navigator.share && navigator.canShare) {
         try {
@@ -2260,7 +2272,7 @@ async function initApp(user, role) {
           <td>${esc(formatDate(inv.date))}</td>
           <td>${esc(inv.customer)}</td>
           <td class="inv-products-cell" title="${esc(productsSummary)}">${esc(productsSummary)}</td>
-          <td>${mwk(inv.grandTotal || 0)}</td>
+          <td>${esc(mwk(inv.grandTotal || 0))}</td>
           <td>
             <button type="button" class="list-action-btn" data-action="edit" data-id="${esc(inv.id)}">Edit</button>
             <button type="button" class="list-action-btn" data-action="download" data-id="${esc(inv.id)}">Download</button>
@@ -2572,7 +2584,7 @@ async function initApp(user, role) {
               <td>${esc(o.orderNo)}</td>
               <td>${esc(o.customerName)}</td>
               <td class="inv-products-cell" title="${esc(itemsSummary)}">${esc(itemsSummary)}</td>
-              <td>${mwk(o.grandTotal || 0)}</td>
+              <td>${esc(mwk(o.grandTotal || 0))}</td>
               <td><button type="button" class="list-action-btn" data-action="generate-invoice" data-id="${esc(o.id)}">Generate Invoice</button></td>
             </tr>
           `;
@@ -2671,21 +2683,21 @@ async function initApp(user, role) {
   function renderExpenseSummary() {
     const el = document.getElementById('expenseSummary');
     if (!el) return;
-    const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
-    loadedExpenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
-    const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+    const sum = summarizeExpenses(loadedExpenses);
+    const totals = sum.byCategory, grand = sum.total;
     el.innerHTML = `
       <div class="exp-summary-tiles">
-        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
-        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
-        <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${mwk(totals.Fuel)}</span></div>
-        <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${mwk(totals.Stock)}</span></div>
-        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
+        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${esc(mwk(totals.Transport))}</span></div>
+        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${esc(mwk(totals.Meals))}</span></div>
+        <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${esc(mwk(totals.Fuel))}</span></div>
+        <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${esc(mwk(totals.Stock))}</span></div>
+        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${esc(mwk(totals.Other))}</span></div>
       </div>
       <div class="exp-grand-total">
         <span>Grand Total (${esc(loadedExpenses.length)} record${esc(loadedExpenses.length !== 1 ? 's' : '')} loaded)</span>
-        <span class="exp-grand-amount">${mwk(grand)}</span>
+        <span class="exp-grand-amount">${esc(mwk(grand))}</span>
       </div>
+      ${invalidAmountNote(sum.invalid)}
     `;
   }
 
@@ -2705,7 +2717,7 @@ async function initApp(user, role) {
       tr.innerHTML = `
         <td>${esc(formatDate(exp.date))}</td>
         <td>${badgeHtml(exp.category)}</td>
-        <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${mwk(exp.amount || 0)}</td>
+        <td style="font-family:'JetBrains Mono',monospace; white-space:nowrap;">${esc(mwk(exp.amount))}</td>
         <td style="color:var(--muted); font-size:0.78rem;">${esc(notesShort)}</td>
         ${byCell}
         <td>${actions}</td>
@@ -2751,22 +2763,22 @@ async function initApp(user, role) {
       expPeriodSummaryBody.innerHTML = '<p style="color:var(--muted); font-size:0.82rem;">Loading…</p>';
       try {
         const expenses = await fetchExpensesInRange(from, to);
-        const totals = { Transport: 0, Meals: 0, Fuel: 0, Stock: 0, Other: 0 };
-        expenses.forEach(e => { totals[e.category] = (totals[e.category] || 0) + (e.amount || 0); });
-        const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+        const sum = summarizeExpenses(expenses);
+        const totals = sum.byCategory, grand = sum.total;
         expPeriodSummaryBody.innerHTML = `
           <p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${esc(label)} — ${esc(expenses.length)} record${esc(expenses.length === 1 ? '' : 's')}</p>
           <div class="exp-summary-tiles">
-            <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${mwk(totals.Transport)}</span></div>
-            <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${mwk(totals.Meals)}</span></div>
-            <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${mwk(totals.Fuel)}</span></div>
-            <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${mwk(totals.Stock)}</span></div>
-            <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${mwk(totals.Other)}</span></div>
+            <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${esc(mwk(totals.Transport))}</span></div>
+            <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${esc(mwk(totals.Meals))}</span></div>
+            <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${esc(mwk(totals.Fuel))}</span></div>
+            <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${esc(mwk(totals.Stock))}</span></div>
+            <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${esc(mwk(totals.Other))}</span></div>
           </div>
           <div class="exp-grand-total">
             <span>Total</span>
-            <span class="exp-grand-amount">${mwk(grand)}</span>
+            <span class="exp-grand-amount">${esc(mwk(grand))}</span>
           </div>
+          ${invalidAmountNote(sum.invalid)}
         `;
       } catch (err) {
         expPeriodSummaryBody.innerHTML = `<p style="color:#b3261e; font-size:0.82rem;">Could not load: ${esc(err.message)}</p>`;
@@ -2865,7 +2877,7 @@ async function initApp(user, role) {
             <option ${esc(exp.category === 'Other' ? 'selected' : '')}>Other</option>
           </select>
         </td>
-        <td><input class="customer-edit-input" data-field="amount" type="number" min="0" step="1" value="${esc(exp.amount || 0)}"></td>
+        <td><input class="customer-edit-input" data-field="amount" type="number" min="0" step="1" value="${esc(isMoney(exp.amount) ? exp.amount : '')}" placeholder="enter amount"></td>
         <td><input class="customer-edit-input" data-field="notes" value="${esc(exp.notes || '')}"></td>
         ${byEditCell}
         <td>
@@ -2895,7 +2907,7 @@ async function initApp(user, role) {
       }
     } else if (btn.dataset.action === 'delete') {
       if (!isManager) return;
-      const confirmed = confirm(`Delete this ${exp?.category || ''} expense of ${mwk(exp?.amount || 0)}?\n\nThis cannot be undone.`);
+      const confirmed = confirm(`Delete this ${exp?.category || ''} expense of ${esc(mwk(exp?.amount))}?\n\nThis cannot be undone.`);
       if (!confirmed) return;
       setButtonLoading(btn, '…');
       try {
@@ -3016,8 +3028,8 @@ async function initApp(user, role) {
       <tr>
         <td>${esc(it.qty)}</td>
         <td>${esc(it.desc || '—')}</td>
-        <td class="num">${mwk(it.price || 0)}</td>
-        <td class="num">${mwk((it.qty || 0) * (it.price || 0))}</td>
+        <td class="num">${esc(mwk(it.price || 0))}</td>
+        <td class="num">${esc(mwk((it.qty || 0) * (it.price || 0)))}</td>
       </tr>
     `).join('') || `<tr><td colspan="4" style="color:var(--muted);">No items on this order.</td></tr>`;
     opGrandTotal.textContent = mwk(order.grandTotal || 0);
@@ -3166,7 +3178,7 @@ async function initApp(user, role) {
         <td>${esc(o.orderNo)}</td>
         <td>${esc(o.customerName)}</td>
         <td class="inv-products-cell" title="${esc(itemsSummary)}">${esc(itemsSummary)}</td>
-        <td>${mwk(o.grandTotal || 0)}</td>
+        <td>${esc(mwk(o.grandTotal || 0))}</td>
         <td>${orderStatusBadge(o.status)}</td>
       `;
       let actions = '';
@@ -3415,8 +3427,11 @@ async function initApp(user, role) {
       ? 'The order is kept (marked Cancelled). The stock reserved when it was approved is returned to stock once, and the stock history records it.'
       : 'The order is kept (marked Cancelled). No stock was reserved, so stock does not change.';
     reason.value = ''; err.style.display = 'none';
+    // Recovery row (built with DOM nodes): shown only after the normal cancel was refused because the stored lines are not valid.
+    modal.querySelectorAll('.cancel-recovery-row').forEach(n => n.remove());
+    let recoveryBox = null;
     modal.style.display = 'flex';
-    const close = () => { modal.style.display = 'none'; confirmBtn.onclick = null; };
+    const close = () => { modal.style.display = 'none'; confirmBtn.onclick = null; modal.querySelectorAll('.cancel-recovery-row').forEach(n => n.remove()); };
     document.getElementById('cancelOrderCloseBtn').onclick = close;
     document.getElementById('cancelOrderBackBtn').onclick = close;
     let busy = false;
@@ -3427,7 +3442,7 @@ async function initApp(user, role) {
       busy = true;
       setButtonLoading(confirmBtn, 'Cancelling…');
       try {
-        const res = await cancelOrder(order, { reason: reason.value, uid: user.uid, email: user.email });
+        const res = await cancelOrder(order, { reason: reason.value, uid: user.uid, email: user.email, recoverWithoutRestore: !!(recoveryBox && recoveryBox.checked) });
         close();
         showToast(res.alreadyCancelled
           ? `Order ${order.orderNo} was already cancelled. Nothing changed; stock was not restored again.`
@@ -3436,6 +3451,13 @@ async function initApp(user, role) {
         await loadProductsCache();
       } catch (e) {
         err.textContent = e.message; err.style.display = 'block';
+        if (e.code === 'invalid-order-lines' && order.status === 'Approved' && !recoveryBox) {
+          const row = document.createElement('label'); row.className = 'cancel-recovery-row'; row.style.cssText = 'display:block; margin-top:8px; font-size:0.82rem;';
+          recoveryBox = document.createElement('input'); recoveryBox.type = 'checkbox'; recoveryBox.id = 'cancelRecoveryBox';
+          row.appendChild(recoveryBox);
+          row.appendChild(document.createTextNode(' Cancel WITHOUT restoring stock (recovery). I will correct stock with manual adjustments from the stock history.'));
+          err.insertAdjacentElement('afterend', row);
+        }
       } finally {
         busy = false;
         clearButtonLoading(confirmBtn);
@@ -3810,7 +3832,7 @@ async function initApp(user, role) {
         todaysRouteInfo = new Map(ordered.map(o => [o.id, { stopNo: o.stopNo, legKm: o.legKm }]));
         todaysRouteSummary.style.display = 'block';
         todaysRouteSummary.textContent =
-          `Shortest route from ${startLabel(start)}: about ${formatKm(totalKm)} for ${ordered.length} stop${ordered.length === 1 ? '' : 's'} (straight-line).` +
+          `Shortest route from ${startLabel(start)}: about ${esc(formatKm(totalKm))} for ${ordered.length} stop${ordered.length === 1 ? '' : 's'} (straight-line).` +
           (todays.length > pinned.length ? ` ${todays.length - pinned.length} without a pin are listed last.` : '');
         renderTodaysVisits();
       } finally {
@@ -4207,9 +4229,9 @@ async function initApp(user, role) {
             ? '<td colspan="3" class="numbering-hint">not calculated (no reliable schedule for these dates)</td>'
             : `<td>${esc(r.scheduledCount)}</td><td>${esc(r.visitedCount)}</td><td>${esc(r.stillDueCount)}</td>`}
           <td>${esc(r.ordersTaken)}</td><td>${esc(r.noOrderVisits)}</td>
-          <td>${pctText(r.coveragePct)}</td><td>${pctText(r.conversionPct)}</td>
+          <td>${esc(pctText(r.coveragePct))}</td><td>${esc(pctText(r.conversionPct))}</td>
           <td>${r.attributedOrders ? `${esc(r.attributedOrders)} order(s), ${esc(r.attributedValue === null ? '—' : mwk(r.attributedValue))}` : '—'}${r.attributedCancelled ? ` <span class="numbering-hint">(${esc(r.attributedCancelled)} cancelled)</span>` : ''}</td>
-          <td>${esc(r.closedVisits)}</td><td>${pctText(r.conversionExclClosedPct)}</td>
+          <td>${esc(r.closedVisits)}</td><td>${esc(pctText(r.conversionExclClosedPct))}</td>
         </tr>`).join('');
       // The limitation is stated plainly - no figure is shown for a date without a reliable schedule record.
       if (report.limitation) { perfScheduleWarning.textContent = report.limitation; perfScheduleWarning.style.display = 'block'; }
@@ -4235,7 +4257,7 @@ async function initApp(user, role) {
       const valued = rows.reduce((s, r) => s + r.valuedOrders, 0), unvalued = rows.reduce((s, r) => s + r.unvaluedOrders, 0);
       const total = rows.reduce((s, r) => s + (r.valueTotal || 0), 0);
       ordersValueNote.textContent = orders.length
-        ? (valued ? `Value of ${valued} order(s) where a value was recorded when the visit was saved: ${mwk(total)}.` : 'No order values were recorded for these visits.') +
+        ? (valued ? `Value of ${valued} order(s) where a value was recorded when the visit was saved: ${esc(mwk(total))}.` : 'No order values were recorded for these visits.') +
           (unvalued ? ` ${unvalued} older visit(s) have no recorded value and are left out of that total (shown as "—", not as zero).` : '') +
           ' Values are as taken on the visit; later edits to an order are not reflected.'
         : '';
@@ -4385,7 +4407,7 @@ async function initApp(user, role) {
 
       const expenseBreakdown = Object.entries(summary.expenses.byCategory)
         .filter(([, amt]) => amt > 0)
-        .map(([cat, amt]) => `<div class="summary-breakdown-row"><span>${esc(cat)}</span><span>${mwk(amt)}</span></div>`)
+        .map(([cat, amt]) => `<div class="summary-breakdown-row"><span>${esc(cat)}</span><span>${esc(mwk(amt))}</span></div>`)
         .join('') || `<div class="summary-breakdown-row"><span style="color:var(--muted);">No expenses in this range</span></div>`;
 
       const topProductsHtml = summary.topProducts.length
@@ -4396,15 +4418,15 @@ async function initApp(user, role) {
         <div class="summary-grid">
           <div class="summary-tile"><span class="summary-tile-label">Orders</span><span class="summary-tile-value">${esc(summary.orders.total)}</span></div>
           <div class="summary-tile"><span class="summary-tile-label">Invoices</span><span class="summary-tile-value">${esc(summary.invoices.count)}</span></div>
-          <div class="summary-tile summary-tile-positive"><span class="summary-tile-label">Revenue</span><span class="summary-tile-value">${mwk(summary.invoices.revenue)}</span></div>
-          <div class="summary-tile summary-tile-negative"><span class="summary-tile-label">Expenses</span><span class="summary-tile-value">${mwk(summary.expenses.total)}</span></div>
-          <div class="summary-tile ${esc(summary.netCashflow >= 0 ? 'summary-tile-positive' : 'summary-tile-negative')}"><span class="summary-tile-label">Net</span><span class="summary-tile-value">${mwk(summary.netCashflow)}</span></div>
+          <div class="summary-tile summary-tile-positive"><span class="summary-tile-label">Revenue</span><span class="summary-tile-value">${esc(mwk(summary.invoices.revenue))}</span></div>
+          <div class="summary-tile summary-tile-negative"><span class="summary-tile-label">Expenses</span><span class="summary-tile-value">${esc(mwk(summary.expenses.total))}</span></div>
+          <div class="summary-tile ${esc(summary.netCashflow >= 0 ? 'summary-tile-positive' : 'summary-tile-negative')}"><span class="summary-tile-label">Net</span><span class="summary-tile-value">${esc(mwk(summary.netCashflow))}</span></div>
           <div class="summary-tile"><span class="summary-tile-label">Visits</span><span class="summary-tile-value">${esc(summary.visits.total)}</span><span class="summary-tile-sub">${esc(summary.visits.successRate)}% placed an order</span></div>
         </div>
         <div class="summary-section-title">Orders by Status</div>
         ${statusBreakdown}
         <div class="summary-section-title">Expenses by Category</div>
-        ${expenseBreakdown}
+        ${expenseBreakdown}${invalidAmountNote(summary.expenses.invalid || [])}
         <div class="summary-section-title">Top Products Ordered</div>
         ${topProductsHtml}
       `;
@@ -4604,7 +4626,7 @@ async function initDeliveryApp(user) {
         : `<div class="delivery-card-nopin">⚠ No pinned location saved for this customer.<br>Tell the manager.</div>`}
       ${failure ? `<div class="delivery-card-failed">Last try failed: ${esc(failure.reason || '')}${failure.note ? ` — ${esc(failure.note)}` : ''}${order.deliveryAttemptCount > 1 ? ` (${esc(order.deliveryAttemptCount)} tries)` : ''}</div>` : ''}
       <div class="delivery-items">${itemsHtml}</div>
-      <div class="delivery-total">${mwk(order.grandTotal || 0)}</div>
+      <div class="delivery-total">${esc(mwk(order.grandTotal || 0))}</div>
       ${order.invoiceNo ? `<div class="delivery-invoice">Invoice ${esc(order.invoiceNo)}</div>` : ''}
       <button type="button" class="delivery-deliver-btn" data-action="deliver" data-id="${esc(order.id)}">✓ DELIVERED</button>
       <button type="button" class="delivery-fail-btn" data-action="fail-open" data-id="${esc(order.id)}">✕ NOT DELIVERED</button>

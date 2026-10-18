@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 firestore.rules
+
+# RC5: the final rules file MUST be tracked and shipped (it was silently ignored by the pattern above)
+!rules/firestore.rules

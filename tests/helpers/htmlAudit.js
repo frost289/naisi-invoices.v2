@@ -1,10 +1,11 @@
 // Static audit of HTML built from template literals: every interpolation that lands in HTML must go through esc(),
 // unless it is one of the helpers that return finished (already-escaped) HTML. Used by tests/unit/htmlSafety.test.js.
+// Every name in SAFE must be a helper defined in src/ whose own template is audited by the same analysis (tests/unit/htmlSafety.test.js checks that),
+// and currency/number formatters (mwk, kmText, pctText, formatKm) are deliberately NOT exempt: they go through esc() at every sink.
 // It is a guard against regressions, not a proof; the browser test (E53) is the behavioural check.
 export const SAFE = [
-  /^customerDayCellHtml\(/, /^customerMapCellHtml\(/, /^customerStatusCellHtml\(/, /^visitStatusHtml\(/, /^orderStatusBadge\(/, /^badgeHtml\(/,
+  /^customerDayCellHtml\(/, /^customerMapCellHtml\(/, /^customerStatusCellHtml\(/, /^visitStatusHtml\(/, /^orderStatusBadge\(/, /^badgeHtml\(/, /^invalidAmountNote\(/,
   /^(options|optionsFor\(r\)|dayRows|skipped|blockedNote|byCell|byEditCell|actions|checkboxCell|baseCells|topProductsHtml|itemsHtml|failText|rows\.map\(line\)\.join\(''\)|moveRows|statusBreakdown|expenseBreakdown)$/, /^counts\.invoicing\.map\(esc\)/,
-  /^googleMapsUrl\(/, /^mapsUrl$/, /^mwk\(/, /^kmText\(/, /^pctText\(/,
 ];
 
 export function analyze(src) {

@@ -1,5 +1,5 @@
 import { db } from './firebase.js';
-import { assertOrderLines, round2 } from './orderLines.js';
+import { assertOrderLines, validateOrderLines, round2 } from './orderLines.js';
 import {
   doc, runTransaction, collection, serverTimestamp,
   query, where, orderBy, limit, startAfter, getDocs
@@ -224,11 +224,17 @@ export function validateCancelReason(reason) {
   return null;
 }
 
-export async function cancelOrder(order, { reason, uid, email }) {
+// recoverWithoutRestore (RC5, manager-only recovery for an Approved order whose stored lines RC5 cannot process): cancels the order and records
+// stockRestored:false. NO stock movement is written and none is invented. The stock that approval really deducted is in the append-only ledger;
+// the manager puts it back with ordinary audited manual adjustments (tools/reconcile.mjs prints the exact amounts). Refused for a valid order,
+// so the normal "restore exactly once" path can never be skipped by choice.
+export const RECOVERY_REASON_PREFIX = 'RECOVERY (stock not auto-restored): ';
+export async function cancelOrder(order, { reason, uid, email, recoverWithoutRestore = false }) {
   const problem = validateCancelReason(reason);
   if (problem) throw new Error(problem);
   if (!uid) throw new Error('Not signed in.');
-  const cleanReason = String(reason).trim();
+  const cleanReason = (recoverWithoutRestore ? RECOVERY_REASON_PREFIX : '') + String(reason).trim();
+  if (cleanReason.length > MAX_CANCEL_REASON) throw new Error(`The reason is too long (${cleanReason.length} characters; maximum ${MAX_CANCEL_REASON}).`);
   const orderId = order.id;
   return await runTransaction(db, async (tx) => {
     const orderRef = doc(db, 'orders', orderId);
@@ -250,8 +256,15 @@ export async function cancelOrder(order, { reason, uid, email }) {
       throw makeError(`This order is ${current.status} and cannot be cancelled.`, { code: 'cancel-not-allowed', status: current.status });
     }
     // Stock was deducted only when an order was approved (stockApplied false = it was explicitly released already).
-    const restoreStock = current.status === 'Approved' && current.stockApplied !== false;
-    if (restoreStock) assertOrderLines(current.items, current.grandTotal, makeError);   // never "restore" stock from invalid lines
+    let restoreStock = current.status === 'Approved' && current.stockApplied !== false;
+    if (recoverWithoutRestore) {
+      if (!restoreStock) throw makeError('Recovery is only for an Approved order whose stock was deducted.', { code: 'recovery-not-needed' });
+      if (validateOrderLines(current.items, current.grandTotal).ok) throw makeError('This order\'s lines are valid, so cancelling it restores its stock normally. Use the normal Cancel.', { code: 'recovery-not-needed' });
+      restoreStock = false;                       // no movement is written; the manager corrects stock with audited manual adjustments
+    } else if (restoreStock) {
+      const v = validateOrderLines(current.items, current.grandTotal);
+      if (!v.ok) throw makeError('This order\'s stored lines are not valid, so its stock cannot be restored from them. A manager can use "Cancel WITHOUT restoring stock (recovery)" and then correct stock with audited manual adjustments. Problems: ' + v.problems.join(' '), { code: 'invalid-order-lines', problems: v.problems });
+    }
     const groups = restoreStock ? groupTrackedLines(current.items) : new Map();
     const products = await readProducts(tx, [...groups.keys()]);     // reads before writes
 

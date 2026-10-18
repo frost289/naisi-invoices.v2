@@ -87,3 +87,51 @@ describe('F4 mergeCustomers keeps the original shop on every moved visit', () =>
     expect(F.store.get('visits/v2')).toMatchObject({ customerId: 'c', originalCustomerId: 'a' });
   });
 });
+
+// RC5 finding C: a stamp written by a NEW merge must not erase the uncertainty a LEGACY merge already created.
+describe('RC5-C mixed legacy and RC4 merge chains', () => {
+  const KO = { visitsKeepOriginal: true };
+  const legacy = (id, keepId, day, visits = 2) => ({ id, keepId, mergedAt: tsOn(day), moved: { visits } });          // no marker: origins were not kept
+  const modern = (id, keepId, day, visits = 2) => ({ id, keepId, mergedAt: tsOn(day), moved: { visits }, ...KO });
+  const ident = (merges, visit) => H.visitIdentityAt(build([C('a'), C('b'), C('c')], merges), visit);
+
+  it('FAILS ON RC4: legacy b->a (14th), then new a->c (18th); a visit of the 8th stamped originalCustomerId=a stays AMBIGUOUS between a and b', () => {
+    const r = ident([legacy('b', 'a', '2026-10-14'), modern('a', 'c', '2026-10-18')], { date: '2026-10-08', customerId: 'c', originalCustomerId: 'a' });
+    expect(r.ambiguous).toBe(true);
+    expect(r.id).toBe(null);
+    expect(r.candidates).toEqual(expect.arrayContaining(['a', 'b']));
+  });
+  it('the same visit with no stamp is ambiguous too (unchanged behaviour)', () => {
+    const r = ident([legacy('b', 'a', '2026-10-14'), modern('a', 'c', '2026-10-18')], { date: '2026-10-08', customerId: 'c' });
+    expect(r.ambiguous).toBe(true);
+  });
+  it('CONTROL: a visit made AFTER the legacy merge (16th) and stamped a by the new merge is certain: a, then c after the 18th', () => {
+    const merges = [legacy('b', 'a', '2026-10-14'), modern('a', 'c', '2026-10-18')];
+    expect(ident(merges, { date: '2026-10-16', customerId: 'c', originalCustomerId: 'a' })).toMatchObject({ id: 'a', ambiguous: false });
+    const idx = build([C('a'), C('b'), C('c')], merges);
+    expect(H.visitIdentityAt(idx, { date: '2026-10-19', customerId: 'c', originalCustomerId: 'a' })).toMatchObject({ id: 'c', ambiguous: false });
+  });
+  it('CONTROL: a legacy merge that moved no visits creates no uncertainty', () => {
+    expect(ident([legacy('b', 'a', '2026-10-14', 0), modern('a', 'c', '2026-10-18')], { date: '2026-10-08', customerId: 'c', originalCustomerId: 'a' })).toMatchObject({ id: 'a', ambiguous: false });
+  });
+  it('CONTROL: two new merges (b->a, a->c) keep exact origins; repeated chain unchanged', () => {
+    const merges = [modern('b', 'a', '2026-10-14'), modern('a', 'c', '2026-10-18')];
+    expect(ident(merges, { date: '2026-10-08', customerId: 'c', originalCustomerId: 'b' })).toMatchObject({ id: 'b', ambiguous: false });
+    expect(ident(merges, { date: '2026-10-16', customerId: 'c', originalCustomerId: 'b' })).toMatchObject({ id: 'a', ambiguous: false });
+    expect(ident(merges, { date: '2026-10-19', customerId: 'c', originalCustomerId: 'b' })).toMatchObject({ id: 'c', ambiguous: false });
+  });
+  it('legacy merge AFTER a new merge (new a->c first, then legacy b->a is impossible because a no longer exists): chain order respected', () => {
+    const merges = [modern('b', 'a', '2026-10-12'), legacy('a', 'c', '2026-10-16')];
+    // visit of the 8th stamped b by the new merge; the later legacy a->c re-pointed other visits but this one keeps its stamp
+    expect(ident(merges, { date: '2026-10-08', customerId: 'c', originalCustomerId: 'b' })).toMatchObject({ id: 'b', ambiguous: false });
+    // a visit with a stamp 'a'?? cannot exist from the new merge here; an unstamped visit now at c from before the legacy merge IS ambiguous
+    expect(ident(merges, { date: '2026-10-08', customerId: 'c' }).ambiguous).toBe(true);
+  });
+  it('the performance report lists the stamped-but-uncertain visit as ambiguous and credits it to nobody', () => {
+    const merges = [legacy('b', 'a', '2026-10-14'), modern('a', 'c', '2026-10-18')];
+    const idx = build([C('a'), C('b'), C('c')], merges);
+    const r = vs.buildPerformanceReport({ index: idx, visits: [V('c', { originalCustomerId: 'a' })], reps: ['r@x'], from: '2026-10-08', to: '2026-10-08' }).rows[0];
+    expect(r.visitedCount).toBe(0);
+    expect(r.ambiguousVisits).toBe(1);
+  });
+});

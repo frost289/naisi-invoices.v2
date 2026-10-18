@@ -1596,3 +1596,107 @@ describe('RC4-I. order lines and money are validated by the rules (finding 3)', 
     await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oE'), { items: [ln()], grandTotal: 11, updatedAt: serverTimestamp() }));
   });
 });
+
+// =============================================================================================
+// RC5 (review findings A and B, and the maximum supported order size). Emulator tests: NOT executed in the build environment
+// (emulator download blocked, HTTP 403). docs/RC5-DEVELOPER-REVIEW-GUIDE.md lists the expected result of each group.
+// =============================================================================================
+describe('RC5-A. expense.amount is validated by the rules for every role (stored markup can never exist)', () => {
+  const exp = (over = {}) => ({ date: '2026-10-15', category: 'Fuel', amount: 1500, notes: 'n', createdBy: 'rep1', createdByEmail: 'rep1@example.com', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
+  const BADAMT = { 'markup string': '<img src=x onerror=alert(1)>', 'numeric string': '1500', 'NaN': NaN, 'Infinity': Infinity, 'zero': 0, 'negative': -5, 'too large': 1e13, 'null': null };
+  for (const who of ['rep1', 'deliv', 'mgr']) {
+    for (const [name, v] of Object.entries(BADAMT)) {
+      it(`${who}: raw create with amount = ${name} is refused`, async () => { await assertFails(addDoc(collection(as(who), 'expenses'), exp({ amount: v, createdBy: who === 'mgr' ? 'mgr' : who }))); });
+    }
+    it(`${who}: raw create with NO amount is refused`, async () => { const e = exp({ createdBy: who }); delete e.amount; await assertFails(addDoc(collection(as(who), 'expenses'), e)); });
+    it(`${who}: CONTROL a valid expense (number, own uid) is accepted`, async () => { await assertSucceeds(addDoc(collection(as(who), 'expenses'), exp({ createdBy: who }))); });
+  }
+  it('anonymous and role-less users cannot create expenses at all', async () => {
+    for (const who of ['anon', 'stranger']) await assertFails(addDoc(collection(as(who), 'expenses'), exp({ createdBy: who })));
+  });
+  it('an owner cannot update an expense to a malicious amount; a valid edit works', async () => {
+    await adminSet(['expenses', 'e1'], exp());
+    await assertFails(updateDoc(doc(as('rep1'), 'expenses', 'e1'), { amount: '<b>x</b>', updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(as('rep1'), 'expenses', 'e1'), { amount: 2000, updatedAt: serverTimestamp() }));
+  });
+  it('LEGACY: a malicious amount already stored (seeded by an admin) cannot be kept by an edit, is fixed by a valid amount, and a manager can delete it', async () => {
+    await adminSet(['expenses', 'legacy'], exp({ amount: '<img src=x onerror=alert(1)>' }));
+    await assertSucceeds(getDoc(doc(as('mgr'), 'expenses', 'legacy')));                                    // readable (the app shows it as "Invalid amount")
+    await assertFails(updateDoc(doc(as('mgr'), 'expenses', 'legacy'), { notes: 'still bad', updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'expenses', 'legacy'), { amount: 500, updatedAt: serverTimestamp() }));
+    await adminSet(['expenses', 'legacy2'], exp({ amount: 'x' }));
+    await assertSucceeds(deleteDoc(doc(as('mgr'), 'expenses', 'legacy2')));
+  });
+});
+
+describe('RC5-B. a rep order must carry catalogue stock identity on EVERY line; custom lines are explicit and never on rep orders', () => {
+  const L = (o = {}) => ({ qty: 2, desc: 'Amanda', price: 5, total: 10, productId: 'p1', ...o });
+  const save = (items, extra = {}) => saveOrderBatch(as('rep1'), { order: { items, grandTotal: items.reduce((s, i) => s + (typeof i.total === 'number' ? i.total : 0), 0), ...extra }, vis: { orderValue: items.reduce((s, i) => s + (typeof i.total === 'number' ? i.total : 0), 0) } });
+  const BAD = {
+    'no productId': () => { const l = L(); delete l.productId; return [l]; },
+    'productId null': () => [L({ productId: null })],
+    'productId empty string': () => [L({ productId: '' })],
+    'productId number': () => [L({ productId: 7 })],
+    'productId with a slash': () => [L({ productId: 'a/b' })],
+    'productId with spaces': () => [L({ productId: ' p1 ' })],
+    'productId 65 characters': () => [L({ productId: 'p'.repeat(65) })],
+    'custom line (no productId, custom:true)': () => [{ qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }],
+    'tracked line that also says custom': () => [L({ custom: true })],
+    'custom:false without productId': () => { const l = L({ custom: false }); delete l.productId; return [l]; },
+    'one good line plus one untracked line': () => { const u = L(); delete u.productId; return [L(), u]; },
+  };
+  for (const [name, mk] of Object.entries(BAD)) it(`rep raw order refused: ${name}`, async () => { await assertFails(save(mk())); });
+  it('CONTROL: a catalogue order with tracked lines is accepted', async () => { await assertSucceeds(save([L()])); });
+  it('CONTROL: exactly 12 tracked lines (the maximum supported size) is accepted by the rules without hitting an evaluation limit', async () => {
+    await assertSucceeds(save(Array.from({ length: 12 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }))));
+  });
+  it('13 lines is refused', async () => { await assertFails(save(Array.from({ length: 13 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 })))); });
+  it('a manager approving a STORED order that has an untracked line is refused by the rules; with an explicit custom line it is accepted', async () => {
+    const base = { orderNo: 'ORD-2026-0095', status: 'Submitted', customerId: 'c1', customerName: 'Shop', createdBy: 'rep1' };
+    const u = L(); delete u.productId;
+    await adminSet(['orders', 'oU'], { ...base, items: [u], grandTotal: 10 });
+    await adminSet(['orders', 'oC'], { ...base, orderNo: 'ORD-2026-0096', items: [L(), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }], grandTotal: 160 });
+    const approve = (id) => updateDoc(doc(as('mgr'), 'orders', id), { status: 'Approved', stockApplied: true, approvedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await assertFails(approve('oU'));
+    await assertSucceeds(approve('oC'));
+  });
+  it('a manager edit may ADD an explicit custom freight line to an open order, but not an untracked line', async () => {
+    await adminSet(['orders', 'oE2'], { orderNo: 'ORD-2026-0097', status: 'Submitted', customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: [L()], grandTotal: 10 });
+    const u = L(); delete u.productId;
+    await assertFails(updateDoc(doc(as('mgr'), 'orders', 'oE2'), { items: [L(), u], grandTotal: 20, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'orders', 'oE2'), { items: [L(), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }], grandTotal: 160, updatedAt: serverTimestamp() }));
+  });
+  it('invoices keep custom lines: a stand-alone invoice with a fractional freight line is accepted (see RC4-I)', async () => {
+    const SA = `sa_mgr_${REQ}`; const db = as('mgr'); const b = writeBatch(db);
+    b.set(doc(db, 'counters', 'naisiInvoice'), { prefix: 'NF-INV', counter: 371, lastInvoiceId: SA });
+    b.set(doc(db, 'invoiceNumbers', 'NF-INV-2026-0370'), { invoiceId: SA, issuedBy: 'mgr', issuedAt: serverTimestamp() });
+    b.set(doc(db, 'invoices', SA), { orderId: null, kind: 'standalone', requestId: REQ, invoiceNo: 'NF-INV-2026-0370', customer: 'Walk-in', items: [{ qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }], grandTotal: 150, createdBy: 'mgr', createdAt: serverTimestamp() });
+    await assertSucceeds(b.commit());
+  });
+  it('maximum size, other paths: a 12-line Approved order can be cancelled with stock restore; its 12-line invoice commit works', async () => {
+    const items = Array.from({ length: 12 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }));
+    await adminSet(['orders', 'o12'], { orderNo: 'ORD-2026-0098', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items, grandTotal: 60 });
+    const db = as('mgr'); const b = writeBatch(db);
+    b.update(doc(db, 'orders', 'o12'), { status: 'Cancelled', stockApplied: false, cancelReason: 'Customer cancelled', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelPriorStatus: 'Approved', cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    b.set(doc(db, 'orderCancellations', 'o12'), { orderId: 'o12', orderNo: 'ORD-2026-0098', priorStatus: 'Approved', stockRestored: true, reason: 'Customer cancelled', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelledAt: serverTimestamp() });
+    await assertSucceeds(b.commit());
+  });
+  it('RECOVERY: an Approved order with INVALID lines can be cancelled only with stockRestored:false (never "restoring" stock from bad lines)', async () => {
+    const bad = [L({ qty: -5, total: -25 })];
+    const mk = (id, restored) => { const db = as('mgr'); const b = writeBatch(db);
+      b.update(doc(db, 'orders', id), { status: 'Cancelled', stockApplied: false, cancelReason: 'RECOVERY (stock not auto-restored): negative line', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelPriorStatus: 'Approved', cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      b.set(doc(db, 'orderCancellations', id), { orderId: id, orderNo: 'ORD-2026-0099', priorStatus: 'Approved', stockRestored: restored, reason: 'RECOVERY (stock not auto-restored): negative line', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelledAt: serverTimestamp() });
+      return b.commit(); };
+    await adminSet(['orders', 'oBad1'], { orderNo: 'ORD-2026-0099', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: bad, grandTotal: -25 });
+    await adminSet(['orders', 'oBad2'], { orderNo: 'ORD-2026-0099', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: bad, grandTotal: -25 });
+    await assertFails(mk('oBad1', true));
+    await assertSucceeds(mk('oBad2', false));
+  });
+});
+
+describe('RC5-B2. cross-role matrix for the order write paths (manager, rep, deliverer, stranger, anonymous)', () => {
+  it('only a rep (own uid) can create a catalogue order; nobody else can create one for a rep through the rep path', async () => {
+    for (const who of ['mgr', 'deliv', 'stranger', 'anon']) await assertFails(saveOrderBatch(as(who)));
+    await assertSucceeds(saveOrderBatch(as('rep1')));
+  });
+});

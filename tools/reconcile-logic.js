@@ -20,7 +20,16 @@
 //                             The rules cannot check this; this does.
 //   CANCEL_NOT_RESTORED_TWICE more 'order-cancelled' entries for one order+product than the order has lines for it (double restore)
 //   MOVEMENT_UNATTRIBUTED     an 'order-cancelled' ledger entry with no orderId or no productId: it cannot be checked, so it is reported
-// Result: { findings, counts, status, skippedChecks, safeToEnableResume }.
+// RC5 (data preflight, finding D) - lines are checked with the SAME validator the app and the rules use (src/orderLines.js, src/money.js):
+//   INVALID_ORDER_LINES    an order whose stored lines RC5 cannot process (negative/fractional/NaN quantity, bad price or totals, no product and not a
+//                          declared custom line, malformed product id, or more than 12 lines). Open orders (Submitted/Approved/Invoicing) are HIGH, the rest info.
+//                          Each finding carries `reasons` and a `recovery` text; Approved orders also carry `ledgerNet` (the stock actually deducted, from the ledger).
+//   UNKNOWN_PRODUCT        a stock-tracked line whose product is not in the catalogue (only when --products is supplied)
+//   INVALID_INVOICE_LINES  an invoice whose lines would not pass today's validation (info: it stays valid history; only editing its lines is blocked)
+// Result: { findings, counts, status, skippedChecks, safeToEnableResume, completeness, dataReadiness, releaseReadiness, preflight }.
+//   completeness      COMPLETE | INCOMPLETE   did every check get its input?
+//   dataReadiness     READY | BLOCKED | NOT_ASSESSED   can RC5 process this data? BLOCKED when a high/medium finding exists; NOT_ASSESSED when inputs are missing
+//   releaseReadiness  always NOT_ASSESSED_BY_THIS_TOOL: a clean data check is NOT release approval (rules compilation, emulator tests and sign-offs are separate)
 //   status CLEAN       every check ran and nothing needs attention (the only state that is safe)
 //   status FINDINGS    at least one high/medium finding
 //   status INCOMPLETE  an input was not supplied so a check did not run; this is NOT a clean result and is listed in skippedChecks
@@ -30,6 +39,9 @@
 //   SCHEDULE_MISMATCH         a customer's current day/active state differs from its last schedule-history entry
 //   MERGE_PAUSED              a customer still carries a merge lock (an interrupted merge)
 //   MANAGER_ORDER_HAS_VISIT   a manager-entered order that carries a visit link
+
+import { validateOrderLines } from '../src/orderLines.js';
+import { MAX_ORDER_LINES } from '../src/money.js';
 
 const norm = (s) => String(s ?? '').trim().toLowerCase();
 export function itemsFingerprint(items) {
@@ -160,11 +172,66 @@ export function reconcile({ orders = [], invoices = [], stockMovements = null, c
     }
   }
 
+  // ---- RC5 preflight: order and invoice lines ----
+  const OPEN = new Set(['Submitted', 'Approved', 'Invoicing']);
+  const knownProducts = products ? new Set(products.map(p => p.id)) : null;
+  const ledgerNet = (orderId) => {
+    if (!stockMovements) return null;
+    const net = {};
+    for (const m of stockMovements) if (m.orderId === orderId && m.productId) net[m.productId] = (net[m.productId] || 0) + (Number(m.delta) || 0);
+    return net;
+  };
+  const pre = { ordersChecked: orders.length, invoicesChecked: invoices.length, invalidOrders: [], invalidInvoices: [], oversizedOrders: [], oversizedInvoices: [], maxLinesFound: 0, records: [] };
+  const recoveryFor = (o, net) => {
+    if (o.status === 'Submitted') return 'No stock was deducted. A manager opens the order and corrects the lines (Orders > Edit), or Rejects / Cancels it. It cannot be approved until the lines are valid.';
+    if (o.status === 'Approved') {
+      const netTxt = net === null ? 'Supply --stock (the stock ledger) to see what stock was really deducted for it.'
+        : `The ledger shows this net stock movement for the order (negative = deducted): ${Object.keys(net).length ? JSON.stringify(net) : 'none'}.`;
+      return `RC5 cannot edit, invoice, or restore stock from these lines. ${netTxt} Recovery (docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md): the manager cancels it with "Cancel WITHOUT restoring stock (recovery)" and a reason, then makes one audited manual stock adjustment per product for exactly the ledger amount above, naming the order number in the reason. Nothing is invented: the ledger, not the order lines, is the source of the quantities.`;
+    }
+    if (o.status === 'Invoicing') return 'An invoicing attempt is open. Release or finish it first (docs/RC5-DEVELOPER-ROLLOUT-GUIDE.md, maintenance procedure), then treat it as Approved.';
+    return 'Historical record. No operation is blocked (it cannot be approved, edited or cancelled anyway); no action needed.';
+  };
+  for (const o of orders) {
+    const n = Array.isArray(o.items) ? o.items.length : 0;
+    pre.maxLinesFound = Math.max(pre.maxLinesFound, n);
+    if (n > MAX_ORDER_LINES) pre.oversizedOrders.push(o.id);
+    const v = validateOrderLines(o.items, o.grandTotal);
+    const open = OPEN.has(o.status);
+    if (!v.ok) {
+      pre.invalidOrders.push(o.id);
+      const net = o.status === 'Approved' ? ledgerNet(o.id) : null;
+      const recovery = recoveryFor(o, o.status === 'Approved' ? net : null);
+      pre.records.push({ collection: 'orders', id: o.id, orderNo: o.orderNo || null, status: o.status, reasons: v.problems, recovery });
+      add('INVALID_ORDER_LINES', open ? 'high' : 'info', { orderIds: [o.id], reasons: v.problems, recovery, ...(net ? { ledgerNet: net } : {}) },
+        `Order ${o.orderNo || o.id} (${o.status}): ${v.problems.join(' ')}`);
+    }
+    if (knownProducts && Array.isArray(o.items)) {
+      const unknown = [...new Set(o.items.filter(i => i && typeof i.productId === 'string' && !knownProducts.has(i.productId)).map(i => i.productId))];
+      if (unknown.length) add('UNKNOWN_PRODUCT', open ? 'high' : 'info', { orderIds: [o.id], productIds: unknown },
+        `Order ${o.orderNo || o.id} (${o.status}) has line(s) for product id(s) ${unknown.join(', ')} that are not in the catalogue. Approval is refused until the order is edited.`);
+    }
+  }
+  for (const inv of invoices) {
+    const n = Array.isArray(inv.items) ? inv.items.length : 0;
+    pre.maxLinesFound = Math.max(pre.maxLinesFound, n);
+    if (n > MAX_ORDER_LINES) pre.oversizedInvoices.push(inv.id);
+    const v = validateOrderLines(inv.items, inv.grandTotal, { invoice: true });
+    if (!v.ok) {
+      pre.invalidInvoices.push(inv.id);
+      const recovery = 'Historical invoice: it stays valid and printable. Only editing its lines or totals is blocked by RC5 rules; correct it through a credit/re-issue process if a change is needed.';
+      pre.records.push({ collection: 'invoices', id: inv.id, invoiceNo: inv.invoiceNo || null, status: 'issued', reasons: v.problems, recovery });
+      add('INVALID_INVOICE_LINES', 'info', { invoiceIds: [inv.id], reasons: v.problems, recovery }, `Invoice ${inv.invoiceNo || inv.id}: ${v.problems.join(' ')}`);
+    }
+  }
+
   const counts = {};
   for (const f of findings) counts[f.type] = (counts[f.type] || 0) + 1;
   const given = { cancellations, stockMovements, invoiceNumbers, counter, customers, scheduleChanges, scheduleConfig };
   const skippedChecks = REQUIRED_INPUTS.filter(([k]) => given[k] === null || given[k] === undefined).map(([input, covers]) => ({ input, covers }));
   const attention = findings.some(f => f.severity !== 'info');
   const status = attention ? 'FINDINGS' : (skippedChecks.length ? 'INCOMPLETE' : 'CLEAN');
-  return { findings, counts, status, skippedChecks, safeToEnableResume: status === 'CLEAN' };
+  const completeness = skippedChecks.length ? 'INCOMPLETE' : 'COMPLETE';
+  const dataReadiness = findings.some(f => f.severity === 'high' || f.severity === 'medium') ? 'BLOCKED' : (skippedChecks.length ? 'NOT_ASSESSED' : 'READY');
+  return { findings, counts, status, skippedChecks, safeToEnableResume: status === 'CLEAN', completeness, dataReadiness, releaseReadiness: 'NOT_ASSESSED_BY_THIS_TOOL', preflight: pre };
 }

@@ -1,4 +1,5 @@
 import { db } from './firebase.js';
+import { summarizeExpenses } from './money.js';
 import { collection, query, where, orderBy, getDocs, Timestamp } from 'firebase/firestore';
 
 // These fetch EVERYTHING in the range at once (no pagination) — this is
@@ -70,11 +71,10 @@ export function buildIntervalSummary({ orders, invoices, expenses, visits }) {
 
   invoices.forEach(inv => { summary.invoices.revenue += inv.grandTotal || 0; });
 
-  expenses.forEach(e => {
-    summary.expenses.total += e.amount || 0;
-    if (summary.expenses.byCategory[e.category] === undefined) summary.expenses.byCategory[e.category] = 0;
-    summary.expenses.byCategory[e.category] += e.amount || 0;
-  });
+  const es = summarizeExpenses(expenses, Object.keys(summary.expenses.byCategory));
+  summary.expenses.total = es.total;
+  summary.expenses.byCategory = es.byCategory;
+  summary.expenses.invalid = es.invalid;          // malformed amounts are excluded from the totals and listed, never counted as 0
 
   visits.forEach(v => {
     if (v.outcome === 'Order Placed') summary.visits.ordersPlaced += 1;
