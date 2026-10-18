@@ -71,6 +71,7 @@ import {
   earliestNeededStart, buildDeliveryStats, toDate, formatAge
 } from './deliveries.js';
 import { orderStops, getStartPoint, startLabel, formatKm } from './routing.js';
+import { suggestSchedule, applySuggestions, DEFAULT_DAYS } from './scheduleSuggest.js';
 import { runBulkJob } from './bulkProgress.js';
 
 initOfflineBanner();
@@ -1316,6 +1317,68 @@ async function initApp(user, role) {
         refreshWeeklySchedule();
       }
     });
+
+    // ---- Suggest schedule by distance (manager). Proposes only; applying goes through setCustomerVisitDay (dated history). ----
+    const suggestPanel = document.getElementById('suggestSchedulePanel');
+    const suggestResult = document.getElementById('suggestResult');
+    document.getElementById('suggestDayChecks').innerHTML = DEFAULT_DAYS.map(d =>
+      `<label style="font-size:0.85rem; display:flex; align-items:center; gap:4px;"><input type="checkbox" class="suggest-day" value="${d}" checked> ${scheduleDayLabels[d]}</label>`).join('');
+    document.getElementById('suggestScheduleToggleBtn').addEventListener('click', () => {
+      suggestPanel.style.display = suggestPanel.style.display === 'none' ? 'block' : 'none';
+    });
+    let currentSuggestion = null;
+    const kmText = (k) => (k === null || k === undefined) ? 'n/a' : formatKm(k);
+    function renderSuggestion(r) {
+      const dayRows = DEFAULT_DAYS.map(d => {
+        const b = r.before.perDay.find(x => x.day === d), a = r.after.perDay.find(x => x.day === d);
+        return (b || a) ? `<tr><td>${scheduleDayLabels[d]}</td><td>${b ? b.count : 0} → ${a ? a.count : 0}</td><td>${b ? kmText(b.km) : '-'} → ${a ? kmText(a.km) : '-'}</td></tr>` : '';
+      }).join('');
+      const moveRows = r.moves.map((m, i) => `<label style="display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid var(--line); font-size:0.85rem;">
+          <input type="checkbox" class="suggest-move" data-i="${i}" checked> <span style="flex:1;">${esc(m.name)}</span>
+          <span style="color:var(--muted);">${m.from ? scheduleDayLabels[m.from] : 'no day'} → <strong>${scheduleDayLabels[m.to]}</strong></span></label>`).join('');
+      const skipped = r.skipped.length ? `<p class="numbering-hint" id="suggestSkipped" style="margin-top:8px;">${r.skipped.length} shop${r.skipped.length === 1 ? '' : 's'} could not be placed because there is no map pin (they are left as they are): ${r.skipped.map(x => esc(x.name)).join(', ')}.</p>` : '';
+      suggestResult.innerHTML = `
+        <table style="width:100%; font-size:0.82rem; border-collapse:collapse; margin-bottom:8px;"><thead><tr style="text-align:left; color:var(--muted);"><th>Day</th><th>Shops (now → suggested)</th><th>Approx. route (now → suggested)</th></tr></thead><tbody>${dayRows}</tbody></table>
+        <p class="numbering-hint" id="suggestTotals">Total approx. route (straight-line): ${kmText(r.before.totalKm)} now → ${kmText(r.after.totalKm)} suggested.</p>
+        ${r.moves.length ? `<div style="max-height:260px; overflow:auto; margin:8px 0;">${moveRows}</div>
+          <button type="button" class="list-action-btn" id="suggestApplyBtn" style="background:var(--leaf); color:#fff; border-color:var(--leaf);">Apply ticked changes</button>
+          <span id="suggestProgress" style="font-size:0.82rem; margin-left:8px;"></span>`
+        : '<p style="font-size:0.9rem;">No changes suggested: the current plan already fits the shop locations (or there is nothing to place).</p>'}
+        ${skipped}`;
+    }
+    document.getElementById('suggestCalcBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('suggestCalcBtn');
+      const days = [...document.querySelectorAll('.suggest-day:checked')].map(x => x.value);
+      if (!days.length) { showToast('Tick at least one visit day.', 'error'); return; }
+      const scope = document.querySelector('input[name="suggestScope"]:checked').value;
+      btn.disabled = true;
+      try {
+        await loadCustomersCache();                    // always plan from the latest saved schedule
+        currentSuggestion = suggestSchedule(customersCache, { days, scope });
+        renderSuggestion(currentSuggestion);
+      } catch (err) { showToast('Could not calculate: ' + err.message, 'error'); }
+      finally { btn.disabled = false; }
+    });
+    suggestResult.addEventListener('click', async (e) => {
+      const btn = e.target.closest('#suggestApplyBtn');
+      if (!btn || !currentSuggestion) return;
+      const chosen = [...suggestResult.querySelectorAll('.suggest-move:checked')].map(x => currentSuggestion.moves[Number(x.dataset.i)]);
+      if (!chosen.length) { showToast('Nothing is ticked.', 'error'); return; }
+      if (!confirm(`Change the visit day of ${chosen.length} shop${chosen.length === 1 ? '' : 's'}? This takes effect from today and is saved in the schedule history.`)) return;
+      btn.disabled = true;
+      const prog = document.getElementById('suggestProgress');
+      const res = await applySuggestions(chosen, {
+        setDay: (id, to, from) => setCustomerVisitDay(id, to, { uid: user.uid, email: user.email, expectedDay: from }),
+        onProgress: (d, t) => { prog.textContent = `${d} of ${t}...`; },
+      });
+      await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
+      currentSuggestion = null;
+      suggestResult.innerHTML = `<p id="suggestSummary" style="font-size:0.9rem;"><strong>${res.applied.length} changed.</strong>` +
+        (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
+        (res.failed.length ? ` ${res.failed.length} failed: ${res.failed.map(m => esc(m.name) + ' (' + esc(m.error) + ')').join('; ')}.` : '') + '</p>';
+      showToast(`${res.applied.length} visit day${res.applied.length === 1 ? '' : 's'} updated.`, res.failed.length ? 'error' : 'success');
+    });
+
 
     refreshWeeklySchedule();
     window.__refreshWeeklySchedule = refreshWeeklySchedule;

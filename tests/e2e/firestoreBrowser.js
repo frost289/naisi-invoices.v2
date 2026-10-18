@@ -17,6 +17,7 @@ F.hooks.holdQuery = (q) => (q && q.path === 'visits' && (q.cs || []).some(c => c
 const decode = (d) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, v && typeof v === 'object' && '__ts' in v ? F.ts(v.__ts) : v]));
 window.__fake = {
   seed(entries) { F.store.clear(); for (const [p, d] of Object.entries(entries)) F.store.set(p, decode(d)); F.events.onChange(); },
+  put(p, d) { F.store.set(p, decode(d)); F.events.onChange(); },        // test hook: simulates ANOTHER manager changing a record
   get: (p) => { const d = F.store.get(p); return d ? JSON.parse(JSON.stringify(d)) : null; },
   list: (prefix) => [...F.store].filter(([p]) => p.startsWith(prefix + '/')).map(([p, d]) => ({ id: p.slice(prefix.length + 1), ...JSON.parse(JSON.stringify(d)) })),
   failNextCommits(n = 1) { failCommits = n; },

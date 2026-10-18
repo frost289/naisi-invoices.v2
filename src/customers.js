@@ -158,7 +158,7 @@ export const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // transaction that updates the customer AND appends a dated history entry (scheduleChanges) in the same commit;
 // the rules refuse a schedule change that has no matching history entry, and refuse any edit/delete of an
 // entry. Nothing here touches a customer's past orders, visits or invoices.
-async function applyScheduleChange(id, { kind, wantActive, wantDay, uid, email }) {
+async function applyScheduleChange(id, { kind, wantActive, wantDay, uid, email, expectedDay }) {
   const customerRef = doc(db, 'customers', id);
   const changeRef = doc(collection(db, 'scheduleChanges'));      // id chosen once, outside the (re-runnable) callback
   return await runTransaction(db, async (tx) => {
@@ -166,6 +166,8 @@ async function applyScheduleChange(id, { kind, wantActive, wantDay, uid, email }
     if (!snap.exists()) throw new Error('That customer no longer exists.');
     const c = snap.data();
     if (c.mergeLock) throw makeError('This customer is being merged right now and cannot be changed. Finish or cancel the merge first.', { code: 'customer-merging' });
+    // expectedDay (optional): the day the caller saw. If someone changed it meanwhile nothing is written (used by the distance planner).
+    if (expectedDay !== undefined && (c.assignedDay ?? null) !== (expectedDay ?? null)) return { stale: true, current: c.assignedDay ?? null };
     const active = wantActive === undefined ? c.active !== false : wantActive;
     const day = wantDay === undefined ? (c.assignedDay ?? null) : wantDay;
     if (kind === 'reactivate' && c.active !== false) return { unchanged: true };     // already active: never clears its day
@@ -194,9 +196,9 @@ export async function reactivateCustomer(id, { uid, email }) {
 }
 
 // day is one of 'Mon'..'Sat', or null to take the customer off the schedule (awaiting scheduling).
-export async function setCustomerVisitDay(id, day, { uid, email }) {
+export async function setCustomerVisitDay(id, day, { uid, email, expectedDay }) {
   if (day && !VISIT_DAYS.includes(day)) throw new Error('Visit day must be Monday to Saturday.');
-  return applyScheduleChange(id, { kind: 'schedule', wantActive: undefined, wantDay: day || null, uid, email });
+  return applyScheduleChange(id, { kind: 'schedule', wantActive: undefined, wantDay: day || null, uid, email, expectedDay });
 }
 
 export async function updateCustomer(id, { name, phone, location, lat, lng }) {
