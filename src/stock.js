@@ -6,6 +6,8 @@ import {
 } from 'firebase/firestore';
 import { wholeNumber } from './numbers.js';
 import { makeError, orderItemsKey, orderRevisionKey } from './orderRevision.js';
+import { reviewOrderPrices } from './orderPriceReview.js';
+export { reviewOrderPrices, orderPriceReviewText } from './orderPriceReview.js';
 
 const PAGE_SIZE = 25;
 
@@ -114,7 +116,7 @@ async function readProducts(tx, productIds) {
 }
 
 // sign: -1 = stock goes out (approval), +1 = stock comes back (cancel).
-function writeLineMovements(tx, products, groups, { sign, type, order, uid, email, reasonFor = () => '' }) {
+function writeLineMovements(tx, products, groups, { sign, type, order, uid, email, reasonFor = () => '', audit = {} }) {
   for (const [productId, lines] of groups) {
     const entry = products.get(productId);
     if (!entry || !entry.snap.exists()) continue; // product was deleted since the order was placed — skip
@@ -129,6 +131,7 @@ function writeLineMovements(tx, products, groups, { sign, type, order, uid, emai
         type, delta: sign * line.qty, previousStock, newStock: running,
         reason: reasonFor(running), orderId: order.id, orderNo: order.orderNo || null,
         createdBy: uid, createdByEmail: email, createdAt: serverTimestamp(),
+        ...audit,
       });
     }
     tx.update(entry.ref, { stockOnHand: running, updatedAt: serverTimestamp() });
@@ -148,7 +151,7 @@ function writeLineMovements(tx, products, groups, { sign, type, order, uid, emai
 //
 // allowNegativeStock is a manager-only escape hatch (enforced in the
 // UI layer, not here) for approving anyway and reconciling stock later.
-export async function approveOrderWithStock(order, { uid, email, allowNegativeStock = false }) {
+export async function approveOrderWithStock(order, { uid, email, allowNegativeStock = false, priceAcknowledgement = null }) {
   await runTransaction(db, async (tx) => {
     const orderRef = doc(db, 'orders', order.id);
     const orderSnap = await tx.get(orderRef);
@@ -168,6 +171,11 @@ export async function approveOrderWithStock(order, { uid, email, allowNegativeSt
     const products = await readProducts(tx, [...groups.keys()]);
     for (const [pid, lines] of groups) {
       if (!products.get(pid).snap.exists()) throw makeError(`A product on this order no longer exists (${[...new Set(lines.map(l => l.desc))].join(', ')}). Edit the order before approving.`, { code: 'unknown-product', productId: pid });
+    }
+
+    const priceReview = reviewOrderPrices(current.items, [...products].map(([id, entry]) => ({ ...entry.snap.data(), id })));
+    if (priceReview.differences.length && priceAcknowledgement?.reviewKey !== priceReview.key) {
+      throw makeError('This order has prices that differ from the current catalogue. Review and acknowledge the listed prices before approving.', { code: 'price-acknowledgement-required', priceReview });
     }
 
     if (!allowNegativeStock) {
@@ -194,6 +202,12 @@ export async function approveOrderWithStock(order, { uid, email, allowNegativeSt
     writeLineMovements(tx, products, groups, {
       sign: -1, type: 'order-approved', order: { id: order.id, orderNo: current.orderNo }, uid, email,
       reasonFor: (newStock) => (allowNegativeStock && newStock < 0 ? 'Manager override — approved despite insufficient stock' : ''),
+      // Existing append-only manager stock ledger accepts this audit without
+      // expanding the tightly allowlisted order-update fields in the rules.
+      audit: priceReview.differences.length ? {
+        priceAcknowledgedBy: uid, priceAcknowledgedByEmail: email,
+        priceAcknowledgedAt: serverTimestamp(), priceDifferences: priceReview.differences,
+      } : {},
     });
   });
 }

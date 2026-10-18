@@ -56,5 +56,5 @@ export function planMigration({ invoices = [], orders = [], invoiceNumbers = [],
   // BLOCKED: RC5 cannot process an open order. REVIEW: something needs a person. CLEAN: nothing found. (Never "clean" while a record cannot be processed.)
   const blocked = report.some(r => (r.type === 'INVALID_LINES' || r.type === 'UNKNOWN_PRODUCT') && r.open);
   const assessment = blocked ? 'BLOCKED' : (missing.length ? 'INCOMPLETE' : (report.length ? 'REVIEW' : 'CLEAN'));
-  return { actions, report, assessment, missingInputs: missing };
+  return { actions, report, assessment, missingInputs: missing, notCoveredChecks: ['stock ledger and per-product cancellation restoration', 'customers and merge locks', 'schedule consistency against customer history (only history-start presence is checked here)'] };
 }

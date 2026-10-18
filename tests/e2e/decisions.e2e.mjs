@@ -430,6 +430,56 @@ try {
     }
     return 'manager and rep: plain text only, flagged, excluded from totals';
   });
+  await R.check('E55', 'RC6.1 manager sees differing/missing catalogue prices; cancelling acknowledgement writes nothing; accepted approval records actor/time/prices and deducts once', async () => {
+    const priceOrder = (id, price, productId = 'pPrice') => ({ orderNo: `ORD-PRICE-${id}`, status: 'Submitted', customerId: 'c1', customerName: 'Alpha Shop', items: [{ qty: 2, desc: `Price ${id}`, price, total: 2 * price, productId }], grandTotal: 2 * price, createdBy: 'u_rep1', createdByEmail: 'rep1@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T08:00:00Z') } });
+    await fresh({ extra: {
+      'products/pPrice': { productName: 'Price product', packLabel: 'Pack', price: 100, stockOnHand: 10 },
+      'products/pNoPrice': { productName: 'No price product', packLabel: 'Pack', stockOnHand: 10 },
+      'orders/priceLow': priceOrder('low', 75),
+      'orders/priceHigh': priceOrder('high', 125),
+      'orders/priceMissing': priceOrder('missing', 50, 'pNoPrice'),
+      'orders/priceEqual': priceOrder('equal', 100),
+    } });
+    const acknowledgements = [];
+    let acceptPrices = false;
+    page.removeAllListeners('dialog');
+    page.on('dialog', async d => {
+      if (/I acknowledge these differences/.test(d.message())) {
+        acknowledgements.push(d.message());
+        if (acceptPrices) await d.accept(); else await d.dismiss();
+      } else await d.accept();
+    });
+    await login('mgr@naisi.test'); await nav('navOrdersBtn'); await page.selectOption('#orderStatusFilter', 'Submitted');
+    const row = id => `#orderListBody tr[data-id="${id}"]`;
+    await page.waitForSelector(row('priceLow'));
+    expect(/MWK 75.00.*MWK 100.00/s.test(await page.locator(row('priceLow')).innerText()), 'lower price warning not visible in manager list');
+    expect(/no valid catalogue price.*comparison skipped/i.test(await page.locator(row('priceMissing')).innerText()), 'missing catalogue note not visible');
+    eq(await page.locator(`${row('priceEqual')} .order-price-note`).count(), 0, 'equal price should have no warning');
+    await page.click(`${row('priceLow')} [data-action="approve"]`);
+    expect(/MWK 75.00.*MWK 100.00/s.test(await page.locator('#opPriceReview').innerText()), 'preview lacks both prices');
+    await page.click('#opConfirmBtn'); await toast(/Approval cancelled/);
+    eq([(await doc('orders/priceLow')).status, (await doc('products/pPrice')).stockOnHand], ['Submitted', 10], 'cancelled acknowledgement must write nothing');
+    acceptPrices = true;
+    await page.click('#opConfirmBtn'); await page.waitForSelector('#opPostApproveActions', { state: 'visible' });
+    const audit = (await store('stockMovements')).filter(m => m.orderId === 'priceLow');
+    eq(audit.length, 1, 'one stock movement');
+    eq([audit[0].priceAcknowledgedByEmail, audit[0].priceDifferences[0].orderPrice, audit[0].priceDifferences[0].cataloguePrice], ['mgr@naisi.test', 75, 100], 'price acknowledgement audit');
+    expect(audit[0].priceAcknowledgedBy && audit[0].priceAcknowledgedAt, 'actor/time not recorded');
+    eq([(await doc('products/pPrice')).stockOnHand, (await doc('orders/priceLow')).items[0].price], [8, 75], 'deduct once and preserve submitted price');
+    await page.click('#opDoneBtn');
+    for (const id of ['priceHigh', 'priceMissing', 'priceEqual']) {
+      await page.waitForSelector(row(id));
+      await page.click(`${row(id)} [data-action="approve"]`);
+      await page.click('#opConfirmBtn'); await page.waitForSelector('#opPostApproveActions', { state: 'visible' });
+      await page.click('#opDoneBtn');
+    }
+    eq(acknowledgements.length, 3, 'only lower cancellation, lower acceptance and higher acceptance prompt');
+    expect(/MWK 125.00/.test(acknowledgements[2]), 'higher price missing from acknowledgement');
+    eq((await doc('products/pPrice')).stockOnHand, 4, 'three tracked approvals deduct two each');
+    eq((await doc('products/pNoPrice')).stockOnHand, 8, 'missing price remains approvable');
+    page.removeAllListeners('dialog'); page.on('dialog', d => d.accept());
+    return 'list/modal warnings; explicit cancel/accept; audit; lower/higher/equal/missing; unchanged submitted prices';
+  });
   await R.check('E52', 'No JavaScript errors during the whole run', async () => { eq(errors, [], 'page errors'); });
 } finally {
   fs.writeFileSync(`${OUT}/e2e-decisions-results.json`, JSON.stringify(R.rows, null, 2));

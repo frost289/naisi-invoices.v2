@@ -29,8 +29,8 @@ describe('RC6-P1 scenarios (1-6)', () => {
     expect(v(r)).toBe('NEEDS_REVIEW'); expect(r.orders[0].possibleOrphans).toEqual(['legacy1']);
     expect(r.orders[0].reasons.join(' ')).toMatch(/NOT proof/); expect(r.orders[0].manualSteps.join(' ')).toMatch(/never links or releases/);
   });
-  it('2b. a look-alike with a DIFFERENT total or items is not flagged as an orphan (and the clean attempt stays safe)', () => {
-    expect(v(run([O()], [I('x', { grandTotal: 300, items: [{ ...items[0], qty: 3, total: 300 }] })], []))).toBe('SAFE_TO_RELEASE');
+  it('2b. RC6.1: a look-alike with DIFFERENT total or items is still a possible orphan and needs review', () => {
+    expect(v(run([O()], [I('x', { grandTotal: 300, items: [{ ...items[0], qty: 3, total: 300 }] })], []))).toBe('NEEDS_REVIEW');
   });
   it('3. FAILS ON RC5: a registered number pointing to a missing invoice -> NEEDS_REVIEW (both for ord_ and for a legacy id the order names)', () => {
     expect(v(run([O()], [], [{ id: 'N-9', invoiceId: 'ord_o1' }]))).toBe('NEEDS_REVIEW');
@@ -53,7 +53,7 @@ describe('RC6-P1 scenarios (1-6)', () => {
     }
   });
   it('6. CONTROL: a genuinely clean interrupted attempt (all inputs, post-freeze export, no invoice, no pointer, no registry, no look-alike) -> SAFE_TO_RELEASE with manual steps', () => {
-    const r = run([O(), O({ id: 'o2', status: 'Approved' })], [I('other', { customer: 'Someone Else' })], [{ id: 'N-other', invoiceId: 'other' }]);
+    const r = run([O(), O({ id: 'o2', status: 'Approved' })], [I('other', { customer: 'Someone Else', items: [{ ...items[0], productId: 'unrelated-product' }] })], [{ id: 'N-other', invoiceId: 'other' }]);
     expect(r.orders).toHaveLength(1); expect(v(r)).toBe('SAFE_TO_RELEASE');
     expect(r.orders[0].manualSteps.join(' ')).toMatch(/status = "Approved"/);
   });
@@ -73,7 +73,7 @@ describe('RC6-P1 freeze confirmation', () => {
     const cli = (args) => spawnSync('node', [path.join(root, 'tools/stuck-invoicing.mjs'), ...args], { encoding: 'utf8' });
     const fz = ['--frozen-at', FZ, '--exported-at', EX];
     let r = cli([f.o, f.i, f.n, ...fz]); expect(r.status).toBe(1); expect(r.stdout).toMatch(/SAFE_TO_RELEASE/);
-    r = cli([f.o, f.i, f.n]); expect(r.status).toBe(1); expect(r.stdout).toMatch(/NEEDS_REVIEW/); expect(r.stdout).not.toMatch(/\[SAFE_TO_RELEASE\]/);
+    r = cli([f.o, f.i, f.n]); expect(r.status).toBe(3); expect(r.stdout).toMatch(/NEEDS_REVIEW/); expect(r.stdout).not.toMatch(/\[SAFE_TO_RELEASE\]/);
     r = cli([f.none, f.i, f.n]); expect(r.status).toBe(3);
     r = cli([f.none, f.i, f.n, ...fz]); expect(r.status).toBe(0);
     r = cli([f.o, path.join(d, 'missing.json'), f.n, ...fz]); expect(r.status).toBe(2);

@@ -24,7 +24,7 @@ describe('maintenance freeze rules file', () => {
     for (const [a, b] of [['{', '}'], ['(', ')']]) expect(code.split(a).length).toBe(code.split(b).length);
   });
   it('is referenced by the documentation as the default fallback instead of an older release', () => {
-    const guide = fs.readFileSync(path.join(root, 'docs/RC6-OPERATIONS-PLAN.md'), 'utf8');
+    const guide = fs.readFileSync(path.join(root, 'docs/RC6.1-OPERATIONS-PLAN.md'), 'utf8');
     expect(guide).toMatch(/maintenance-freeze\.rules/);
     expect(guide).not.toMatch(/roll(ing)? back to RC3/i);
     expect(guide).not.toMatch(/released by (the )?RC3 client after/i);
@@ -64,11 +64,11 @@ describe('stuck Invoicing recovery aid (INVOICING_RESUME_ENABLED=false: there is
 describe('RC6 operations plan and report carry the required statements', () => {
   const rd = (f) => fs.readFileSync(path.join(root, f), 'utf8');
   it('plan: both outcomes, the freeze flags, the catalogue input, no deployment on incomplete verification', () => {
-    const plan = rd('docs/RC6-OPERATIONS-PLAN.md');
+    const plan = rd('docs/RC6.1-OPERATIONS-PLAN.md');
     for (const t of ['Outcome A', 'Outcome B', '--frozen-at', '--exported-at', '--products', 'Do not deploy RC6', 'MAN-', 'maintenance-freeze.rules', 'NOT APPROVED FOR PRODUCTION']) expect(plan).toContain(t);
   });
   it('report and guide carry the prominent incomplete-verification statement', () => {
-    for (const f of ['docs/RC6-RELEASE-REPORT.md', 'docs/RC6-DEVELOPER-REVIEW-GUIDE.md']) expect(rd(f)).toContain('REAL FIREBASE VERIFICATION INCOMPLETE');
+    for (const f of ['docs/RC6.1-RELEASE-REPORT.md', 'docs/RC6.1-DEVELOPER-REVIEW-GUIDE.md']) expect(rd(f)).toContain('REAL FIREBASE VERIFICATION INCOMPLETE');
   });
   it('the rules file is the one the RC6 report says is unchanged from RC5', () => {
     const crypto = require_crypto(); expect(crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'rules/firestore.rules'))).digest('hex')).toBe('471a2419253581d9e8fe14b54e7db76009f1b53320e79b977875b0990c0c0e32');
@@ -90,13 +90,13 @@ describe('deployment artifacts agree', () => {
     expect(Array.isArray(j('firestore.indexes.json').indexes)).toBe(true);
     expect(fs.existsSync(path.join(root, 'package-lock.json'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'tests/package-lock.json'))).toBe(true);
-    expect(j('package.json').version).toBe('6.0.0-rc6'); expect(j('package-lock.json').version).toBe('6.0.0-rc6');
+    expect(j('package.json').version).toBe('6.1.0-rc1'); expect(j('package-lock.json').version).toBe('6.1.0-rc1');
   });
 });
 
 describe('build identifier', () => {
-  it('is RC6 in public/build-id.txt, defined by vite.config.js, and shown by showBuildId()', async () => {
-    expect(fs.readFileSync(path.join(root, 'public/build-id.txt'), 'utf8').trim()).toBe('RC6');
+  it('is RC6.1 in public/build-id.txt, defined by vite.config.js, and shown by showBuildId()', async () => {
+    expect(fs.readFileSync(path.join(root, 'public/build-id.txt'), 'utf8').trim()).toBe('RC6.1');
     expect(fs.readFileSync(path.join(root, 'vite.config.js'), 'utf8')).toContain('__BUILD_ID__');
     const { JSDOM } = await import('jsdom'); const dom = new JSDOM('<body></body>');
     expect(bi.showBuildId(dom.window.document).textContent).toBe('Build ' + bi.BUILD_ID);

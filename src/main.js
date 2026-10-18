@@ -43,6 +43,7 @@ import { orderRevisionKey } from './orderRevision.js';
 import { invoiceOrderForBulk } from './invoiceFlow.js';
 import { wholeNumber } from './numbers.js';
 import { validateOrderLines } from './orderLines.js';
+import { reviewOrderPrices, orderPriceReviewText } from './orderPriceReview.js';
 import { showBuildId } from './buildInfo.js';
 import { summarizeExpenses, isMoney } from './money.js';
 import {
@@ -2991,6 +2992,11 @@ async function initApp(user, role) {
   const opNotesWrap = document.getElementById('opNotesWrap');
   const opNotes = document.getElementById('opNotes');
   const opShortageWarning = document.getElementById('opShortageWarning');
+  const opPriceReview = document.createElement('div');
+  opPriceReview.id = 'opPriceReview';
+  opPriceReview.setAttribute('role', 'status');
+  opPriceReview.style.cssText = 'white-space:pre-line; border:1px solid var(--amber); border-radius:8px; padding:10px 14px; margin-top:14px; font-size:0.82rem;';
+  opShortageWarning.insertAdjacentElement('beforebegin', opPriceReview);
   const opMainActions = document.getElementById('opMainActions');
   const opConfirmBtn = document.getElementById('opConfirmBtn');
   const opCancelBtn = document.getElementById('opCancelBtn');
@@ -3033,6 +3039,8 @@ async function initApp(user, role) {
       </tr>
     `).join('') || `<tr><td colspan="4" style="color:var(--muted);">No items on this order.</td></tr>`;
     opGrandTotal.textContent = mwk(order.grandTotal || 0);
+    opPriceReview.textContent = 'Current catalogue (checked again at approval):\n' + orderPriceReviewText(reviewOrderPrices(items, productsCache));
+    opPriceReview.style.display = isManager ? 'block' : 'none';
 
     if (order.notes && order.notes.trim()) {
       opNotes.textContent = order.notes;
@@ -3066,6 +3074,30 @@ async function initApp(user, role) {
     opMainActions.style.display = 'flex';
     opOverrideBtn.style.display = 'none';
     opPostApproveActions.style.display = 'none';
+  }
+
+  // Every approval path, including bulk and stock override, uses the same
+  // transaction warning. Confirmed prices are checked again inside that
+  // transaction, so a changed catalogue cannot reuse an old acknowledgement.
+  async function approveWithPriceReview(order, allowNegativeStock = false) {
+    let priceAcknowledgement = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock, priceAcknowledgement });
+      } catch (err) {
+        if (err.code !== 'price-acknowledgement-required') throw err;
+        const text = orderPriceReviewText(err.priceReview);
+        if (opCurrentOrder?.id === order.id) {
+          opPriceReview.textContent = text;
+          opPriceReview.style.display = 'block';
+        }
+        if (!confirm(`Order ${order.orderNo || order.id}\n\n${text}\n\nI acknowledge these differences and approve at the ORDER prices. Continue?`)) {
+          throw new Error('Approval cancelled. Price differences were not acknowledged; no stock was deducted.');
+        }
+        priceAcknowledgement = { reviewKey: err.priceReview.key };
+      }
+    }
+    throw new Error('Catalogue prices keep changing. Refresh and review this order before approving.');
   }
 
   opCloseBtn.addEventListener('click', closeOrderPreviewModal);
@@ -3170,6 +3202,7 @@ async function initApp(user, role) {
       const tr = document.createElement('tr');
       tr.dataset.id = o.id;
       const itemsSummary = (o.items || []).map(it => `${it.qty}× ${it.desc}`).join(', ') || '—';
+      const priceReview = isManager ? reviewOrderPrices(o.items, productsCache) : null;
       const checkboxCell = isManager
         ? `<td>${(o.status === 'Submitted' || o.status === 'Approved' || o.status === 'Invoicing') ? `<input type="checkbox" class="bulk-approve-checkbox" data-id="${esc(o.id)}" ${esc(selectedOrderIds.has(o.id) ? 'checked' : '')}>` : ''}</td>`
         : '';
@@ -3203,6 +3236,13 @@ async function initApp(user, role) {
       }
       // Reps: no actions — only managers change order status now.
       tr.innerHTML = baseCells + `<td>${actions}</td>`;
+      if (priceReview && (priceReview.differences.length || priceReview.missingPrices.length)) {
+        const priceNote = document.createElement('div');
+        priceNote.className = 'order-price-note';
+        priceNote.style.cssText = 'white-space:pre-line; font-size:0.75rem; color:#7a5210; margin-top:5px;';
+        priceNote.textContent = orderPriceReviewText(priceReview);
+        tr.querySelector('.inv-products-cell').appendChild(priceNote);
+      }
       orderListBody.appendChild(tr);
     });
   }
@@ -3272,7 +3312,7 @@ async function initApp(user, role) {
       // items changed since this list was loaded.
       async function approveOne(order, allowNegativeStock) {
         try {
-          await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock });
+          await approveWithPriceReview(order, allowNegativeStock);
           return { state: 'done', text: allowNegativeStock ? 'Approved with stock override' : 'Approved · stock deducted' };
         } catch (err) {
           if (err.isStockShortage) {
@@ -3378,14 +3418,14 @@ async function initApp(user, role) {
           // its own transaction — not just against this possibly-stale
           // shortages array). The modal catches that and offers the
           // override button below instead of a dead-end error toast.
-          await approveOrderWithStock(order, { uid: user.uid, email: user.email });
+          await approveWithPriceReview(order);
           showToast(`Order ${order.orderNo} approved.`, 'success');
           await resetAndLoadOrders();
           await loadProductsCache();
           return { approved: true };
         },
         onApproveWithOverride: async () => {
-          await approveOrderWithStock(order, { uid: user.uid, email: user.email, allowNegativeStock: true });
+          await approveWithPriceReview(order, true);
           showToast(`Order ${order.orderNo} approved (stock override).`, 'success');
           await resetAndLoadOrders();
           await loadProductsCache();
