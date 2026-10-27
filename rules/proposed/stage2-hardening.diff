@@ -1,0 +1,45 @@
+--- stage1.rules	2026-10-16 04:50:19.751360966 +0200
++++ stage2.rules	2026-10-16 04:50:39.711204296 +0200
+@@ -64,7 +64,10 @@
+       allow create: if (isManager() || isSubmitter()) &&
+         validPin(request.resource.data.lat, request.resource.data.lng);
+       // Edits may not remove or invalidate an existing pin.
+-      allow update: if (isManager() || isSubmitter()) &&
++      // Stage 2: only a manager may set or change the weekly visit day (a rep still edits everything else).
++      allow update: if (isManager() ||
++          (isSubmitter() && !request.resource.data.diff(resource.data).affectedKeys()
++            .hasAny(['assignedDay', 'assignedDayChangedAt']))) &&
+         (!(resource.data.get('lat', null) is number) ||
+           validPin(request.resource.data.get('lat', null), request.resource.data.get('lng', null)));
+       allow delete: if isManager();
+@@ -129,8 +132,29 @@
+     match /visits/{visitId} {
+       // repId must be the caller's own uid so reps cannot log visits (or
+       // inflate success rates) under another rep's name.
++      function noOrderOk(d) {
++        return d.reasonNoOrder in ['Shop still has stock', 'Price too high', 'Stock unavailable',
++            'Shop owner unavailable', 'Shop closed', 'No money today', 'Not interested', 'Other'] &&
++          d.reasonNotes is string && d.reasonNotes.size() <= 500 &&
++          (d.reasonNoOrder != 'Other' || d.reasonNotes.trim().size() >= 3);
++      }
++      function orderOk(d) {
++        return d.orderId is string &&
++          existsAfter(/databases/$(database)/documents/orders/$(d.orderId)) &&
++          getAfter(/databases/$(database)/documents/orders/$(d.orderId)).data.visitId == visitId &&
++          getAfter(/databases/$(database)/documents/orders/$(d.orderId)).data.createdBy == request.auth.uid;
++      }
++      function validRepVisit(d) {
++        return d.repId == request.auth.uid &&
++          d.repEmail == request.auth.token.email &&
++          d.requestId is string &&
++          visitId == 'v_' + request.auth.uid + '_' + d.requestId &&
++          d.createdAt == request.time &&
++          ((d.outcome == 'No Order' && noOrderOk(d)) ||
++           (d.outcome == 'Order Placed' && orderOk(d)));
++      }
+       allow create: if isManager() ||
+-        (isSubmitter() && request.resource.data.repId == request.auth.uid);
++        (isSubmitter() && validRepVisit(request.resource.data));
+       // get: a rep's save first reads the visit at its own fixed id (v_<uid>_<requestId>) to detect
+       // a retry; on a first save that document does not exist (resource == null).
+       allow get: if isManager() ||

@@ -1,0 +1,17 @@
+rules_version = '2';
+// MAINTENANCE FREEZE (RC5). Deploy THIS file instead of rules/firestore.rules to stop every write while keeping the data safe:
+//   - nobody can create, update or delete anything (staff see "permission denied" on save; nothing is half-written because the app's saves are single commits)
+//   - managers can still READ (to check Invoices, stock and orders during the freeze); everybody else can read nothing
+// It is the default fallback instead of rolling back to an older, known-vulnerable release. To resume, deploy rules/firestore.rules again.
+// Roles are read from config/roles exactly as in the main rules (managers by e-mail).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isManager() {
+      return request.auth != null && request.auth.token.email in get(/databases/$(database)/documents/config/roles).data.get('managers', []);
+    }
+    match /{document=**} {
+      allow read: if isManager();
+      allow write: if false;
+    }
+  }
+}

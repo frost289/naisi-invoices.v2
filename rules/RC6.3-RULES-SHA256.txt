@@ -1,0 +1,1 @@
+5792bb9e98eab0fc446a51161d70261c332bc90ff3409007da0eba3bf6eb3534  rules/firestore.rules

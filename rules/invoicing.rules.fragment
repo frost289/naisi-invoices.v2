@@ -1,0 +1,142 @@
+// NOTE 2026-10-16: the REAL rules were supplied and reviewed. This fragment's DAILY VISITS text is SUPERSEDED by
+// docs/RULES-REVIEW.md and rules/proposed/*.diff. Kept only for history. Not the real rules.
+// =====================================================================
+// PROPOSAL ONLY - NOT TESTED, NOT DEPLOYED, NOT MERGED WITH YOUR REAL RULES.
+// The deployed firestore.rules are not in the repository, so this cannot be
+// dropped in as-is. Whoever owns the real rules should merge these conditions
+// into the existing match blocks, then run tests/rules/invoicing.rules.test.js
+// against the merged file in the Firestore emulator.
+//
+// Purpose: make the BACKEND enforce "one invoice per order", so that browser
+// tabs still running the previous version of the app cannot bypass it.
+//
+// Replace isManagerOrSubmitter() etc. with whatever helper your rules already use.
+// =====================================================================
+
+// ---- Invoices ----------------------------------------------------------
+// New-version clients ALWAYS write an `orderId` field (null for stand-alone invoices).
+// The previous version never wrote that field, so requiring its presence blocks the
+// old "addDoc with an automatic id" path.
+function invoiceIsNewShape() {
+  return request.resource.data.keys().hasAll(['orderId', 'invoiceNo', 'items', 'createdBy'])
+      && request.resource.data.createdBy == request.auth.uid;
+}
+function orderInvoiceIdOk(db) {
+  // invoice for an order: deterministic id, and the order must be marked Invoiced to THIS invoice in the same commit
+  let orderPath = /databases/$(db)/documents/orders/$(request.resource.data.orderId);
+  return request.resource.id == 'ord_' + request.resource.data.orderId
+      && getAfter(orderPath).data.status == 'Invoiced'
+      && getAfter(orderPath).data.invoiceId == request.resource.id
+      && getAfter(orderPath).data.invoiceNo == request.resource.data.invoiceNo
+      && get(orderPath).data.status == 'Invoicing';
+}
+// match /invoices/{id} {
+//   allow create: if isManager() && invoiceIsNewShape()
+//                 && (request.resource.data.orderId == null || orderInvoiceIdOk(db));
+//   // `create` on an id that exists is already refused (that is an update), so ord_<id> cannot be created twice.
+// }
+
+// ---- Counter -----------------------------------------------------------
+// match /counters/naisiInvoice {
+//   allow update: if isManager()
+//     && request.resource.data.counter == resource.data.counter + 1
+//     && request.resource.data.prefix == resource.data.prefix;
+//   // In the same commit an invoice must be created (checked from the invoice side above via getAfter on the order).
+// }
+
+// ---- Orders ------------------------------------------------------------
+// Lock:    Approved -> Invoicing  : needs an attempt token and a lease start equal to request.time
+// Resume:  Invoicing -> Invoicing : only after the lease has expired (server time, not the browser's clock)
+// Commit:  Invoicing -> Invoiced  : invoiceId must be 'ord_' + order id, and that invoice must exist after the commit
+// Release: Invoicing -> Approved  : only clears the token/lease fields
+//
+// function lockFieldsOk() {
+//   return request.resource.data.invoicingAttempt is string
+//       && request.resource.data.invoicingLeaseStartedAt == request.time;
+// }
+// match /orders/{orderId} {
+//   allow update: if isManager() && (
+//        // ... your existing branches for other transitions ...
+//        (resource.data.status == 'Approved'  && request.resource.data.status == 'Invoicing' && lockFieldsOk())
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Invoicing' && lockFieldsOk()
+//           && request.time > resource.data.invoicingLeaseStartedAt + duration.value(10, 'm'))   // keep in step with INVOICING_LEASE_MS
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Invoiced'
+//           && request.resource.data.invoiceId == 'ord_' + orderId
+//           && existsAfter(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId))
+//           && !exists(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)))
+//     || (resource.data.status == 'Invoicing' && request.resource.data.status == 'Approved'
+//           && request.resource.data.invoicingAttempt == null)
+//   );
+// }
+// Old clients write status 'Invoiced' with an automatic invoice id (not 'ord_<orderId>'), so the Commit branch refuses them.
+//
+// Note on get()/getAfter(): each counts as a document read toward the rules limit (10 per request,
+// 20 per transaction/batch). The proposal above uses up to 2 per write.
+
+// ---- Products ----------------------------------------------------------
+// The new app writes `unitsPerCase` (a positive integer) on create only when it is set, and on edit only
+// when the manager changed it; clearing the field writes null (updateProduct in src/products.js).
+// If your rules use a field allowlist for products, add:
+//   !('unitsPerCase' in request.resource.data) || request.resource.data.unitsPerCase == null
+//     || (request.resource.data.unitsPerCase is int && request.resource.data.unitsPerCase > 0)
+// and add 'unitsPerCase' to the allowed key list.
+// Receiving stock now writes products (stockOnHand [+ unitsPerCase]) and stockMovements in ONE transaction;
+// if your rules validate the movement against the product with getAfter(), that still holds.
+
+// =====================================================================
+// DAILY VISITS (added with the Today's Visits feature) - PROPOSAL ONLY, UNVERIFIED.
+// Same caveat as above: the real rules are not in the repo. Every item below must be checked
+// against them. Replace isRep()/isManager() with your real helpers.
+// =====================================================================
+//
+// 1. A rep's save is ONE transaction touching three documents:
+//      orderCounters/naisiOrder  (read + write, counter + 1)
+//      orders/o_<uid>_<requestId>   (create)
+//      visits/v_<uid>_<requestId>   (create)
+//    The rules must allow a rep to create an order with a deterministic id (not only addDoc ids),
+//    and to read a visit document that does not exist yet (the transaction reads it to detect a retry).
+//
+// match /visits/{visitId} {
+//   // `resource == null` makes the "does this retry already exist?" read of a missing doc succeed.
+//   allow get: if isManager() || resource == null || resource.data.repId == request.auth.uid;
+//   // list: reps by their own repId (equality filter), managers any. The app queries
+//   //   where repId == uid AND date == 'YYYY-MM-DD'   (rep, Today's Visits)
+//   //   where date >= from AND date <= to, orderBy date (manager report; already used by Summary)
+//   allow list: if isManager() || resource.data.repId == request.auth.uid;
+//   allow create: if isRep() && visitShapeOk() && visitId == 'v_' + request.auth.uid + '_' + request.resource.data.requestId;
+//   allow update, delete: if false;     // visits are an append-only record
+// }
+// function visitShapeOk() {
+//   let d = request.resource.data;
+//   return d.repId == request.auth.uid && d.repEmail == request.auth.token.email
+//     && d.createdAt == request.time
+//     && d.schemaVersion == 2
+//     && d.date is string && d.date.matches('^\\d{4}-\\d{2}-\\d{2}$')     // the rules cannot derive Malawi time from request.time; see docs/DAILY-VISITS.md
+//     && d.outcome in ['Order Placed', 'No Order']
+//     && (d.outcome == 'Order Placed'
+//           ? (d.orderId is string && d.orderNo is string && d.orderValue is number && d.reasonNoOrder == null)
+//           : (d.orderId == null && d.reasonNoOrder in ['Shop still has stock', 'Price too high', 'Stock unavailable',
+//                'Shop owner unavailable', 'Shop closed', 'No money today', 'Not interested', 'Other']
+//              && (d.reasonNoOrder != 'Other' || d.reasonNotes.trim().size() >= 3)))
+//     && d.reasonNotes.size() <= 500;
+// }
+//
+// 2. Visit and order must exist together (the transaction guarantees it for new clients; rules can enforce it
+//    for everyone):   visits create with outcome 'Order Placed'  =>  existsAfter(orders/<orderId>)
+//                     orders create by a rep with a visitId       =>  existsAfter(visits/<visitId>)
+// 3. The order counter: allow a rep to update orderCounters/naisiOrder only to counter + 1.
+// 4. customers: managers write assignedDay (Mon..Sat or null) and assignedDayChangedAt (new field). Reps read customers.
+//    If customers has a field allowlist, add assignedDayChangedAt.
+// 5. config/roles: the manager report reads it (fetchRepEmails) - managers already read it via getUserRole.
+// 6. Orders: new optional field `visitId` on orders created from a visit. Old clients (open tabs) still write
+//    orders (addDoc) and visits (no requestId/schemaVersion) with separate writes; only rules that require the
+//    new shape can stop that.
+//
+// Indexes: none new. rep query = two equality filters (no orderBy); manager query = range + orderBy on the SAME
+// field (date). Confirm in the Firebase console that no composite index prompt appears.
+
+// DAILY VISITS - CORRECTION 2 (UNVERIFIED proposal, not the real rules):
+// submitOrderWithVisit now also READS orders/o_<uid>_<requestId> inside the transaction (it does
+// not exist on a first save; on a retry it is compared with the incoming details). The rep must be
+// allowed `get` on that path when it does not exist (resource == null) and when createdBy == uid.
+// Check this against the real rules; if `get` on a missing order is denied the whole transaction fails.

@@ -1,0 +1,16 @@
+import { serveDist, newBrowser } from './harness.mjs';
+import { seedData, THU } from './seed.mjs';
+const { server, url } = await serveDist();
+const { browser, context } = await newBrowser();
+const page = await context.newPage();
+page.on('console', m => { if (m.type() === 'error') console.log('console.error:', m.text().slice(0, 200)); });
+page.on('pageerror', e => console.log('pageerror:', e.message.slice(0, 300)));
+await page.clock.setFixedTime(new Date(THU));
+await page.goto(url);
+await page.evaluate((d) => window.__fake.seed(d), seedData());
+await page.reload();
+await page.fill('#loginEmail', 'rep1@naisi.test'); await page.fill('#loginPassword', 'pw'); await page.click('#loginBtn');
+await page.waitForSelector('#todaysRouteList .todays-route-item', { timeout: 8000 }).catch(e => console.log('wait failed', e.message.slice(0, 100)));
+console.log(await page.locator('#todaysRouteCard').innerText().catch(() => 'no card'));
+await page.screenshot({ path: '/tmp/claude-0/-home-claude/c5f33a2c-f7a8-5446-99c0-ef924d116ab5/scratchpad/smoke.png' });
+await browser.close(); server.close();

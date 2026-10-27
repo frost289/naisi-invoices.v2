@@ -1,0 +1,23 @@
+{
+  "name": "naisi-invoices-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config vitest.config.mjs --configLoader native",
+    "test:e2e": "vite build --config e2e/vite.config.mjs --configLoader native && node e2e/visits.e2e.mjs && node e2e/decisions.e2e.mjs && node e2e/rc63.e2e.mjs",
+    "e2e:browser-setup": "playwright install chromium",
+    "test:rules": "firebase emulators:exec --config ../firebase.emulators.json --only firestore --project naisi-rules-test \"vitest run --config vitest.rules.config.mjs --configLoader native --reporter verbose\"",
+    "test:all": "npm test && npm run test:rules && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "firebase": "^13.0.0",
+    "firebase-tools": "^14.0.0",
+    "jsdom": "^25.0.1",
+    "playwright": "^1.56.0",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=24.12.0"
+  }
+}

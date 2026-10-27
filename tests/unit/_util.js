@@ -1,0 +1,12 @@
+import * as F from '../helpers/fakeFirestore.js';
+export { F };
+export const user = { uid: 'u1', email: 'm@naisi' };
+export const line = (qty, productId = 'p1', desc = 'Amanda 100g') => ({ qty, desc, price: 100, total: qty * 100, productId });
+export const seedProduct = (stockOnHand = 100, id = 'p1') => F.store.set('products/' + id, { productName: 'Amanda', packLabel: 'Strip', stockOnHand });
+export const seedOrder = (id, status, over = {}) => F.store.set('orders/' + id, { orderNo: 'ORD-' + id, status, customerName: 'Shop', items: [line(2)], invoiceId: null, invoiceNo: null, ...over });
+export const withId = (id) => ({ id, ...F.store.get('orders/' + id) });
+export const ledger = () => [...F.store].filter(([p]) => p.startsWith('stockMovements/')).map(([, d]) => d);
+export const invoices = () => [...F.store].filter(([p]) => p.startsWith('invoices/')).map(([p, d]) => ({ path: p, ...d }));
+export const seedCounter = (n = 370) => F.store.set('counters/naisiInvoice', { prefix: 'NF-INV', counter: n });
+export const meta = (items = [line(2)]) => ({ date: '2026-10-15', customer: 'Shop', items });
+export const isInvoiceWrite = (writes) => writes.some(([, ref]) => ref.path.startsWith('invoices/'));
