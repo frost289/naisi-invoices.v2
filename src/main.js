@@ -2963,7 +2963,7 @@ async function initApp(user, role) {
       fetch: () => (manager ? fetchAllExpensesPage(cursor) : fetchMyExpensesPage(user.uid, cursor)),
       apply: (result) => {
         // RC6.3: a rep's list never holds Fuel / Stock Purchase (the query and rules exclude them; filtered again here).
-        loadedExpenses = mergeById(loadedExpenses, manager ? result.items : result.items.filter(repMaySeeExpense));
+        loadedExpenses = mergeById(loadedExpenses, manager ? result.items : result.items.filter(e => repMaySeeExpense(e)));
         expensesCursor = result.lastDoc; expensesHasMore = result.hasMore;
         applyExpenseSearchAndRender();
         loadMoreExpensesBtn.style.display = expensesHasMore ? 'block' : 'none';
