@@ -330,6 +330,24 @@ service cloud.firestore {
          (before != null && after == null));
     }
 
+    // RC6.3 location-capture attribution (first capture only). All three stamp fields together, only with the caller's own
+    // identity and the request time, only with a valid pin; on update only when the customer had no valid pin and no stamp
+    // before. Once written they can never be changed or removed, so a later re-pin cannot move the credit to another week.
+    function firstPinStampValid(d) {
+      return d.keys().hasAll(['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt']) &&
+        d.firstPinnedBy == request.auth.uid && d.firstPinnedByEmail == request.auth.token.email &&
+        d.firstPinnedAt == request.time && validPin(d.get('lat', null), d.get('lng', null));
+    }
+    function firstPinCreateOk(d) {
+      return !d.keys().hasAny(['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt']) || firstPinStampValid(d);
+    }
+    function firstPinUpdateOk() {
+      let b = resource.data;
+      return !request.resource.data.diff(b).affectedKeys().hasAny(['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt']) ||
+        (!b.keys().hasAny(['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt']) &&
+         !validPin(b.get('lat', null), b.get('lng', null)) &&
+         firstPinStampValid(request.resource.data));
+    }
     match /customers/{customerId} {
       allow read: if isStaff();
       // Every new customer must carry a pinned location (lat/lng) and starts UNSCHEDULED: active, no visit day,
@@ -338,7 +356,8 @@ service cloud.firestore {
         validPin(request.resource.data.lat, request.resource.data.lng) &&
         request.resource.data.get('active', true) == true &&
         request.resource.data.get('assignedDay', null) == null &&
-        !request.resource.data.keys().hasAny(['assignedDayChangedAt', 'lastScheduleChangeId', 'mergeLock']);
+        !request.resource.data.keys().hasAny(['assignedDayChangedAt', 'lastScheduleChangeId', 'mergeLock']) &&
+        firstPinCreateOk(request.resource.data);
       // Edits may not remove or invalidate an existing pin. Only a manager may touch the schedule fields (with their
       // history entry) or the merge lock; removing such a field counts as touching it.
       allow update: if (
@@ -346,6 +365,7 @@ service cloud.firestore {
             (!scheduleKeysTouched() || scheduleChangeOk(customerId)) &&
             (!mergeKeysTouched() || mergeLockChangeOk(customerId))) ||
           (isSubmitter() && !scheduleKeysTouched() && !mergeKeysTouched())) &&
+        firstPinUpdateOk() &&
         (!(resource.data.get('lat', null) is number) ||
           validPin(request.resource.data.get('lat', null), request.resource.data.get('lng', null)));
       // A customer is never deleted on its own (deactivate instead). The ONLY delete is the last step of a merge:
@@ -408,16 +428,43 @@ service cloud.firestore {
     // RC5 finding A: an expense amount is a finite number, above 0 and at most 1000000000000. Anything else (a string, markup, NaN, Infinity,
     // a negative, a missing amount) is refused for EVERY role, on create and on update, so saved markup can never reach a manager's screen.
     function expenseAmountOk(d) { return d.get('amount', null) is number && d.amount > 0 && d.amount <= 1000000000000; }
+    // RC6.4: expanded expense categories and optional structured fields for better expense tracking.
+    // Rep (submitter) categories: Transport, Meals, Other, Internet, Packaging, Supplies
+    // Deliverer categories: Transport, Meals, Fuel, Other, Internet, Maintenance, Packaging, Supplies, Bank
+    // Manager: all categories (includes legacy Stock records for backward compatibility)
+    // Reps cannot create, read or edit Fuel, Maintenance, Bank records (including older ones).
+    // A list query by a rep must filter category (src/expenses.js; composite index createdBy, category, date).
+    function repExpenseCategoryOk(d) {
+      return d.get('category', null) in ['Transport', 'Meals', 'Other'];
+    }
+    function delivererExpenseCategoryOk(d) {
+      return d.get('category', null) in ['Transport', 'Meals', 'Fuel', 'Other'];
+    }
+    function ownExpenseRoleOk(d) {
+      return (isSubmitter() && !isManager() && repExpenseCategoryOk(d)) ||
+             (isDeliverer() && !isSubmitter() && delivererExpenseCategoryOk(d)) ||
+             (isManager());
+    }
+    // Optional expense fields are allowed but not required
+    function expenseFieldsOk(d) {
+      let allowed = ['date', 'category', 'amount', 'notes', 'createdBy', 'createdByEmail', 'createdAt', 'updatedAt',
+                     'payee', 'paidBy', 'paymentMethod', 'receiptReference', 'businessPurpose',
+                     'vehicleId', 'litres', 'route'];
+      return d.keys().hasAll(['date', 'category', 'amount', 'createdBy', 'createdByEmail']) &&
+             d.keys().hasOnly(allowed);
+    }
     match /expenses/{expenseId} {
-      // Anyone creating an expense must stamp it with their own uid.
-      allow create: if expenseAmountOk(request.resource.data) && (isManager() ||
-        ((isSubmitter() || isDeliverer()) &&
+      // Anyone creating an expense must stamp it with their own uid and valid fields.
+      allow create: if expenseAmountOk(request.resource.data) && expenseFieldsOk(request.resource.data) &&
+        (isManager() ||
+        (ownExpenseRoleOk(request.resource.data) &&
           request.resource.data.createdBy == request.auth.uid));
       allow read: if isManager() ||
-        ((isSubmitter() || isDeliverer()) && ownsCreatedBy());
-      // Owners can edit their own expense but not re-assign it to someone else.
-      allow update: if expenseAmountOk(request.resource.data) && (isManager() ||
-        ((isSubmitter() || isDeliverer()) && ownsCreatedBy() &&
+        (ownsCreatedBy() && ownExpenseRoleOk(resource.data));
+      // Owners can edit their own expense but not re-assign it to someone else, and cannot move it out of their allowed categories.
+      allow update: if expenseAmountOk(request.resource.data) && expenseFieldsOk(request.resource.data) &&
+        (isManager() ||
+        (ownsCreatedBy() && ownExpenseRoleOk(resource.data) && ownExpenseRoleOk(request.resource.data) &&
           request.resource.data.createdBy == resource.data.createdBy));
       allow delete: if isManager();
     }

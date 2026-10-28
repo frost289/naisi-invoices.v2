@@ -79,6 +79,8 @@ import { suggestSchedule, applySuggestions, DEFAULT_DAYS } from './scheduleSugge
 import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from './scheduleImport.js';
 import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
+import { buildWeekBoard, weekStartOf } from './weekBoard.js';
+import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense } from './expenseCategories.js';
 
 initOfflineBanner();
 
@@ -192,6 +194,9 @@ document.getElementById('deliveryLogoutBtn').addEventListener('click', handleLog
 
 let appInitialized = false;
 
+// RC6.2 owner decision: no Walk-in Invoice tab for now (see initApp). Flip to true to restore it.
+const WALK_IN_INVOICE_TAB = false;
+
 async function initApp(user, role) {
   if (appInitialized) { hideAppOverlay(); return; }
   appInitialized = true;
@@ -258,6 +263,7 @@ async function initApp(user, role) {
     performance: document.getElementById('performanceView'),
     summary: document.getElementById('summaryView'),
     deliveries: document.getElementById('deliveriesView'),
+    schedule: document.getElementById('scheduleView'),
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
   };
@@ -271,19 +277,31 @@ async function initApp(user, role) {
     performance: document.getElementById('navPerformanceBtn'),
     summary: document.getElementById('navSummaryBtn'),
     deliveries: document.getElementById('navDeliveriesBtn'),
+    schedule: document.getElementById('navScheduleBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
   };
 
-  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries'];
+  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule'];
   const submitterOnlyNav = ['logvisit', 'myvisits'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
   submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
 
-  // Managers get a "Walk-in Invoice" tab (decision 4: stand-alone invoices from the same number sequence). Invoices for an
-  // order are still reached from the Orders list, and editing from the Invoices list. Reps never see this tab.
-  navBtns.form.style.display = isManager ? 'inline-flex' : 'none';
+  // Walk-in (stand-alone) invoices (decision 4) are switched OFF in RC6.2 at the owner's request: every sale goes through a
+  // rep or manager-entered order. The form view itself stays, because invoicing an order and editing an invoice still use it
+  // (reached from the Orders and Invoices lists). Set WALK_IN_INVOICE_TAB to true to bring the tab back; nothing else changes.
+  navBtns.form.style.display = (isManager && WALK_IN_INVOICE_TAB) ? 'inline-flex' : 'none';
+  // With the tab off, the invoice-numbering box (next number, manager change with reason, change history) moves to the
+  // Invoices tab so a manager can still reach it.
+  if (!WALK_IN_INVOICE_TAB) {
+    const numberingCard = document.createElement('div');
+    numberingCard.className = 'card';
+    numberingCard.id = 'invoiceNumberingCard';
+    numberingCard.innerHTML = '<h2><span class="dot"></span>Invoice numbering</h2>';
+    numberingCard.appendChild(document.getElementById('numberingBox'));
+    document.getElementById('invoicesView').appendChild(numberingCard);
+  }
   navBtns.form.textContent = 'Walk-in Invoice';
 
   navBtns.orders.textContent = isManager ? 'Orders' : 'My Orders';
@@ -299,6 +317,7 @@ async function initApp(user, role) {
     performance: loadPerformanceView,
     summary: loadSummaryView,
     deliveries: loadDeliveriesView,
+    schedule: async () => { if (window.__loadWeekBoard) await window.__loadWeekBoard(); },
     myvisits: resetAndLoadMyVisits,
     logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
   };
@@ -502,7 +521,8 @@ async function initApp(user, role) {
   // label: shown in the modal title. lat/lng: existing coordinates, if
   // any (null for a brand-new customer). onSave: async (latLng) => {}
   // called with the chosen {lat, lng} when the manager/rep hits Save.
-  function openLocationPicker({ label, lat, lng, onSave }) {
+  // autoLocate (RC6.2): start straight away from the phone's GPS position - used when a rep is standing at the shop.
+  function openLocationPicker({ label, lat, lng, onSave, autoLocate = false }) {
     lpCustomerLabel.textContent = label || 'Customer';
     lpOnSave = onSave;
     lpErrorNote.style.display = 'none';
@@ -536,6 +556,7 @@ async function initApp(user, role) {
     // Leaflet can't measure a hidden container's size, so nudge it once
     // the modal is actually visible on screen.
     setTimeout(() => { if (lpMap) lpMap.invalidateSize(); }, 100);
+    if (autoLocate) setTimeout(lpLocateMe, 150);
   }
 
   function closeLocationPicker() {
@@ -546,7 +567,8 @@ async function initApp(user, role) {
   lpCloseBtn.addEventListener('click', closeLocationPicker);
   lpCancelBtn.addEventListener('click', closeLocationPicker);
 
-  lpUseMyLocationBtn.addEventListener('click', () => {
+  lpUseMyLocationBtn.addEventListener('click', () => lpLocateMe());
+  function lpLocateMe() {
     if (!navigator.geolocation) { showToast('Your browser does not support location services.', 'error'); return; }
     setButtonLoading(lpUseMyLocationBtn, 'Locating…');
     navigator.geolocation.getCurrentPosition(
@@ -557,11 +579,11 @@ async function initApp(user, role) {
       },
       (err) => {
         clearButtonLoading(lpUseMyLocationBtn);
-        showToast('Could not get your current location: ' + err.message, 'error');
+        showToast('Could not get your current location: ' + err.message + ' You can tap the map instead.', 'error');
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
-  });
+  }
 
   lpSaveBtn.addEventListener('click', async () => {
     if (!lpCurrentLatLng) {
@@ -882,7 +904,7 @@ async function initApp(user, role) {
       try {
         const lat = custLatInput.value ? parseFloat(custLatInput.value) : null;
         const lng = custLngInput.value ? parseFloat(custLngInput.value) : null;
-        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
+        const newId = await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, email: user.email });
         custCustomerIdInput.value = newId;
         customerSaveNote.textContent = 'Saved to customer list. Awaiting scheduling: choose a visit day under Customers.';
         showToast('Customer saved. Awaiting scheduling.', 'success');
@@ -962,7 +984,7 @@ async function initApp(user, role) {
     try {
       const lat = newCustLat.value ? parseFloat(newCustLat.value) : null;
       const lng = newCustLng.value ? parseFloat(newCustLng.value) : null;
-      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid });
+      await addCustomer({ name, phone: phoneResult.value, location: resolvedLocation, lat, lng, uid: user.uid, email: user.email });
       newCustName.value = ''; newCustPhone.value = ''; newCustLocation.value = '';
       newCustLat.value = ''; newCustLng.value = ''; newCustPinNote.textContent = '';
       addCustomerNote.textContent = 'Customer added. Awaiting scheduling: a manager chooses the visit day.';
@@ -1040,7 +1062,7 @@ async function initApp(user, role) {
       tr.dataset.id = c.id;
       tr.innerHTML = `
         <td>${esc(c.name)}</td><td>${esc(c.phone ? formatPhoneForDisplay(c.phone) : '')}</td><td>${esc(c.location || '')}</td>
-        <td>${customerDayCellHtml(c)}</td>
+        <td>${c.assignedDay ? esc(VISIT_DAY_FULL_NAMES[c.assignedDay] || c.assignedDay) : `<span style="color:var(--muted);">${esc(c.active !== false ? 'Awaiting day' : '—')}</span>`}</td>
         <td>${customerMapCellHtml(c)}</td>
         <td>${customerStatusCellHtml(c)}</td>
         <td>
@@ -1121,7 +1143,7 @@ async function initApp(user, role) {
           <input class="customer-edit-input customer-edit-location" data-field="location" value="${esc(c.location || '')}" autocomplete="off">
           <div class="suggestions-dropdown customer-edit-location-suggestions" style="display:none;"></div>
         </td>
-        <td>${customerDayCellHtml(c)}</td>
+        <td>${c.assignedDay ? esc(VISIT_DAY_FULL_NAMES[c.assignedDay] || c.assignedDay) : `<span style="color:var(--muted);">${esc(c.active !== false ? 'Awaiting day' : '—')}</span>`}</td>
         <td>${customerMapCellHtml(c)}</td>
         <td>${customerStatusCellHtml(c)}</td>
         <td>
@@ -1172,7 +1194,7 @@ async function initApp(user, role) {
         lat: typeof c.lat === 'number' ? c.lat : null,
         lng: typeof c.lng === 'number' ? c.lng : null,
         onSave: async ({ lat, lng }) => {
-          await updateCustomerLocation(id, { lat, lng });
+          await updateCustomerLocation(id, { lat, lng, uid: user.uid, email: user.email });
           const idx = loadedCustomers.findIndex(cc => cc.id === id);
           if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], lat, lng };
           await loadCustomersCache();
@@ -1241,32 +1263,13 @@ async function initApp(user, role) {
     }
   });
 
-  // ============= WEEKLY VISIT SCHEDULE (manager only) =============
+  // ============= WEEKLY SCHEDULE (manager only) — RC6.2 =============
+  // One schedule: the plan (each shop's weekly visit day) and what the reps actually did, day by day, on the
+  // Weekly Schedule tab. Visit days are set ONLY here (the customer table shows them as text), through the same
+  // guarded, dated change as before (setCustomerVisitDay -> scheduleChanges history).
+  document.getElementById('customersDayHint').style.display = isManager ? 'block' : 'none';
   if (isManager) {
-    document.getElementById('weeklyScheduleCard').style.display = 'block';
-    const scheduleDayTabs = document.getElementById('scheduleDayTabs');
-    const scheduleDayList = document.getElementById('scheduleDayList');
     const scheduleDayLabels = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
-    let currentScheduleDay = VISIT_DAYS.includes(malawiWeekday()) ? malawiWeekday() : 'Mon';
-
-    function renderScheduleDayTabs() {
-      scheduleDayTabs.innerHTML = VISIT_DAYS.map(d => `
-        <button type="button" class="list-action-btn schedule-day-tab" data-day="${esc(d)}" style="${esc(d === currentScheduleDay ? 'background:var(--leaf); color:#fff; border-color:var(--leaf);' : '')}">${esc(scheduleDayLabels[d])}</button>
-      `).join('');
-    }
-
-    function renderScheduleDayList() {
-      const customersForDay = customersCache.filter(c => c.active !== false && c.assignedDay === currentScheduleDay);
-      scheduleDayList.innerHTML = customersForDay.length
-        ? `<p style="font-size:0.78rem; color:var(--muted); margin-bottom:8px;">${esc(customersForDay.length)} customer${esc(customersForDay.length === 1 ? '' : 's')} on ${esc(scheduleDayLabels[currentScheduleDay])}</p>` +
-          customersForDay.map(c => `
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line);">
-              <span>${esc(c.name)}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${esc(c.location)}</span>` : ''}</span>
-              ${customerDayCellHtml(c)}
-            </div>
-          `).join('')
-        : `<p style="color:var(--muted); font-size:0.85rem;">No customers assigned to ${esc(scheduleDayLabels[currentScheduleDay])} yet — set a day per customer in the Manage Customers table above.</p>`;
-    }
 
     // Customers with no visit day yet: shown to managers so none is forgotten. They are not on any rep's list and not targets.
     const awaitingBox = document.getElementById('awaitingSchedulingBox');
@@ -1274,10 +1277,11 @@ async function initApp(user, role) {
     function renderAwaitingScheduling() {
       const list = awaitingScheduling(customersCache);
       awaitingBox.style.display = list.length ? 'block' : 'none';
-      document.getElementById('awaitingSchedulingTitle').textContent = `Awaiting scheduling (${list.length})`;
+      document.getElementById('awaitingSchedulingTitle').textContent = `Awaiting a visit day (${list.length})`;
       awaitingList.innerHTML = list.map(c => `
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line);">
-          <span>${esc(c.name)}${c.location ? ` <span style="color:var(--muted); font-size:0.8rem;">— ${esc(c.location)}</span>` : ''}</span>
+        <div class="sched-await-row">
+          <span class="sched-shop">${esc(c.name)}</span>
+          <span class="sched-area">${esc(c.location || '')}${esc(hasPin(c) ? '' : ' · no pin')}</span>
           ${customerDayCellHtml(c)}
         </div>`).join('');
     }
@@ -1297,42 +1301,181 @@ async function initApp(user, role) {
       } catch (err) {
         showToast('Could not set the visit day: ' + err.message, 'error');
       } finally {
-        refreshWeeklySchedule();
+        await refreshWeeklySchedule();
       }
     });
 
-    function refreshWeeklySchedule() {
-      renderScheduleDayTabs();
-      renderScheduleDayList();
-      renderAwaitingScheduling();
+
+    // ---- The week board: plan + activity (RC6.3: reloads after every change; never guesses) ----
+    const schedBoard = document.getElementById('schedBoard');
+    const schedKpis = document.getElementById('schedKpis');
+    const schedWeekLabel = document.getElementById('schedWeekLabel');
+    const schedPlanNote = document.getElementById('schedPlanNote');
+    const schedLoadError = document.getElementById('schedLoadError');
+    const schedRepFilter = document.getElementById('schedRepFilter');
+    const shortDate = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+    const boardState = { weekStart: weekStartOf(malawiDate()), visits: [], index: null, historyFailed: false, visitsFailed: false, customersFailed: false, loaded: false, token: 0, open: new Set() };
+
+    function boardCustomers() {
+      return customersCache.map(c => {
+        const ms = c.firstPinnedAt && typeof c.firstPinnedAt.toMillis === 'function' ? c.firstPinnedAt.toMillis() : null;
+        return ms === null ? c : { ...c, firstPinnedDate: malawiDate(new Date(ms)) };
+      });
+    }
+    const repName = (email) => displayNameForEmail(email) || email || '';
+    function statusText(r) {
+      const n = r.visits.length > 1 ? ` · ${r.visits.length} visits` : '';
+      const who = (schedRepFilter.value === 'all' && r.last) ? ` · ${repName(r.last.repEmail)}` : '';
+      if (r.status === 'order') return `Order ${r.last.orderNo || ''}${typeof r.last.orderValue === 'number' ? ' · ' + mwk(r.last.orderValue) : ''}${n}${who}`;
+      if (r.status === 'noorder') return `No order: ${r.last.reasonNoOrder || ''}${n}${who}`;
+      return { missed: 'Missed', due: 'Due today', planned: 'Planned', uncertain: 'Uncertain: a visit made before a shop merge cannot be matched to one shop. Not counted.' }[r.status];
+    }
+    const statusIcon = { order: '✓', noorder: '✕', missed: '!', due: '•', planned: '○', uncertain: '?' };
+    const unavailableText = {
+      visits: 'Data unavailable: the visits for this week could not be loaded. Nothing is counted for this day.',
+      history: 'History unavailable: there is no reliable record of which shops were planned on this date, so nothing is marked missed and the day is left out of coverage. Visits recorded that day are listed below.',
+      'history-failed': 'History unavailable: the schedule history could not be loaded, so nothing is marked missed and the day is left out of coverage. Visits recorded that day are listed below.',
+    };
+
+    function renderBoard() {
+      const today = malawiDate();
+      const board = buildWeekBoard({ customers: boardCustomers(), visits: boardState.visits, index: boardState.index, historyFailed: boardState.historyFailed, visitsFailed: boardState.visitsFailed, weekStart: boardState.weekStart, today, repFilter: schedRepFilter.value });
+      const t = board.totals;
+      const last = board.dates[board.dates.length - 1];
+      const anyRep = schedRepFilter.value === 'all';
+      schedWeekLabel.textContent = `${shortDate(board.dates[0])} – ${shortDate(last)} ${last.slice(0, 4)}${board.dates.includes(today) ? ' · this week' : ''}`;
+      const kpi = (label, value, sub, tone) => `<div class="sched-kpi ${esc(tone || '')}"><span class="sched-kpi-label">${esc(label)}</span><strong>${esc(value)}</strong><span class="sched-kpi-sub">${esc(sub || '')}</span></div>`;
+      const na = 'unavailable';
+      const measuredNone = t.plannedSoFar === 0 && t.unavailableDays.length > 0;
+      schedKpis.innerHTML = [
+        kpi('Planned so far', t.activityAvailable && !measuredNone ? t.plannedSoFar : '—', t.unavailableDays.length ? `${t.unavailableDays.length} day(s) not measured` : `${t.plannedWeek} in the week`),
+        kpi(anyRep ? 'Visited (any rep)' : 'Visited', t.activityAvailable && !measuredNone ? `${t.visitedSoFar}/${t.plannedSoFar}` : '—', !t.activityAvailable ? na : (t.coveragePct === null ? 'coverage —' : `coverage ${t.coveragePct}%`), t.coveragePct !== null && t.coveragePct < 80 ? 'warn' : (t.coveragePct !== null ? 'good' : '')),
+        kpi('Orders', t.activityAvailable ? t.orders : '—', !t.activityAvailable ? na : (t.orderValue ? mwk(t.orderValue) : ''), t.activityAvailable ? 'good' : ''),
+        kpi('No order', t.activityAvailable ? t.noOrder : '—', !t.activityAvailable ? na : (t.conversionPct === null ? '' : `conversion ${t.conversionPct}%`)),
+        kpi('Missed', t.activityAvailable && !measuredNone ? t.missed : '—', !t.activityAvailable ? na : (t.due ? `${t.due} still due today` : 'past days not visited'), t.activityAvailable && t.missed ? 'bad' : ''),
+        kpi('Extra shops', t.activityAvailable ? t.extraShops : '—', 'visited, not planned'),
+        kpi('No location', board.pins.missing, `${board.pins.capturedThisWeek} captured this week (info only)`, board.pins.missing ? 'warn' : 'good'),
+        kpi('Awaiting a day', board.unscheduled, 'not on any list', board.unscheduled ? 'warn' : ''),
+      ].join('');
+      const notes = [];
+      if (boardState.customersFailed) notes.push('The customer list could not be refreshed; names and the plan for upcoming days may be out of date.');
+      if (boardState.visitsFailed) notes.push('Visits could not be loaded: activity figures are unavailable (not zero). Try again.');
+      if (boardState.historyFailed) notes.push('The schedule history could not be loaded: past days and today are not measured.');
+      else if (t.noHistoryDays.length) notes.push(`No reliable schedule history for ${t.noHistoryDays.join(', ')}: those days are not measured.`);
+      if (t.uncertainVisits) notes.push(`${t.uncertainVisits} visit(s) were made before a shop merge and cannot be matched to one shop; they are not credited to any shop.`);
+      schedLoadError.textContent = notes.join(' ');
+      schedLoadError.style.display = notes.length ? 'block' : 'none';
+      schedPlanNote.textContent = 'Past days and today are measured against the plan that applied on that day (dated schedule history). Upcoming days show the current plan. Moving a shop takes effect from today.' +
+        (anyRep ? ' With "All reps", a shop counts as visited when any rep visited it; choose a rep to see that rep\'s figures (they match Rep Performance for the same dates).' : '');
+
+      schedBoard.innerHTML = board.days.map(d => {
+        const c = d.counts;
+        const pct = c.planned ? Math.round((c.visited / c.planned) * 100) : 0;
+        const isOpen = boardState.open.has(d.date) || (boardState.open.size === 0 && d.phase !== 'past');
+        const stats = d.phase === 'upcoming'
+          ? `${c.planned} shop${c.planned === 1 ? '' : 's'} planned`
+          : d.unavailable === 'visits' ? 'Data unavailable'
+          : d.unavailable ? `History unavailable · ${c.orders} order${c.orders === 1 ? '' : 's'} recorded`
+          : `${c.visited}/${c.planned} visited · ${c.orders} order${c.orders === 1 ? '' : 's'}${c.missed ? ` · ${c.missed} missed` : ''}${c.due ? ` · ${c.due} due` : ''}${c.uncertain ? ` · ${c.uncertain} uncertain` : ''}`;
+        const editable = d.phase !== 'past' && !boardState.customersFailed;
+        return `
+        <details class="sched-day phase-${esc(d.phase)} ${esc(d.unavailable ? 'is-unavailable' : '')}" data-date="${esc(d.date)}" data-unavailable="${esc(d.unavailable || '')}" ${esc(isOpen ? 'open' : '')}>
+          <summary class="sched-day-head">
+            <span class="sched-day-title"><span class="sched-day-name">${esc(scheduleDayLabels[d.weekday])}</span> <span class="sched-day-date">${esc(shortDate(d.date))}</span>${d.phase === 'today' ? '<span class="sched-chip">Today</span>' : ''}</span>
+            <span class="sched-day-stats">${esc(stats)}</span>
+            ${d.phase === 'upcoming' || d.unavailable ? '' : `<span class="sched-bar" aria-hidden="true"><span style="width:${esc(pct)}%"></span></span>`}
+          </summary>
+          ${d.unavailable ? `<p class="sched-unavailable">${esc(unavailableText[d.unavailable])}</p>` : ''}
+          ${d.rows.length ? `<ul class="sched-rows">${d.rows.map(r => `
+            <li class="sched-row st-${esc(r.status)}" data-id="${esc(r.customerId)}">
+              <span class="sched-ico" aria-hidden="true">${esc(statusIcon[r.status])}</span>
+              <span class="sched-row-main">
+                <span class="sched-shop">${esc(r.name)}</span>
+                <span class="sched-area">${esc(r.location || 'No area')}${r.hasPin ? '' : ' · <span class="sched-nopin">no location</span>'}</span>
+                <span class="sched-status">${esc(statusText(r))}</span>
+              </span>
+              ${editable && r.active && r.status !== 'uncertain' ? `<label class="sched-move"><span class="sr-only">Visit day for ${esc(r.name)}</span>${customerDayCellHtml({ id: r.customerId, assignedDay: r.currentDay })}</label>` : ''}
+            </li>`).join('')}</ul>`
+            : (d.unavailable ? '' : `<p class="sched-empty">${esc(d.phase === 'past' ? 'No shops were planned for this day.' : 'No shops planned for this day yet.')}</p>`)}
+          ${d.extra.length ? `<div class="sched-extra"><span class="sched-extra-label">${esc(d.unavailable ? 'Visits recorded this day' : 'Also visited (not planned this day)')}</span>${d.extra.map(r => `<div class="sched-extra-row st-${esc(r.status)}"><span class="sched-shop">${esc(r.name)}</span> <span class="sched-status">${esc(statusText(r))}</span></div>`).join('')}</div>` : ''}
+          ${d.uncertainVisits.length ? `<div class="sched-extra"><span class="sched-extra-label">Visits that cannot be matched to one shop (legacy merge)</span>${d.uncertainVisits.map(v => `<div class="sched-extra-row st-uncertain"><span class="sched-shop">${esc(v.customerName || '')}</span> <span class="sched-status">${esc(v.outcome === 'Order Placed' ? 'Order ' + (v.orderNo || '') : 'No order: ' + (v.reasonNoOrder || ''))}${esc(anyRep ? ' · ' + repName(v.repEmail) : '')}</span></div>`).join('')}</div>` : ''}
+        </details>`;
+      }).join('');
     }
 
-    scheduleDayTabs.addEventListener('click', (e) => {
-      const btn = e.target.closest('.schedule-day-tab');
-      if (!btn) return;
-      currentScheduleDay = btn.dataset.day;
-      refreshWeeklySchedule();
-    });
+    // Load the saved plan (customers) and the dated schedule history. Used on open AND after every schedule change, so the
+    // board never shows targets older than what was just saved. A failure is remembered and shown, never treated as "empty".
+    async function loadPlanAndHistory() {
+      const [cust, hist] = await Promise.allSettled([loadCustomersCache(), fetchScheduleHistory()]);
+      boardState.customersFailed = cust.status === 'rejected';
+      boardState.historyFailed = hist.status === 'rejected';
+      boardState.index = hist.status === 'fulfilled' && hist.value ? buildScheduleIndex(hist.value) : null;
+    }
 
-    // Managers can change a customer's weekly day right here too (same save as the Manage Customers table).
-    scheduleDayList.addEventListener('change', async (e) => {
+    async function loadWeekBoard() {
+      const token = ++boardState.token;
+      const from = boardState.weekStart, to = addDays(boardState.weekStart, 6);
+      schedBoard.setAttribute('aria-busy', 'true');
+      const [visitsRes, , repsRes] = await Promise.allSettled([
+        fetchVisitsInRange(from, to),
+        loadPlanAndHistory(),
+        fetchRepEmails(),
+        loadProfilesCache(),
+      ]);
+      if (token !== boardState.token) return;          // a newer week was asked for meanwhile
+      boardState.visitsFailed = visitsRes.status === 'rejected';
+      boardState.visits = boardState.visitsFailed ? [] : visitsRes.value;
+      const chosen = schedRepFilter.value;
+      const reps = repsRes.status === 'fulfilled' ? repsRes.value : [];
+      const repList = [...new Set([...(reps || []), ...boardState.visits.map(v => v.repEmail).filter(Boolean)].map(e => String(e).toLowerCase()))].sort();
+      schedRepFilter.innerHTML = `<option value="all">All reps</option>` + repList.map(e => `<option value="${esc(e)}">${esc(repName(e))}</option>`).join('');
+      schedRepFilter.value = repList.includes(chosen) ? chosen : 'all';
+      boardState.loaded = true;
+      renderAwaitingScheduling();
+      renderBoard();
+      schedBoard.setAttribute('aria-busy', 'false');
+    }
+    window.__loadWeekBoard = loadWeekBoard;
+
+    const shiftWeek = (n) => { boardState.weekStart = addDays(boardState.weekStart, 7 * n); boardState.open.clear(); loadWeekBoard(); };
+    document.getElementById('schedPrevWeekBtn').addEventListener('click', () => shiftWeek(-1));
+    document.getElementById('schedNextWeekBtn').addEventListener('click', () => shiftWeek(1));
+    document.getElementById('schedThisWeekBtn').addEventListener('click', () => { boardState.weekStart = weekStartOf(malawiDate()); boardState.open.clear(); loadWeekBoard(); });
+    schedRepFilter.addEventListener('change', renderBoard);
+    schedBoard.addEventListener('toggle', (e) => {
+      const det = e.target.closest && e.target.closest('details.sched-day');
+      if (!det) return;
+      if (boardState.open.size === 0) schedBoard.querySelectorAll('details.sched-day[open]').forEach(x => boardState.open.add(x.dataset.date));
+      if (det.open) boardState.open.add(det.dataset.date); else boardState.open.delete(det.dataset.date);
+    }, true);
+    // Move a shop to another day (same guarded, dated change as everywhere else).
+    schedBoard.addEventListener('change', async (e) => {
       const select = e.target.closest('.customer-day-select');
       if (!select) return;
       const id = select.dataset.id, day = select.value || null;
+      const c = customersCache.find(x => x.id === id);
       select.disabled = true;
       try {
-        await setCustomerVisitDay(id, day, { uid: user.uid, email: user.email });
-        await loadCustomersCache();
-        const idx = loadedCustomers.findIndex(c => c.id === id);
-        if (idx !== -1) loadedCustomers[idx] = { ...loadedCustomers[idx], assignedDay: day };
-        applyCustomerSearchAndRender();
-        showToast('Visit day updated.', 'success');
+        const res = await setCustomerVisitDay(id, day, { uid: user.uid, email: user.email, expectedDay: c ? (c.assignedDay ?? null) : undefined });
+        if (res && res.stale) showToast('Someone else changed this shop\'s day meanwhile. The board now shows the latest saved plan; nothing was overwritten.', 'error', 7000);
+        else showToast(day ? `Visit day updated: ${c ? c.name : 'shop'} now on ${scheduleDayLabels[day]}.` : 'Visit day removed: the shop is awaiting a day.', 'success');
       } catch (err) {
         showToast('Could not update visit day: ' + err.message, 'error');
       } finally {
-        refreshWeeklySchedule();
+        await refreshWeeklySchedule();
       }
     });
+
+    // RC6.3: after ANY schedule change (board, awaiting list, import, distance suggestion, deactivate/reactivate) reload the
+    // saved plan AND the dated history before redrawing, so the board's targets are exactly what was saved.
+    async function refreshWeeklySchedule() {
+      await loadPlanAndHistory();
+      loadedCustomers = loadedCustomers.map(lc => customersCache.find(c => c.id === lc.id) || lc);
+      applyCustomerSearchAndRender();
+      renderAwaitingScheduling();
+      if (boardState.loaded) renderBoard();
+      if (window.__refreshPerformanceIfShown) window.__refreshPerformanceIfShown();
+    }
 
     // ---- Import planned days from a spreadsheet (manager). Reviewed rows are applied through the same guarded, dated schedule change. ----
     const importPanel = document.getElementById('importDaysPanel');
@@ -1402,7 +1545,7 @@ async function initApp(user, role) {
         setDay: (id, to, from) => setCustomerVisitDay(id, to, { uid: user.uid, email: user.email, expectedDay: from }),
         onProgress: (d, t) => { prog.textContent = `${d} of ${t}...`; },
       });
-      await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
+      await refreshWeeklySchedule();
       importState = null; document.getElementById('importDaysFile').value = '';
       importResult.innerHTML = `<p id="importDone" style="font-size:0.9rem;"><strong>${esc(res.applied.length)} changed.</strong>` +
         (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
@@ -1464,7 +1607,7 @@ async function initApp(user, role) {
         setDay: (id, to, from) => setCustomerVisitDay(id, to, { uid: user.uid, email: user.email, expectedDay: from }),
         onProgress: (d, t) => { prog.textContent = `${d} of ${t}...`; },
       });
-      await loadCustomersCache(); applyCustomerSearchAndRender(); refreshWeeklySchedule();
+      await refreshWeeklySchedule();
       currentSuggestion = null;
       suggestResult.innerHTML = `<p id="suggestSummary" style="font-size:0.9rem;"><strong>${esc(res.applied.length)} changed.</strong>` +
         (res.stale.length ? ` ${res.stale.length} skipped because someone changed them meanwhile: ${res.stale.map(m => esc(m.name)).join(', ')}.` : '') +
@@ -1473,7 +1616,7 @@ async function initApp(user, role) {
     });
 
 
-    refreshWeeklySchedule();
+    renderAwaitingScheduling();
     window.__refreshWeeklySchedule = refreshWeeklySchedule;
   }
 
@@ -2640,6 +2783,8 @@ async function initApp(user, role) {
   const expenseSearchHint = document.getElementById('expenseSearchHint');
 
   expDate.value = new Date().toISOString().slice(0, 10);
+  // RC6.2: a rep only logs his own field costs (Transport, Meals, Other); Fuel and Stock Purchase are manager/deliverer costs.
+  expCategory.innerHTML = expenseCategoriesFor(isManager).map(c => `<option value="${esc(c.value)}">${esc(c.label)}</option>`).join('');
   expListTitle.textContent = isManager ? 'All Expenses' : 'My Expenses';
   expenseListHead.innerHTML = isManager
     ? `<tr><th>Date</th><th>Category</th><th>Amount</th><th>Notes</th><th>By</th><th></th></tr>`
@@ -2687,15 +2832,9 @@ async function initApp(user, role) {
     const sum = summarizeExpenses(loadedExpenses);
     const totals = sum.byCategory, grand = sum.total;
     el.innerHTML = `
-      <div class="exp-summary-tiles">
-        <div class="exp-tile exp-tile-transport"><span class="exp-tile-label">Transport</span><span class="exp-tile-amount">${esc(mwk(totals.Transport))}</span></div>
-        <div class="exp-tile exp-tile-meals"><span class="exp-tile-label">Meals</span><span class="exp-tile-amount">${esc(mwk(totals.Meals))}</span></div>
-        <div class="exp-tile exp-tile-fuel"><span class="exp-tile-label">Fuel</span><span class="exp-tile-amount">${esc(mwk(totals.Fuel))}</span></div>
-        <div class="exp-tile exp-tile-stock"><span class="exp-tile-label">Stock</span><span class="exp-tile-amount">${esc(mwk(totals.Stock))}</span></div>
-        <div class="exp-tile exp-tile-other"><span class="exp-tile-label">Other</span><span class="exp-tile-amount">${esc(mwk(totals.Other))}</span></div>
-      </div>
+      <div class="exp-summary-tiles">${expenseTilesFor(isManager, totals).map(t => `<div class="exp-tile exp-tile-${esc(t.value.toLowerCase())}"><span class="exp-tile-label">${esc(t.label === 'Stock Purchase' ? 'Stock' : t.label)}</span><span class="exp-tile-amount">${esc(mwk(t.amount))}</span></div>`).join('')}</div>
       <div class="exp-grand-total">
-        <span>Grand Total (${esc(loadedExpenses.length)} record${esc(loadedExpenses.length !== 1 ? 's' : '')} loaded)</span>
+        <span>${esc(isManager ? 'Grand Total' : 'My Total')} (${esc(loadedExpenses.length)} record${esc(loadedExpenses.length !== 1 ? 's' : '')} loaded)</span>
         <span class="exp-grand-amount">${esc(mwk(grand))}</span>
       </div>
       ${invalidAmountNote(sum.invalid)}
@@ -2823,7 +2962,8 @@ async function initApp(user, role) {
       setLoading: (on) => (on ? setButtonLoading(loadMoreExpensesBtn, 'Loading…') : clearButtonLoading(loadMoreExpensesBtn)),
       fetch: () => (manager ? fetchAllExpensesPage(cursor) : fetchMyExpensesPage(user.uid, cursor)),
       apply: (result) => {
-        loadedExpenses = mergeById(loadedExpenses, result.items);
+        // RC6.3: a rep's list never holds Fuel / Stock Purchase (the query and rules exclude them; filtered again here).
+        loadedExpenses = mergeById(loadedExpenses, manager ? result.items : result.items.filter(e => repMaySeeExpense(e)));
         expensesCursor = result.lastDoc; expensesHasMore = result.hasMore;
         applyExpenseSearchAndRender();
         loadMoreExpensesBtn.style.display = expensesHasMore ? 'block' : 'none';
@@ -2871,11 +3011,7 @@ async function initApp(user, role) {
         <td><input class="customer-edit-input" data-field="date" type="date" value="${esc(exp.date || '')}"></td>
         <td>
           <select class="customer-edit-input" data-field="category">
-            <option ${esc(exp.category === 'Transport' ? 'selected' : '')}>Transport</option>
-            <option ${esc(exp.category === 'Meals' ? 'selected' : '')}>Meals</option>
-            <option value="Fuel" ${esc(exp.category === 'Fuel' ? 'selected' : '')}>Fuel</option>
-            <option value="Stock" ${esc(exp.category === 'Stock' ? 'selected' : '')}>Stock Purchase</option>
-            <option ${esc(exp.category === 'Other' ? 'selected' : '')}>Other</option>
+            ${expenseCategoryOptionsForEdit(isManager, exp.category).map(c => `<option value="${esc(c.value)}" ${esc(exp.category === c.value ? 'selected' : '')}>${esc(c.label)}</option>`).join('')}
           </select>
         </td>
         <td><input class="customer-edit-input" data-field="amount" type="number" min="0" step="1" value="${esc(isMoney(exp.amount) ? exp.amount : '')}" placeholder="enter amount"></td>
@@ -3209,7 +3345,7 @@ async function initApp(user, role) {
       const baseCells = `
         ${checkboxCell}
         <td>${esc(o.orderNo)}</td>
-        <td>${esc(o.customerName)}</td>
+        <td>${esc(o.customerName)}${(o.status !== 'Cancelled' && o.status !== 'Rejected' && !isValidPin(o.customerLat, o.customerLng) && !hasPin(customersCache.find(c => c.id === o.customerId))) ? ' <span class="no-pin-tag" title="No saved location: follow up before delivery">📍 No location</span>' : ''}</td>
         <td class="inv-products-cell" title="${esc(itemsSummary)}">${esc(itemsSummary)}</td>
         <td>${esc(mwk(o.grandTotal || 0))}</td>
         <td>${orderStatusBadge(o.status)}</td>
@@ -3653,7 +3789,7 @@ async function initApp(user, role) {
       const c = customersCache.find(cc => cc.id === item.dataset.id);
       if (!c) return;
       moCustomer = c; moCustSearch.value = c.name; moCustSuggestions.style.display = 'none';
-      moCustSelected.textContent = hasPin(c) ? `Selected: ${c.name}` : `Selected: ${c.name} — this customer has no pinned location; pin it first.`;
+      moCustSelected.textContent = hasPin(c) ? `Selected: ${c.name}` : `Selected: ${c.name} — no saved location. The order can be saved; it will be flagged "No location" for delivery follow-up.`;
     });
 
     moSaveBtn.addEventListener('click', async () => {
@@ -3661,7 +3797,6 @@ async function initApp(user, role) {
       const rep = moRep.value;
       if (!rep) { moError.textContent = 'Choose the sales rep this order is for.'; moError.style.display = 'block'; return; }
       if (!moCustomer) { moError.textContent = 'Choose a customer.'; moError.style.display = 'block'; return; }
-      if (!hasPin(moCustomer)) { moError.textContent = 'This customer has no pinned location. Pin it first.'; moError.style.display = 'block'; return; }
       const items = getItems(moItemsBody);
       const problem = validateOrderItems(items);
       if (problem) { moError.textContent = problem; moError.style.display = 'block'; return; }
@@ -3729,25 +3864,44 @@ async function initApp(user, role) {
       lvCustPinStatus.style.color = ok ? '#3a7d2c' : '#b3261e';
     }
 
+    // Every visit to a shop without a location reminds the rep to save it while he is standing there (one tap, GPS start).
+    // RC6.3 owner decision: it is a REMINDER, never a block - orders and no-order visits save without a pin, and the order
+    // is flagged "No location" for delivery follow-up. "Not now" only hides the buttons for this visit.
+    const lvPinPrompt = document.getElementById('lvPinPrompt');
+    const lvPinLaterNote = document.getElementById('lvPinLaterNote');
+    let lvPinDeferred = false;
+    function lvRefreshPinPrompt() {
+      const missing = !!lvSelected && !hasPin(lvSelected);
+      lvPinPrompt.style.display = missing ? 'block' : 'none';
+      lvPinLaterNote.style.display = (missing && lvPinDeferred) ? 'block' : 'none';
+    }
+    document.getElementById('lvPinHereBtn').addEventListener('click', () => lvPromptForPin());
+    document.getElementById('lvPinLaterBtn').addEventListener('click', () => {
+      lvPinDeferred = true;
+      lvNoOrderError.style.display = 'none';
+      lvRefreshPinPrompt();
+    });
+
     function lvApplyPinGate() {
       lvRefreshPinStatus();
+      lvRefreshPinPrompt();
       const wantsOrder = lvOutcomeYes.classList.contains('active');
       const ok = !!lvSelected && hasPin(lvSelected);
-      lvPinRequired.style.display = (wantsOrder && !ok) ? 'block' : 'none';
-      lvOrderFormWrap.style.display = (wantsOrder && ok) ? 'block' : 'none';
+      lvPinRequired.style.display = 'none';
+      lvOrderFormWrap.style.display = wantsOrder ? 'block' : 'none';
     }
 
     function lvPromptForPin() {
       if (!lvSelected) return;
       const target = lvSelected;
       openLocationPicker({
-        label: target.name, lat: null, lng: null,
+        label: target.name, lat: null, lng: null, autoLocate: true,
         onSave: async ({ lat, lng }) => {
-          await updateCustomerLocation(target.id, { lat, lng });
+          await updateCustomerLocation(target.id, { lat, lng, uid: user.uid, email: user.email });
           target.lat = lat; target.lng = lng;      // same object the customer cache holds
           if (lvSelected && lvSelected.id === target.id) lvApplyPinGate();
           renderTodaysVisits();
-          showToast('Location pinned. You can place the order now.', 'success');
+          showToast('Location saved - thank you. Deliveries can now find this shop.', 'success');   // (applies to later orders; a saved order keeps what it recorded)
         },
       });
     }
@@ -3768,6 +3922,7 @@ async function initApp(user, role) {
       lvNoOrderError.style.display = 'none';
       lvRepeatNote.style.display = 'none';
       lvConflict = false; lvConflictBox.style.display = 'none';
+      lvPinDeferred = false; lvPinPrompt.style.display = 'none'; lvPinLaterNote.style.display = 'none';
       lvUpdateExplanationLabel();
     }
 
@@ -3820,10 +3975,12 @@ async function initApp(user, role) {
       lvCustPhone.textContent = c.phone || '';
       lvCustLocation.textContent = c.location || '';
       lvRefreshPinStatus();
+      lvPinDeferred = false;
       lvSelectedCustomer.style.display = 'block';
       lvCustSearch.style.display = 'none';
       lvCustSuggestions.style.display = 'none';
       lvOutcomeCard.style.display = 'block';
+      lvRefreshPinPrompt();
       const earlier = todayVisits.filter(v => v.customerId === c.id);
       if (earlier.length) {
         const last = earlier[earlier.length - 1];
@@ -3902,6 +4059,15 @@ async function initApp(user, role) {
       document.getElementById('vpDue').textContent = progress.stillDue.length;
       document.getElementById('vpOrders').textContent = progress.ordersTaken;
       document.getElementById('vpNoOrder').textContent = progress.noOrderVisits;
+      // RC6.2: shops on today's list that still have no saved location.
+      const needPin = progress.scheduled.filter(c => !hasPin(c));
+      document.getElementById('vpNeedPin').textContent = needPin.length;
+      document.getElementById('vpNeedPin').parentElement.classList.toggle('done', needPin.length === 0);
+      const pinBanner = document.getElementById('todaysPinBanner');
+      pinBanner.style.display = needPin.length ? 'block' : 'none';
+      pinBanner.innerHTML = needPin.length
+        ? `<strong>📍 ${esc(needPin.length)} shop${esc(needPin.length === 1 ? '' : 's')} on today's list ${esc(needPin.length === 1 ? 'has' : 'have')} no saved location</strong><p style="margin:4px 0 0;">${esc(needPin.map(c => c.name).join(', '))}. Save each one while you are at the shop: deliveries cannot reach a shop without it.</p>`
+        : '';
 
       let list = progress.scheduled;
       todaysRouteEmpty.style.display = list.length === 0 ? 'block' : 'none';
@@ -3944,7 +4110,7 @@ async function initApp(user, role) {
           return fetchMyVisitsForDate(user.uid, date);
         },
         apply: (visits) => {
-          todayVisits = visits; todayDate = date; visitsLoaded = true;
+          todayVisits = visits; todayDate = date; visitsLoaded = true; lastTodaysLoadMs = Date.now();
           todaysLoadError.style.display = 'none';
           renderTodaysVisits();
         },
@@ -3953,14 +4119,19 @@ async function initApp(user, role) {
           todaysLoadError.textContent = 'Could not load today\'s saved visits (' + err.message + '). Progress shown may be incomplete. Pull to refresh or reopen this screen.';
           todaysLoadError.style.display = 'block';
           renderTodaysVisits();
+          // RC6.3: without a successful load for today, the activity counters show "—", not 0.
+          if (!(visitsLoaded && todayDate === date)) for (const id of ['vpVisited', 'vpDue', 'vpOrders', 'vpNoOrder']) document.getElementById(id).textContent = '—';
         },
       });
     }
     window.__loadTodaysVisits = loadTodaysVisits;
 
-    // If the app stays open past midnight (Malawi), reload when the rep comes back to it.
+    // Reload when the rep comes back to the app: after midnight (Malawi), or when the list is more than a minute old, so a
+    // visit-day change the manager has just saved reaches the rep's list (RC6.3).
+    let lastTodaysLoadMs = 0;
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && visitsLoaded && malawiDate() !== todayDate) loadTodaysVisits();
+      if (document.visibilityState !== 'visible' || !visitsLoaded) return;
+      if (malawiDate() !== todayDate || Date.now() - lastTodaysLoadMs > 60000) loadTodaysVisits();
     });
 
     todaysRouteList.addEventListener('click', (e) => {
@@ -4007,7 +4178,6 @@ async function initApp(user, role) {
       lvOutcomeNo.classList.remove('active');
       lvNoOrderFields.style.display = 'none';
       lvApplyPinGate();
-      if (lvSelected && !hasPin(lvSelected)) lvPromptForPin();   // prompt straight away
     });
 
     lvOutcomeNo.addEventListener('click', () => {
@@ -4059,11 +4229,6 @@ async function initApp(user, role) {
       if (lvSaving) return;
       if (lvConflict) { showToast('This visit was already saved differently. Choose "Keep what was saved" or "Record my new details as a NEW visit" first.', 'error', 6000); return; }
       if (!lvSelected) { showToast('Select a customer first.', 'error'); return; }
-      if (!hasPin(lvSelected)) {
-        showToast('Pin this customer\'s location before placing an order.', 'error');
-        lvApplyPinGate();
-        return;
-      }
       const items = getItems(lvOrderItemsBody);
       const problem = validateOrderItems(items);
       if (problem) { showToast(problem, 'error'); return; }
@@ -4078,7 +4243,7 @@ async function initApp(user, role) {
         });
         showToast(res.alreadySaved
           ? `Order ${res.orderNo} had already been saved. No duplicate was created.`
-          : `Order ${res.orderNo} submitted and visit logged.`, res.alreadySaved ? 'info' : 'success');
+          : `Order ${res.orderNo} submitted and visit logged.${hasPin(lvSelected) ? '' : ' It is flagged "No location" for delivery - please save the shop\'s location when you can.'}`, res.alreadySaved ? 'info' : 'success');
         await lvAfterSaved();
       } catch (err) {
         if (err.code === 'visit-conflict') { lvShowConflict(err); return; }
@@ -4334,6 +4499,7 @@ async function initApp(user, role) {
         onInvalid: (msg) => { perfRangeError.textContent = msg; perfRangeError.style.display = 'block'; },
         fetch: async ({ from, to }) => {
           perfRangeError.style.display = 'none';
+          // RC6.3: visits, schedule history and orders must ALL load; a failure is shown as "data unavailable", never as zero.
           const [visits, reps, history, orders] = await Promise.all([
             fetchVisitsInRange(from, to), fetchRepEmails(), fetchScheduleHistory(), fetchOrdersInRange(from, to),
           ]);
@@ -4347,9 +4513,24 @@ async function initApp(user, role) {
           perfRepFilter.innerHTML = `<option value="all">All reps</option>` + all.map(r => `<option value="${esc(r)}">${esc(nameOf(r))}</option>`).join('');
           perfRepFilter.value = all.includes(prev) ? prev : 'all';
           perfReport = { visits, from, to, history, attributedOrders };      // the range that was FETCHED, not whatever the boxes say now
+          perfLoadError.style.display = 'none';
+          document.getElementById('performanceView').dataset.reportState = 'ready';
           drawPerformance();
         },
-        onError: (err) => showToast('Could not load the report: ' + err.message, 'error'),
+        onError: (err, { from, to } = {}) => {
+          showToast('Could not load the report: ' + err.message, 'error');
+          // RC6.3: a failed load is never shown as zero activity. With no earlier report the tables are emptied and say so;
+          // with an earlier report it stays visible but is clearly labelled as NOT being for the dates asked for.
+          perfLoadError.textContent = perfReport
+            ? `Data unavailable: the report for ${rangeText({ from: from || perfFrom.value, to: to || perfTo.value })} could not be loaded (${err.message}). The figures below are still for ${rangeText({ from: perfReport.from, to: perfReport.to })}.`
+            : `Data unavailable: the visits or schedule history could not be loaded (${err.message}). No figures are shown. Try again.`;
+          perfLoadError.style.display = 'block';
+          if (!perfReport) {
+            for (const id of ['repSummaryBody', 'dueBody', 'noOrderBody', 'ordersTakenBody', 'allVisitsBody']) document.getElementById(id).innerHTML = '';
+            for (const id of ['repSummaryEmpty', 'dueEmpty', 'noOrderEmpty', 'ordersTakenEmpty', 'allVisitsEmpty']) document.getElementById(id).style.display = 'none';
+            document.getElementById('performanceView').dataset.reportState = 'unavailable';
+          }
+        },
       });
     }
     let perfReport = null;
@@ -4368,6 +4549,9 @@ async function initApp(user, role) {
       updateShownRange();
     }
 
+    const perfLoadError = document.getElementById('perfLoadError');
+    // RC6.3: a schedule change made on the Weekly Schedule tab re-runs a report that is on screen, so both agree.
+    window.__refreshPerformanceIfShown = () => { if (perfReport && document.getElementById('performanceView').style.display !== 'none') runPerformance(); };
     window.loadPerformanceView = async function loadPerformanceView() {
       if (!perfFrom.value || !perfTo.value) { perfFrom.value = perfTo.value = malawiDate(); }
       await runPerformance();
