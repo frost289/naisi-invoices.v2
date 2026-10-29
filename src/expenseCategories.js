@@ -1,28 +1,20 @@
-// RC6.4: expense categories (simplified, no stock purchases or optional fields).
+// RC6.4: expense categories (same set as RC6.3; the RC6.4 expansion was withdrawn).
 //
 // A sales rep only records the costs of his own field day: transport, meals and other small items.
-// Fuel belongs to the delivery vehicle (deliverer logs it).
-// Stock purchases are not tracked separately; they are part of the main business flow.
+// Fuel belongs to the delivery vehicle (deliverer logs it). Stock Purchase is a manager cost.
 //
 // Role boundaries (enforced by Firestore rules):
 // - Rep (submitter): Transport, Meals, Other (own only)
 // - Deliverer: Fuel, Transport, Meals, Other (own only)
-// - Manager: all operating expenses
+// - Manager: Transport, Meals, Fuel, Stock Purchase, Other (everyone's)
 
 export const ALL_OPERATING_EXPENSE_CATEGORIES = [
   { value: 'Transport', label: 'Transport', roles: ['rep', 'deliverer', 'manager'] },
   { value: 'Meals', label: 'Meals', roles: ['rep', 'deliverer', 'manager'] },
   { value: 'Fuel', label: 'Fuel', roles: ['deliverer', 'manager'] },
+  { value: 'Stock', label: 'Stock Purchase', roles: ['manager'] },
   { value: 'Other', label: 'Other', roles: ['rep', 'deliverer', 'manager'] },
 ];
-
-// Historic categories that may appear in legacy records
-export const LEGACY_EXPENSE_CATEGORIES = [
-  { value: 'Stock', label: 'Stock Purchase (legacy)', roles: ['manager'] },
-];
-
-export const REP_EXPENSE_CATEGORY_VALUES = ['Transport', 'Meals', 'Other'];
-export const DELIVERER_EXPENSE_CATEGORY_VALUES = ['Transport', 'Meals', 'Fuel', 'Other'];
 
 export function expenseCategoriesFor(userRole) {
   // userRole: 'rep', 'deliverer', 'manager', or boolean (backward compat: false=rep, true=manager)
@@ -36,7 +28,7 @@ export function expenseCategoriesFor(userRole) {
   return ALL_OPERATING_EXPENSE_CATEGORIES.filter(c => c.roles.includes(role));
 }
 
-// Options for an edit box. A manager: every category, plus legacy categories and the record's own if unexpected.
+// Options for an edit box. A manager: every category, plus the record's own if it is unexpected.
 // A rep/deliverer: only their allowed categories; they never hold a record outside them (the query and rules exclude them).
 export function expenseCategoryOptionsForEdit(userRole, current) {
   // userRole: 'rep', 'deliverer', 'manager', or boolean (backward compat: false=rep, true=manager)
@@ -47,8 +39,7 @@ export function expenseCategoryOptionsForEdit(userRole, current) {
 
   const list = expenseCategoriesFor(role);
   if (role === 'manager') {
-    list.push(...LEGACY_EXPENSE_CATEGORIES);
-    if (current && !ALL_OPERATING_EXPENSE_CATEGORIES.concat(LEGACY_EXPENSE_CATEGORIES).some(c => c.value === current)) {
+    if (current && !ALL_OPERATING_EXPENSE_CATEGORIES.some(c => c.value === current)) {
       list.push({ value: String(current), label: String(current), roles: ['manager'] });
     }
   }

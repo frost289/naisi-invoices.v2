@@ -1,6 +1,6 @@
 {
   "name": "naisi-invoices",
-  "version": "6.3.0-rc1",
+  "version": "6.4.0-rc1",
   "private": true,
   "type": "module",
   "scripts": {

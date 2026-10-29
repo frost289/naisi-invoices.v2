@@ -1,5 +1,5 @@
 // RC6.3 regression tests (owner review of RC6.2, 20 Oct 2026). Real app modules against the in-memory Firestore stand-in.
-//   A. orders without a pin are saved (rep and manager paths), with null coordinates; valid pins copied exactly
+//   A. orders need a pinned customer (rep and manager paths); valid pins copied exactly (RC6.4: RC6.3 relaxation withdrawn)
 //   B. weekly board: history unavailable, failed loads, ambiguous visits after legacy merges, agreement with Rep Performance
 //   C. expense categories by role (rep: own Transport/Meals/Other only; query carries the category filter)
 //   D. location-capture attribution: first capture stamped once (creation and later pinning alike), never moved by a re-pin
@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 
 // =====================================================================================================
-describe('A. RC6.3 owner decision: a missing location never blocks an order', () => {
+describe('A. RC6.4 owner decision: an order needs a pinned customer location (RC6.3 relaxation withdrawn)', () => {
   const repOrder = (over = {}) => visits.submitOrderWithVisit({ customerId: 'c1', items, notes: '', requestId: REQ, uid: 'rep1', email: 'rep1@naisi.test', now: NOW, ...over });
   const mgrOrder = (over = {}) => mo.submitOrderAsManager({ customerId: 'c1', items, notes: '', attributedRepEmail: 'rep1@naisi.test', requestId: REQ, uid: 'mgr', email: 'mgr@naisi.test', now: NOW, ...over });
 
@@ -37,20 +37,13 @@ describe('A. RC6.3 owner decision: a missing location never blocks an order', ()
     ['no pin at all', { lat: null, lng: null }],
     ['pin fields missing', { lat: undefined, lng: undefined }],
     ['a broken legacy pin', { lat: 'x', lng: 999 }],
-  ])('rep: an order for a shop with %s is saved once, with its visit and ONE counter step, and null coordinates', async (_n, over) => {
+  ])('rep: an order for a shop with %s is refused and nothing is written (no order, no visit, no counter step)', async (_n, over) => {
     const c = shop(over); for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k];
     F.store.set('customers/c1', c);
-    const r = await repOrder();
-    const [o] = at('orders/'), [v] = at('visits/');
-    expect(r.alreadySaved).toBe(false);
-    expect([o.customerLat, o.customerLng]).toEqual([null, null]);       // never invented
-    expect(v).toMatchObject({ outcome: 'Order Placed', orderId: r.orderId });
-    expect(F.store.get('orderCounters/naisiOrder').counter).toBe(42);
-    // identical retry (lost acknowledgement) reuses it
-    const again = await repOrder();
-    expect(again.alreadySaved).toBe(true);
-    expect(at('orders/')).toHaveLength(1);
-    expect(F.store.get('customers/c1').lat ?? null).toEqual(c.lat ?? null);   // the customer record is not changed by the order
+    await expect(repOrder()).rejects.toThrow(/no pinned location/i);
+    expect(at('orders/')).toHaveLength(0);
+    expect(at('visits/')).toHaveLength(0);
+    expect(F.store.get('orderCounters/naisiOrder').counter).toBe(41);
   });
   it('rep: a valid pin is copied exactly', async () => {
     F.store.set('customers/c1', shop());
@@ -58,13 +51,13 @@ describe('A. RC6.3 owner decision: a missing location never blocks an order', ()
     const [o] = at('orders/');
     expect([o.customerLat, o.customerLng]).toEqual([-13.9, 33.7]);
   });
-  it('manager-entered: an unpinned customer is accepted with null coordinates; a pinned one copies the pin; no visit is created', async () => {
+  it('manager-entered: an unpinned customer is refused; a pinned one copies the pin; no visit is created', async () => {
     F.store.set('customers/c1', shop({ lat: null, lng: null }));
-    const r = await mgrOrder();
-    expect(F.store.get('orders/' + r.orderId)).toMatchObject({ customerLat: null, customerLng: null, source: 'manager-entered' });
+    await expect(mgrOrder()).rejects.toThrow(/no pinned location/i);
+    expect(at('orders/')).toHaveLength(0);
     F.store.set('customers/c1', shop());
     const r2 = await mgrOrder({ requestId: 'req-bbbbbbbb-2222' });
-    expect(F.store.get('orders/' + r2.orderId)).toMatchObject({ customerLat: -13.9, customerLng: 33.7 });
+    expect(F.store.get('orders/' + r2.orderId)).toMatchObject({ customerLat: -13.9, customerLng: 33.7, source: 'manager-entered' });
     expect(at('visits/')).toHaveLength(0);
   });
   it('still refused: inactive customer, merging customer (unchanged safeguards)', async () => {
@@ -216,56 +209,34 @@ describe('B6. location-capture figure is informational and uses only the validat
 });
 
 // =====================================================================================================
-describe('C. RC6.4 expenses: expanded categories with structured fields (RC6.3 base with enhancements)', () => {
-  it('categories: rep now has 6, manager all; rep edit options never include Fuel/Maintenance/Bank/Stock; tiles are exactly the role\'s categories', () => {
-    const repCats = expenseCategoriesFor('rep').map(c => c.value);
-    const mgmtCats = expenseCategoriesFor('manager').map(c => c.value);
+describe('C. expense categories by role (RC6.3 set; the RC6.4 expansion was withdrawn)', () => {
+  it('categories: rep Transport/Meals/Other, deliverer adds Fuel, manager adds Fuel and Stock; rep edit options never include Fuel/Stock; tiles are exactly the role\'s categories', () => {
+    const vals = (role) => expenseCategoriesFor(role).map(c => c.value);
+    expect(vals('rep')).toEqual(['Transport', 'Meals', 'Other']);
+    expect(vals('deliverer')).toEqual(['Transport', 'Meals', 'Fuel', 'Other']);
+    expect(vals('manager')).toEqual(['Transport', 'Meals', 'Fuel', 'Stock', 'Other']);
+    // legacy boolean callers (main.js passes isManager)
+    expect(vals(false)).toEqual(vals('rep'));
+    expect(vals(true)).toEqual(vals('manager'));
 
-    // RC6.4: reps now have Transport, Meals, Other, Internet, Packaging, Supplies (6 total, no Fuel/Maintenance/Bank)
-    expect(repCats).toContain('Transport');
-    expect(repCats).toContain('Meals');
-    expect(repCats).toContain('Other');
-    expect(repCats).toContain('Internet');
-    expect(repCats).toContain('Packaging');
-    expect(repCats).toContain('Supplies');
-    expect(repCats).not.toContain('Fuel');
-    expect(repCats).not.toContain('Maintenance');
-    expect(repCats).not.toContain('Bank');
+    expect(expenseCategoryOptionsForEdit('rep', 'Fuel').map(c => c.value)).toEqual(['Transport', 'Meals', 'Other']);
+    expect(expenseCategoryOptionsForEdit('manager', 'Stock').map(c => c.value)).toEqual(['Transport', 'Meals', 'Fuel', 'Stock', 'Other']);
+    expect(expenseCategoryOptionsForEdit('manager', 'Airtime').map(c => c.value)).toContain('Airtime');   // manager never loses an unexpected value
 
-    // Managers see all operating categories
-    expect(mgmtCats).toContain('Transport');
-    expect(mgmtCats).toContain('Meals');
-    expect(mgmtCats).toContain('Fuel');
-    expect(mgmtCats).toContain('Internet');
-    expect(mgmtCats).toContain('Maintenance');
-    expect(mgmtCats).toContain('Packaging');
-    expect(mgmtCats).toContain('Supplies');
-    expect(mgmtCats).toContain('Bank');
-    expect(mgmtCats).toContain('Other');
-
-    const repOptions = expenseCategoryOptionsForEdit('rep', 'Fuel').map(c => c.value);
-    expect(repOptions).not.toContain('Fuel');
-    expect(repOptions).toContain('Transport');
-
-    const mgmtOptions = expenseCategoryOptionsForEdit('manager', 'Fuel').map(c => c.value);
-    expect(mgmtOptions).toContain('Fuel');
-
-    const mgmtUnexpected = expenseCategoryOptionsForEdit('manager', 'Airtime').map(c => c.value);
-    expect(mgmtUnexpected).toContain('Airtime');   // manager never loses an unexpected value
-
-    // Tiles: rep should see his categories only
     const repTiles = expenseTilesFor('rep', { Transport: 10, Fuel: 5, Stock: 7 }).map(t => [t.value, t.amount]);
-    expect(repTiles.some(t => t[0] === 'Transport' && t[1] === 10)).toBe(true);
-    expect(repTiles.some(t => t[0] === 'Fuel')).toBe(false);
-    expect(repTiles.some(t => t[0] === 'Stock')).toBe(false);
+    expect(repTiles).toEqual([['Transport', 10], ['Meals', 0], ['Other', 0]]);
+    const mgrTiles = expenseTilesFor(true, { Transport: 10, Fuel: 5, Stock: 7 }).map(t => [t.value, t.amount]);
+    expect(mgrTiles).toEqual([['Transport', 10], ['Meals', 0], ['Fuel', 5], ['Stock', 7], ['Other', 0]]);
 
-    // Visibility
-    expect(repMaySeeExpense({ category: 'Fuel' }, 'rep')).toBe(false);
-    expect(repMaySeeExpense({ category: 'Stock' }, 'rep')).toBe(false);
-    expect(repMaySeeExpense({ category: null }, 'rep')).toBe(false);
-    expect(repMaySeeExpense({ category: 'Transport' }, 'rep')).toBe(true);
-    expect(repMaySeeExpense({ category: 'Internet' }, 'rep')).toBe(true);
-    expect(repMaySeeExpense({ category: 'Packaging' }, 'rep')).toBe(true);
+    expect(repMaySeeExpense({ category: 'Fuel' })).toBe(false);
+    expect(repMaySeeExpense({ category: 'Stock' })).toBe(false);
+    expect(repMaySeeExpense({ category: null })).toBe(false);
+    expect(repMaySeeExpense({ category: 'Transport' })).toBe(true);
+    expect(repMaySeeExpense({ category: 'Internet' })).toBe(false);   // withdrawn RC6.4 category
+  });
+  it('a rep list filtered with Array.filter keeps EVERY visible record (regression: the list index must not be read as a role)', () => {
+    const list = [{ category: 'Transport' }, { category: 'Meals' }, { category: 'Other' }, { category: 'Fuel' }, { category: 'Transport' }];
+    expect(list.filter(e => repMaySeeExpense(e))).toHaveLength(4);
   });
   it('the rep query returns only his own Transport/Meals/Other records, including none of his older Fuel/Stock, and paginates', async () => {
     const e = (id, createdBy, category, date) => F.store.set('expenses/' + id, { createdBy, category, date, amount: 100 });

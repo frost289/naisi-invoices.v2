@@ -70,11 +70,11 @@ describe('RC6 operations plan and report carry the required statements', () => {
   it('report and guide carry the prominent incomplete-verification statement', () => {
     for (const f of ['docs/RC6.1-RELEASE-REPORT.md', 'docs/RC6.1-DEVELOPER-REVIEW-GUIDE.md']) expect(rd(f)).toContain('REAL FIREBASE VERIFICATION INCOMPLETE');
   });
-  it('RC6.3: the rules file CHANGED (pin-optional orders, rep expense categories, first-capture pin stamp) and matches the hash recorded for RC6.3', () => {
+  it('RC6.4: the rules file matches the hash recorded for RC6.4 (pins required again, RC6.3 expense categories, stock-purchase collection withdrawn)', () => {
     const crypto = require_crypto();
     const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'rules/firestore.rules'))).digest('hex');
     expect(actual).not.toBe('471a2419253581d9e8fe14b54e7db76009f1b53320e79b977875b0990c0c0e32');   // the RC5-RC6.2 rules are no longer the release rules
-    expect(fs.readFileSync(path.join(root, 'rules/RC6.3-RULES-SHA256.txt'), 'utf8').split(/\s+/)[0]).toBe(actual);
+    expect(fs.readFileSync(path.join(root, 'rules/RC6.4-RULES-SHA256.txt'), 'utf8').split(/\s+/)[0]).toBe(actual);
   });
 });
 
@@ -93,13 +93,13 @@ describe('deployment artifacts agree', () => {
     expect(Array.isArray(j('firestore.indexes.json').indexes)).toBe(true);
     expect(fs.existsSync(path.join(root, 'package-lock.json'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'tests/package-lock.json'))).toBe(true);
-    expect(j('package.json').version).toBe('6.3.0-rc1'); expect(j('package-lock.json').version).toBe('6.3.0-rc1');   // RC6.3
+    expect(j('package.json').version).toBe('6.4.0-rc1'); expect(j('package-lock.json').version).toBe('6.4.0-rc1');   // RC6.4
   });
 });
 
 describe('build identifier', () => {
-  it('is RC6.3 in public/build-id.txt, defined by vite.config.js, and shown by showBuildId()', async () => {
-    expect(fs.readFileSync(path.join(root, 'public/build-id.txt'), 'utf8').trim()).toBe('RC6.3');
+  it('is RC6.4 in public/build-id.txt, defined by vite.config.js, and shown by showBuildId()', async () => {
+    expect(fs.readFileSync(path.join(root, 'public/build-id.txt'), 'utf8').trim()).toBe('RC6.4');
     expect(fs.readFileSync(path.join(root, 'vite.config.js'), 'utf8')).toContain('__BUILD_ID__');
     const { JSDOM } = await import('jsdom'); const dom = new JSDOM('<body></body>');
     expect(bi.showBuildId(dom.window.document).textContent).toBe('Build ' + bi.BUILD_ID);

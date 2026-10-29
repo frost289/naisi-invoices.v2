@@ -94,32 +94,24 @@ try {
   });
 
   // ---------------- 2. customer locations: reminder, never a block ----------------
-  await R.check('E57', 'Missing location: counter, banner and reminder are shown, and the rep can STILL submit an order; it is saved once with null coordinates and flagged', async () => {
+  await R.check('E57', 'Missing location: counter, banner and reminder are shown, and an ORDER is blocked until the shop is pinned (nothing is saved)', async () => {
     await nav('navLogVisitBtn'); await page.waitForSelector('#todaysRouteList .todays-route-item');
     eq(await page.locator('#vpNeedPin').innerText(), '1', 'need-pin count');
     expect(/Foxtrot No Pin/.test(await page.locator('#todaysPinBanner').innerText()), 'banner');
     await page.click('#todaysRouteList .todays-route-item[data-id="c6"]');
     await page.waitForSelector('#lvPinPrompt', { state: 'visible' });
-    expect(/still take the order/i.test(await page.locator('#lvPinPrompt').innerText()), 'reminder must say the order can still be taken');
+    expect(/only be taken once the location is saved/i.test(await page.locator('#lvPinPrompt').innerText()), 'reminder must say an order needs the location');
     const before = { o: (await store('orders')).length, v: (await store('visits')).length, c: (await doc('orderCounters/naisiOrder')).counter };
     await page.click('#lvOutcomeYes');
-    await page.waitForSelector('#lvOrderFormWrap', { state: 'visible', timeout: 4000 });
-    expect(!(await page.locator('#locationPickerModal').isVisible()), 'map must not be forced open');
-    expect(!(await page.locator('#lvPinRequired').isVisible()), 'an order must not be blocked');
-    await page.click('#lvQuickAddGrid button >> nth=0'); await page.waitForSelector('#lvOrderItemsBody tr');
-    await page.fill('#lvOrderItemsBody tr .qty-input', '2');
-    await page.dblclick('#lvSubmitOrderBtn');                      // double tap: still one order
-    await toast(/No location/);
-    await page.waitForTimeout(400);
-    const o = (await store('orders')).filter(x => x.customerId === 'c6');
-    eq(o.length, 1, 'one order for the unpinned shop');
-    eq([o[0].customerLat, o[0].customerLng], [null, null], 'null coordinates, never invented');
-    eq([(await store('orders')).length, (await store('visits')).length, (await doc('orderCounters/naisiOrder')).counter], [before.o + 1, before.v + 1, before.c + 1], 'one order, one visit, one number');
-    expect((await doc('customers/c6')).lat === null, 'the customer record was not given a pin');
-    await shot('57-order-without-pin');
-    return o[0].orderNo;
+    await page.waitForSelector('#lvPinRequired', { state: 'visible', timeout: 4000 });
+    expect(!(await page.locator('#lvOrderFormWrap').isVisible()), 'the order form must stay hidden until the shop is pinned');
+    await page.waitForTimeout(300);
+    eq([(await store('orders')).length, (await store('visits')).length, (await doc('orderCounters/naisiOrder')).counter], [before.o, before.v, before.c], 'nothing saved');
+    await shot('57-order-blocked-without-pin');
+    await page.click('#lvClearCustomer');                           // leave the visit unsaved, back to today's list
+    return 'blocked';
   });
-  await R.check('E58', 'Saving the location afterwards: GPS start; first capture stamped with the rep and server time; a re-pin keeps the stamp; the counter clears', async () => {
+  await R.check('E58', 'Saving the location: GPS start; first capture stamped with the rep and server time; the order can then be taken and copies the pin; a re-pin keeps the stamp; the counter clears', async () => {
     await page.click('#todaysRouteList .todays-route-item[data-id="c6"]');
     await page.waitForSelector('#lvPinPrompt', { state: 'visible' });
     await page.click('#lvPinHereBtn');
@@ -131,8 +123,22 @@ try {
     expect(Math.abs(c6.lat - -13.9712) < 1e-6 && Math.abs(c6.lng - 33.7891) < 1e-6, 'pin ' + JSON.stringify([c6.lat, c6.lng]));
     eq([c6.firstPinnedBy, c6.firstPinnedByEmail, !!c6.firstPinnedAt], ['u_rep1', 'rep1@naisi.test', true], 'first capture stamp');
     eq(await page.locator('#vpNeedPin').innerText(), '0', 'need-pin count after pinning');
-    // a second pin (correction) does not change who/when gets the credit
-    await page.click('#lvClearCustomer');
+    // now pinned: the order form opens and the order copies the saved pin (double tap: still one order)
+    const before = { o: (await store('orders')).length, v: (await store('visits')).length, c: (await doc('orderCounters/naisiOrder')).counter };
+    if (!(await page.locator('#lvOutcomeYes').evaluate(b => b.classList.contains('active')))) await page.click('#lvOutcomeYes');
+    await page.waitForSelector('#lvOrderFormWrap', { state: 'visible', timeout: 4000 });
+    expect(!(await page.locator('#lvPinRequired').isVisible()), 'pin box must be gone once pinned');
+    await page.click('#lvQuickAddGrid button >> nth=0'); await page.waitForSelector('#lvOrderItemsBody tr');
+    await page.fill('#lvOrderItemsBody tr .qty-input', '2');
+    await page.dblclick('#lvSubmitOrderBtn');
+    await toast(/submitted/);
+    await page.waitForTimeout(400);
+    const o = (await store('orders')).filter(x => x.customerId === 'c6');
+    eq(o.length, 1, 'one order for the newly pinned shop');
+    expect(Math.abs(o[0].customerLat - -13.9712) < 1e-6 && Math.abs(o[0].customerLng - 33.7891) < 1e-6, 'order copies the pin ' + JSON.stringify([o[0].customerLat, o[0].customerLng]));
+    eq([(await store('orders')).length, (await store('visits')).length, (await doc('orderCounters/naisiOrder')).counter], [before.o + 1, before.v + 1, before.c + 1], 'one order, one visit, one number');
+    // a second pin (correction) does not change who/when gets the credit (a saved order already cleared the selection)
+    if (await page.locator('#lvClearCustomer').isVisible()) await page.click('#lvClearCustomer');
     await nav('navCustomersBtn'); await page.waitForSelector('#customerListBody tr');
     await page.click('#customerListBody tr[data-id="c6"] [data-action="set-location"]');
     await page.waitForSelector('#locationPickerModal', { state: 'visible' });
@@ -153,7 +159,7 @@ try {
   await page.waitForSelector('#navOrdersBtn', { state: 'visible' });
   const rowsOf = (date) => page.$$eval(`#schedBoard details[data-date="${date}"] .sched-row`, rs => rs.map(r => ({ id: r.dataset.id, cls: [...r.classList].find(c => c.startsWith('st-')), text: r.querySelector('.sched-status').textContent })));
   const kpis = async () => (await page.locator('#schedKpis').innerText()).replace(/\s+/g, ' ');
-  await R.check('E66', 'Orders without a location are flagged "No location" on the manager\'s order list', async () => {
+  await R.check('E66', 'Older orders saved without a location are still flagged "No location" on the manager\'s order list', async () => {
     await page.waitForSelector('#orderListBody tr');
     const row = page.locator('#orderListBody tr', { hasText: 'ORD-2026-0049' });
     expect(/No location/.test(await row.innerText()), 'no flag on the unpinned order');

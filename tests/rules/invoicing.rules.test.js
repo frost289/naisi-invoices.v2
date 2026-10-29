@@ -1066,7 +1066,7 @@ describe('L. manager-entered orders (decision 3)', () => {
     }
     must((await adminCount('orders')) === 3, 'a refused entry created an order');
   });
-  it('app: refuses a customer that is being merged or inactive (RC6.3: a missing pin is NOT refused, see RC6.3-ORD)', async () => {
+  it('app: refuses a customer that is being merged or inactive (a missing pin is refused too, see RC6.4-ORD)', async () => {
     const a = await appAs('mgr');
     await assertRejects(enter(a, { customerId: 'c2' }));
     await adminSet(['customers', 'c1'], { ...shop, mergeLock: { into: 'c2', by: 'mgr', at: Timestamp.now() } });
@@ -1777,28 +1777,24 @@ describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation tran
 // RC6.3 (owner review of RC6.2, 20 Oct 2026). Emulator tests: NOT executed in the build environment (the emulator download from
 // storage.googleapis.com is blocked there, HTTP 403). They must pass on the developer's machine before release.
 // =============================================================================================
-describe('RC6.3-ORD. a missing customer location never blocks an order; pins are never invented or dropped', () => {
+describe('RC6.4-ORD. an order needs the customer\'s pinned location, copied exactly (RC6.3 relaxation withdrawn)', () => {
   const unpinned = async (id = 'c1', over = {}) => adminSet(['customers', id], { ...shop, lat: null, lng: null, ...over });
-  it('rep: order for an UNPINNED customer with null coordinates + visit + counter is accepted', async () => {
+  it('rep: order for an UNPINNED customer is refused, with null or with any coordinates', async () => {
     await unpinned();
-    await assertSucceeds(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
-  });
-  it('rep: order for a customer whose pin fields are absent (legacy) is accepted with null coordinates', async () => {
-    await adminSet(['customers', 'c1'], { name: 'Shop', phone: '0999', location: 'Area 25', active: true, assignedDay: 'Thu' });
-    await assertSucceeds(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
-  });
-  it('rep: invented, partial or malformed coordinates for an unpinned customer are refused', async () => {
-    await unpinned();
-    for (const order of [{ customerLat: -13.9, customerLng: 33.7 }, { customerLat: -13.9, customerLng: null }, { customerLat: null, customerLng: 33.7 }, { customerLat: 'x', customerLng: 'y' }]) {
+    for (const order of [{ customerLat: null, customerLng: null }, { customerLat: -13.9, customerLng: 33.7 }, { customerLat: -13.9, customerLng: null }, { customerLat: 'x', customerLng: 'y' }]) {
       await assertFails(saveOrderBatch(as('rep1'), { order }));
     }
   });
-  it('rep: a pinned customer still needs its pin copied exactly', async () => {
+  it('rep: order for a customer whose pin fields are absent (legacy) is refused', async () => {
+    await adminSet(['customers', 'c1'], { name: 'Shop', phone: '0999', location: 'Area 25', active: true, assignedDay: 'Thu' });
+    await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
+  });
+  it('rep: a pinned customer needs its pin copied exactly', async () => {
     await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: -13.0 } }));
     await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
     await assertSucceeds(saveOrderBatch(as('rep1')));
   });
-  it('manager-entered: accepted for an unpinned customer with null coordinates; refused with invented ones', async () => {
+  it('manager-entered: refused for an unpinned customer (null or invented coordinates)', async () => {
     await unpinned();
     const MID = `m_mgr_${REQ}`;
     const mgrOrder = (over) => { const db = as('mgr'); const b = writeBatch(db);
@@ -1806,19 +1802,17 @@ describe('RC6.3-ORD. a missing customer location never blocks an order; pins are
       b.set(doc(db, 'orders', MID), orderDoc({ createdBy: 'mgr', createdByEmail: 'mgr@example.com', source: 'manager-entered', enteredBy: 'mgr', enteredByEmail: 'mgr@example.com', attributedRepEmail: 'rep1@example.com', requestId: REQ, visitId: null, ...over }));
       return b.commit(); };
     await assertFails(mgrOrder({ customerLat: -13.9, customerLng: 33.7 }));
-    await assertSucceeds(mgrOrder({ customerLat: null, customerLng: null }));
+    await assertFails(mgrOrder({ customerLat: null, customerLng: null }));
   });
-  it('app: the real rep and manager save functions succeed for an unpinned customer (null coordinates, one visit, one number)', async () => {
+  it('app: the real rep and manager save functions refuse an unpinned customer and write nothing', async () => {
     await unpinned();
+    const before = (await adminGet('orderCounters', 'naisiOrder')).counter;
     const r = await appAs('rep1');
     const items = [{ qty: 1, desc: 'Amanda', price: 5, total: 5, productId: 'p1' }];
-    const o1 = await r.visits.submitOrderWithVisit({ customerId: 'c1', items, notes: '', requestId: 'req-rc63-0001', uid: 'rep1', email: 'rep1@example.com', now: () => new Date('2026-10-15T08:00:00Z') });
-    const saved = await adminGet('orders', o1.orderId);
-    must(saved.customerLat === null && saved.customerLng === null, 'coordinates ' + JSON.stringify([saved.customerLat, saved.customerLng]));
+    await assertRejects(r.visits.submitOrderWithVisit({ customerId: 'c1', items, notes: '', requestId: 'req-rc64-0001', uid: 'rep1', email: 'rep1@example.com', now: () => new Date('2026-10-15T08:00:00Z') }));
     const m = await appAs('mgr');
-    const o2 = await m.managerOrders.submitOrderAsManager({ customerId: 'c1', items, notes: '', attributedRepEmail: 'rep1@example.com', requestId: 'req-rc63-0002', uid: 'mgr', email: 'mgr@example.com', now: () => new Date('2026-10-15T08:00:00Z') });
-    must((await adminGet('orders', o2.orderId)).customerLat === null, 'manager order coordinates');
-    must((await adminGet('orderCounters', 'naisiOrder')).counter === 43, 'two numbers used');
+    await assertRejects(m.managerOrders.submitOrderAsManager({ customerId: 'c1', items, notes: '', attributedRepEmail: 'rep1@example.com', requestId: 'req-rc64-0002', uid: 'mgr', email: 'mgr@example.com', now: () => new Date('2026-10-15T08:00:00Z') }));
+    must((await adminGet('orderCounters', 'naisiOrder')).counter === before, 'no order number used');
   });
   it('customers: creating a customer still REQUIRES a valid pin (unchanged); removing an existing pin is still refused', async () => {
     await assertFails(addDoc(collection(as('rep1'), 'customers'), { name: 'X', phone: '', location: 'A', lat: null, lng: null, active: true, assignedDay: null, createdBy: 'rep1' }));

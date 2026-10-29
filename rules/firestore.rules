@@ -428,11 +428,9 @@ service cloud.firestore {
     // RC5 finding A: an expense amount is a finite number, above 0 and at most 1000000000000. Anything else (a string, markup, NaN, Infinity,
     // a negative, a missing amount) is refused for EVERY role, on create and on update, so saved markup can never reach a manager's screen.
     function expenseAmountOk(d) { return d.get('amount', null) is number && d.amount > 0 && d.amount <= 1000000000000; }
-    // RC6.4: expanded expense categories and optional structured fields for better expense tracking.
-    // Rep (submitter) categories: Transport, Meals, Other, Internet, Packaging, Supplies
-    // Deliverer categories: Transport, Meals, Fuel, Other, Internet, Maintenance, Packaging, Supplies, Bank
-    // Manager: all categories (includes legacy Stock records for backward compatibility)
-    // Reps cannot create, read or edit Fuel, Maintenance, Bank records (including older ones).
+    // Expense categories (RC6.3 set; the RC6.4 expansion was withdrawn).
+    // Rep (submitter): Transport, Meals, Other. Deliverer: Transport, Meals, Fuel, Other. Manager: any, including Stock.
+    // Reps cannot create, read or edit Fuel or Stock records (including their own older ones).
     // A list query by a rep must filter category (src/expenses.js; composite index createdBy, category, date).
     function repExpenseCategoryOk(d) {
       return d.get('category', null) in ['Transport', 'Meals', 'Other'];

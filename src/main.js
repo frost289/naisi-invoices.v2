@@ -3789,7 +3789,7 @@ async function initApp(user, role) {
       const c = customersCache.find(cc => cc.id === item.dataset.id);
       if (!c) return;
       moCustomer = c; moCustSearch.value = c.name; moCustSuggestions.style.display = 'none';
-      moCustSelected.textContent = hasPin(c) ? `Selected: ${c.name}` : `Selected: ${c.name} — no saved location. The order can be saved; it will be flagged "No location" for delivery follow-up.`;
+      moCustSelected.textContent = hasPin(c) ? `Selected: ${c.name}` : `Selected: ${c.name} — this customer has no pinned location; pin it first.`;
     });
 
     moSaveBtn.addEventListener('click', async () => {
@@ -3797,6 +3797,7 @@ async function initApp(user, role) {
       const rep = moRep.value;
       if (!rep) { moError.textContent = 'Choose the sales rep this order is for.'; moError.style.display = 'block'; return; }
       if (!moCustomer) { moError.textContent = 'Choose a customer.'; moError.style.display = 'block'; return; }
+      if (!hasPin(moCustomer)) { moError.textContent = 'This customer has no pinned location. Pin it first.'; moError.style.display = 'block'; return; }
       const items = getItems(moItemsBody);
       const problem = validateOrderItems(items);
       if (problem) { moError.textContent = problem; moError.style.display = 'block'; return; }
@@ -3865,8 +3866,8 @@ async function initApp(user, role) {
     }
 
     // Every visit to a shop without a location reminds the rep to save it while he is standing there (one tap, GPS start).
-    // RC6.3 owner decision: it is a REMINDER, never a block - orders and no-order visits save without a pin, and the order
-    // is flagged "No location" for delivery follow-up. "Not now" only hides the buttons for this visit.
+    // A no-order visit still saves without a pin ("Not now" only hides the reminder buttons for this visit), but an ORDER
+    // needs a pin: the order form stays hidden behind the "Pin this customer's location first" box until it is saved.
     const lvPinPrompt = document.getElementById('lvPinPrompt');
     const lvPinLaterNote = document.getElementById('lvPinLaterNote');
     let lvPinDeferred = false;
@@ -3887,8 +3888,8 @@ async function initApp(user, role) {
       lvRefreshPinPrompt();
       const wantsOrder = lvOutcomeYes.classList.contains('active');
       const ok = !!lvSelected && hasPin(lvSelected);
-      lvPinRequired.style.display = 'none';
-      lvOrderFormWrap.style.display = wantsOrder ? 'block' : 'none';
+      lvPinRequired.style.display = (wantsOrder && !ok) ? 'block' : 'none';
+      lvOrderFormWrap.style.display = (wantsOrder && ok) ? 'block' : 'none';
     }
 
     function lvPromptForPin() {
@@ -4243,7 +4244,7 @@ async function initApp(user, role) {
         });
         showToast(res.alreadySaved
           ? `Order ${res.orderNo} had already been saved. No duplicate was created.`
-          : `Order ${res.orderNo} submitted and visit logged.${hasPin(lvSelected) ? '' : ' It is flagged "No location" for delivery - please save the shop\'s location when you can.'}`, res.alreadySaved ? 'info' : 'success');
+          : `Order ${res.orderNo} submitted and visit logged.`, res.alreadySaved ? 'info' : 'success');
         await lvAfterSaved();
       } catch (err) {
         if (err.code === 'visit-conflict') { lvShowConflict(err); return; }
