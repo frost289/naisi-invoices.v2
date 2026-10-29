@@ -73,7 +73,7 @@ try {
   await logout();
   await login('mgr@naisi.test');
   await R.check('E29', 'Manager sees the new customer under "Awaiting scheduling" and schedules it; it gets a dated history entry', async () => {
-    await nav('navCustomersBtn'); await page.waitForSelector('#awaitingSchedulingBox', { state: 'visible', timeout: 8000 });
+    await nav('navScheduleBtn'); await page.waitForSelector('#awaitingSchedulingBox', { state: 'visible', timeout: 8000 });   // RC6.2: one Weekly Schedule tab
     const t = await page.locator('#awaitingSchedulingList').innerText();
     expect(/Hotel Newshop/.test(t), 'awaiting list: ' + t);
     await shot('26-awaiting-scheduling');
@@ -152,7 +152,7 @@ try {
 
   // ---------------- decision 6: number control ----------------
   await R.check('E34', 'Invoice numbering: automatic, adjusted by a manager with a required reason; audit shows previous/new/actor/reason', async () => {
-    await nav('navFormBtn'); await page.waitForSelector('#adjustNumberingBtn', { state: 'visible' });
+    await nav('navInvoicesBtn'); await page.waitForSelector('#adjustNumberingBtn', { state: 'visible' });   // RC6.2: numbering lives on the Invoices tab
     await page.click('#adjustNumberingBtn'); await page.waitForSelector('#adjustNumberModal', { state: 'visible' });
     await page.fill('#adjustCounter', '500'); await page.click('#adjustNumberSaveBtn');
     expect(await page.locator('#adjustNumberError').isVisible(), 'reason should be required');
@@ -230,26 +230,14 @@ try {
   // ---------------- decision 4: stand-alone (walk-in) invoices ----------------
   await fresh();
   await login('mgr@naisi.test');
-  await R.check('E40', 'Walk-in invoice: the manager has a visible entry; it uses the shared number sequence, explicit identity; a lost acknowledgement + retry and a double click create ONE invoice', async () => {
-    await nav('navFormBtn');
-    await page.fill('#custName', 'Walk-in Trader');
-    await page.click('#quickAddGrid button >> nth=0'); await page.waitForSelector('#itemsBody tr');
-    await page.fill('#itemsBody tr .qty-input', '2');
-    await fake(() => window.__fake.failNextAcks(1));
-    await page.click('#generateBtn');
-    await page.waitForFunction(() => /Could not save/i.test(document.body.innerText) || window.__fake.list('invoices').length > 0, null, { timeout: 8000 });
-    await page.waitForTimeout(300);
-    await page.dblclick('#generateBtn');                                    // retry (and a double click)
-    await page.waitForTimeout(800);
-    const invs = (await store('invoices')).filter(i => i.kind === 'standalone');
-    eq(invs.length, 1, 'one stand-alone invoice expected, got ' + invs.length);
-    const inv = invs[0];
-    expect(/^sa_u_mgr_/.test(inv.id) || /^sa_/.test(inv.id), 'identity ' + inv.id);
-    eq([inv.orderId, inv.kind, /-0370$/.test(inv.invoiceNo)], [null, 'standalone', true], 'fields ' + JSON.stringify(inv).slice(0, 200));
-    eq((await doc('counters/naisiInvoice')).counter, 371, 'counter moved once');
-    expect((await doc('invoiceNumbers/' + inv.invoiceNo)), 'registry entry missing');
-    await shot('33-walkin-invoice');
-    return inv.invoiceNo;
+  await R.check('E40', 'RC6.2 owner decision: the Walk-in Invoice tab is switched off for managers too; invoice numbering is still reachable (Invoices tab). Stand-alone invoice idempotency stays covered by unit/invoicing.test.js and the rules suite', async () => {
+    await page.waitForSelector('#navOrdersBtn', { state: 'visible' });
+    expect(!(await page.locator('#navFormBtn').isVisible()), 'the Walk-in Invoice tab is visible to a manager');
+    await nav('navInvoicesBtn');
+    expect(await page.locator('#invoiceNumberingCard #adjustNumberingBtn').isVisible(), 'invoice numbering not reachable from the Invoices tab');
+    eq((await store('invoices')).filter(i => i.kind === 'standalone').length, 0, 'no stand-alone invoice');
+    await shot('33-no-walkin-tab');
+    return 'tab hidden; numbering on Invoices';
   });
   await logout(); await login('rep1@naisi.test'); await page.waitForSelector('#todaysRouteCard', { state: 'visible' });
   await R.check('E41', 'A rep does not see the Walk-in Invoice tab or any manager-only tab', async () => {
@@ -267,7 +255,7 @@ try {
   await logout();
   await fresh({ extra: planData });
   await login('mgr@naisi.test');
-  await nav('navCustomersBtn');
+  await nav('navScheduleBtn'); await page.click('#schedTools > summary');   // RC6.2: planning tools sit on the Weekly Schedule tab
   const openPlanner = async () => { await page.click('#suggestScheduleToggleBtn'); await page.click('#suggestCalcBtn'); await page.waitForSelector('#suggestTotals', { timeout: 8000 }); };
   await R.check('E43', 'Suggest schedule: new shops are placed next to the nearby shops\' day; shops without a pin are listed (not guessed); NOTHING is saved yet', async () => {
     await openPlanner();
@@ -323,7 +311,7 @@ try {
   const tw = (n) => geo('Twin Shop', -13.95, 33.80 + n * 0.001, null);
   await fresh({ extra: { 'customers/t1': tw(1), 'customers/t2': tw(2) } });
   await login('mgr@naisi.test');
-  await nav('navCustomersBtn');
+  await nav('navScheduleBtn'); await page.click('#schedTools > summary');
   const csv = 'Name,Day,Phone\nAlpha Shop,Fri,\nBravo Shop,Mon,\nCharlie Shop,Tue,\nEcho Friday,Fri,\nTwin Shop,Wed,\nGhost Mart,Sat,\nNew-shop prospect - Chiuzira,Mon,\n';
   const upload = async (name, buffer, type = 'text/csv') => { await page.setInputFiles('#importDaysFile', { name, mimeType: type, buffer }); await page.waitForSelector('#importSummary', { timeout: 8000 }); };
   const dayOfCust = async (id) => (await doc('customers/' + id)).assignedDay;
@@ -375,6 +363,7 @@ try {
   await logout(); await login('rep1@naisi.test'); await page.waitForSelector('#todaysRouteCard', { state: 'visible' });
   await R.check('E51', 'A rep cannot see the schedule planner or the days import (manager only)', async () => {
     expect(!(await page.locator('#suggestScheduleToggleBtn').isVisible()) && !(await page.locator('#importDaysToggleBtn').isVisible()), 'planner/import visible to a rep');
+    expect(!(await page.locator('#navScheduleBtn').isVisible()), 'Weekly Schedule tab visible to a rep');
     return 'hidden';
   });
   await R.check('E53', 'Stored HTML/script injection: malicious saved customer, product, order, invoice, expense and visit text shows as plain text for a manager and never runs', async () => {
@@ -407,7 +396,8 @@ try {
   await R.check('E54', 'Malicious or malformed saved expense.amount never creates elements or runs code for a manager or a rep; it is shown as "Invalid amount" and left out of totals', async () => {
     const EVILAMT = `<img src=x onerror="window.__pwn=(window.__pwn||0)+1"><b id=evilamt>x</b>`;
     const day = '2026-10-15';
-    const exp = (amount, by = 'rep1') => ({ date: day, category: 'Fuel', amount, notes: 'n', createdBy: 'u_' + by, createdByEmail: by + '@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T08:00:00Z') } });
+    // RC6.3: 'Other' (a category a rep may see) so the malformed-amount handling is exercised for BOTH roles; a rep never sees Fuel.
+    const exp = (amount, by = 'rep1') => ({ date: day, category: 'Other', amount, notes: 'n', createdBy: 'u_' + by, createdByEmail: by + '@naisi.test', createdAt: { __ts: Date.parse('2026-10-15T08:00:00Z') } });
     await logout();
     await fresh({ extra: {
       'expenses/eGood': exp(1500),

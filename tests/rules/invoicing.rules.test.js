@@ -290,8 +290,8 @@ describe('E. order <-> visit <-> counter integrity (from BOTH sides)', () => {
     await assertFails(saveOrderBatch(as('rep1'), { order: { status: 'Approved' } }));
     await assertFails(saveOrderBatch(as('rep1'), { order: { status: 'Invoiced' } }));
   });
-  it('REFUSED: order without a pin, empty order, order pointing at another visit', async () => {
-    await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
+  it('REFUSED: order that drops the pin of a PINNED customer, empty order, order pointing at another visit', async () => {
+    await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));     // c1 has a pin: it must be copied
     await assertFails(saveOrderBatch(as('rep1'), { order: { items: [], grandTotal: 0 }, vis: { orderValue: 0 } }));
     await assertFails(saveOrderBatch(as('rep1'), { order: { visitId: 'v_rep1_other-request-id' } }));
   });
@@ -864,6 +864,7 @@ async function appAs(who) {
     visits: await import('../../src/visits.js'), orders: await import('../../src/orders.js'), customers: await import('../../src/customers.js'),
     stock: await import('../../src/stock.js'), managerOrders: await import('../../src/managerOrders.js'), numbering: await import('../../src/numbering.js'),
     scheduleStore: await import('../../src/scheduleStore.js'), scheduleHistory: await import('../../src/scheduleHistory.js'),
+    expenses: await import('../../src/expenses.js'),
   };
 }
 const adminGet = async (...p) => { const sn = await readAsAdmin((adb) => getDoc(doc(adb, ...p))); return sn.exists() ? sn.data() : null; };
@@ -1005,7 +1006,7 @@ describe('L. manager-entered orders (decision 3)', () => {
     ['an inactive customer', { customerId: 'c2', customerName: 'Closed Shop' }],
     ['a customer name that does not match', { customerName: 'Other' }],
     ['no items', { items: [], grandTotal: 0 }],
-    ['no pin', { customerLat: null, customerLng: null }],
+    ['no pin although the customer has one', { customerLat: null, customerLng: null }],
     ['an already Approved status', { status: 'Approved' }],
   ])('raw: refused with %s', async (_n, order) => { await assertFails(mBatch(as('mgr'), { order })); });
   it('raw: refused when the id is not m_<uid>_<requestId>, the counter does not move, moves by 2, or names another order', async () => {
@@ -1065,7 +1066,7 @@ describe('L. manager-entered orders (decision 3)', () => {
     }
     must((await adminCount('orders')) === 3, 'a refused entry created an order');
   });
-  it('app: refuses a customer that is being merged, inactive, or without a pin', async () => {
+  it('app: refuses a customer that is being merged or inactive (RC6.3: a missing pin is NOT refused, see RC6.3-ORD)', async () => {
     const a = await appAs('mgr');
     await assertRejects(enter(a, { customerId: 'c2' }));
     await adminSet(['customers', 'c1'], { ...shop, mergeLock: { into: 'c2', by: 'mgr', at: Timestamp.now() } });
@@ -1602,7 +1603,8 @@ describe('RC4-I. order lines and money are validated by the rules (finding 3)', 
 // (emulator download blocked, HTTP 403). docs/RC5-DEVELOPER-REVIEW-GUIDE.md lists the expected result of each group.
 // =============================================================================================
 describe('RC5-A. expense.amount is validated by the rules for every role (stored markup can never exist)', () => {
-  const exp = (over = {}) => ({ date: '2026-10-15', category: 'Fuel', amount: 1500, notes: 'n', createdBy: 'rep1', createdByEmail: 'rep1@example.com', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
+  // RC6.3: a rep may only use Transport / Meals / Other, so the rep's fixtures use Transport; the deliverer and manager keep Fuel.
+  const exp = (over = {}) => ({ date: '2026-10-15', category: (over.createdBy && over.createdBy !== 'rep1') ? 'Fuel' : 'Transport', amount: 1500, notes: 'n', createdBy: 'rep1', createdByEmail: 'rep1@example.com', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
   const BADAMT = { 'markup string': '<img src=x onerror=alert(1)>', 'numeric string': '1500', 'NaN': NaN, 'Infinity': Infinity, 'zero': 0, 'negative': -5, 'too large': 1e13, 'null': null };
   for (const who of ['rep1', 'deliv', 'mgr']) {
     for (const [name, v] of Object.entries(BADAMT)) {
@@ -1767,5 +1769,153 @@ describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation tran
     const m = await appAs('mgr');
     const problem = m.visits.validateOrderItems([...items12(), { productId: 'p13', desc: 'x', qty: 1, price: 1, total: 1 }]);
     must(typeof problem === 'string' && problem.length > 0, 'validateOrderItems must return a problem for 13 lines, got ' + problem);
+  });
+});
+
+
+// =============================================================================================
+// RC6.3 (owner review of RC6.2, 20 Oct 2026). Emulator tests: NOT executed in the build environment (the emulator download from
+// storage.googleapis.com is blocked there, HTTP 403). They must pass on the developer's machine before release.
+// =============================================================================================
+describe('RC6.3-ORD. a missing customer location never blocks an order; pins are never invented or dropped', () => {
+  const unpinned = async (id = 'c1', over = {}) => adminSet(['customers', id], { ...shop, lat: null, lng: null, ...over });
+  it('rep: order for an UNPINNED customer with null coordinates + visit + counter is accepted', async () => {
+    await unpinned();
+    await assertSucceeds(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
+  });
+  it('rep: order for a customer whose pin fields are absent (legacy) is accepted with null coordinates', async () => {
+    await adminSet(['customers', 'c1'], { name: 'Shop', phone: '0999', location: 'Area 25', active: true, assignedDay: 'Thu' });
+    await assertSucceeds(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
+  });
+  it('rep: invented, partial or malformed coordinates for an unpinned customer are refused', async () => {
+    await unpinned();
+    for (const order of [{ customerLat: -13.9, customerLng: 33.7 }, { customerLat: -13.9, customerLng: null }, { customerLat: null, customerLng: 33.7 }, { customerLat: 'x', customerLng: 'y' }]) {
+      await assertFails(saveOrderBatch(as('rep1'), { order }));
+    }
+  });
+  it('rep: a pinned customer still needs its pin copied exactly', async () => {
+    await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: -13.0 } }));
+    await assertFails(saveOrderBatch(as('rep1'), { order: { customerLat: null, customerLng: null } }));
+    await assertSucceeds(saveOrderBatch(as('rep1')));
+  });
+  it('manager-entered: accepted for an unpinned customer with null coordinates; refused with invented ones', async () => {
+    await unpinned();
+    const MID = `m_mgr_${REQ}`;
+    const mgrOrder = (over) => { const db = as('mgr'); const b = writeBatch(db);
+      b.set(doc(db, 'orderCounters', 'naisiOrder'), { counter: 42, lastOrderId: MID });
+      b.set(doc(db, 'orders', MID), orderDoc({ createdBy: 'mgr', createdByEmail: 'mgr@example.com', source: 'manager-entered', enteredBy: 'mgr', enteredByEmail: 'mgr@example.com', attributedRepEmail: 'rep1@example.com', requestId: REQ, visitId: null, ...over }));
+      return b.commit(); };
+    await assertFails(mgrOrder({ customerLat: -13.9, customerLng: 33.7 }));
+    await assertSucceeds(mgrOrder({ customerLat: null, customerLng: null }));
+  });
+  it('app: the real rep and manager save functions succeed for an unpinned customer (null coordinates, one visit, one number)', async () => {
+    await unpinned();
+    const r = await appAs('rep1');
+    const items = [{ qty: 1, desc: 'Amanda', price: 5, total: 5, productId: 'p1' }];
+    const o1 = await r.visits.submitOrderWithVisit({ customerId: 'c1', items, notes: '', requestId: 'req-rc63-0001', uid: 'rep1', email: 'rep1@example.com', now: () => new Date('2026-10-15T08:00:00Z') });
+    const saved = await adminGet('orders', o1.orderId);
+    must(saved.customerLat === null && saved.customerLng === null, 'coordinates ' + JSON.stringify([saved.customerLat, saved.customerLng]));
+    const m = await appAs('mgr');
+    const o2 = await m.managerOrders.submitOrderAsManager({ customerId: 'c1', items, notes: '', attributedRepEmail: 'rep1@example.com', requestId: 'req-rc63-0002', uid: 'mgr', email: 'mgr@example.com', now: () => new Date('2026-10-15T08:00:00Z') });
+    must((await adminGet('orders', o2.orderId)).customerLat === null, 'manager order coordinates');
+    must((await adminGet('orderCounters', 'naisiOrder')).counter === 43, 'two numbers used');
+  });
+  it('customers: creating a customer still REQUIRES a valid pin (unchanged); removing an existing pin is still refused', async () => {
+    await assertFails(addDoc(collection(as('rep1'), 'customers'), { name: 'X', phone: '', location: 'A', lat: null, lng: null, active: true, assignedDay: null, createdBy: 'rep1' }));
+    await assertFails(updateDoc(doc(as('rep1'), 'customers', 'c1'), { lat: null, lng: null }));
+  });
+});
+
+describe('RC6.3-EXP. a rep works only with his own Transport / Meals / Other expenses; deliverer and manager unchanged', () => {
+  const e = (over = {}) => ({ date: '2026-10-15', category: 'Transport', amount: 100, notes: '', createdBy: 'rep1', createdByEmail: 'rep1@example.com', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
+  beforeEach(async () => {
+    await adminSet(['expenses', 'r1T'], e());
+    await adminSet(['expenses', 'r1F'], e({ category: 'Fuel' }));
+    await adminSet(['expenses', 'r1S'], e({ category: 'Stock' }));
+    await adminSet(['expenses', 'r2M'], e({ category: 'Meals', createdBy: 'rep2', createdByEmail: 'rep2@example.com' }));
+    await adminSet(['expenses', 'dF'], e({ category: 'Fuel', createdBy: 'deliv', createdByEmail: 'deliv@example.com' }));
+    await adminSet(['expenses', 'mS'], e({ category: 'Stock', createdBy: 'mgr', createdByEmail: 'mgr@example.com' }));
+  });
+  it('rep: create Transport/Meals/Other own = allowed; Fuel/Stock/missing category/someone else = refused', async () => {
+    for (const category of ['Transport', 'Meals', 'Other']) await assertSucceeds(addDoc(collection(as('rep1'), 'expenses'), e({ category })));
+    for (const category of ['Fuel', 'Stock', 'Airtime']) await assertFails(addDoc(collection(as('rep1'), 'expenses'), e({ category })));
+    const noCat = e(); delete noCat.category; await assertFails(addDoc(collection(as('rep1'), 'expenses'), noCat));
+    await assertFails(addDoc(collection(as('rep1'), 'expenses'), e({ createdBy: 'rep2' })));
+  });
+  it('rep: reads his own Transport record; cannot read his own older Fuel/Stock, rep2\'s, the deliverer\'s or the manager\'s', async () => {
+    await assertSucceeds(getDoc(doc(as('rep1'), 'expenses', 'r1T')));
+    for (const id of ['r1F', 'r1S', 'r2M', 'dF', 'mS']) await assertDenied(getDoc(doc(as('rep1'), 'expenses', id)));
+  });
+  it('rep: the app\'s list query (own + category in [Transport, Meals, Other]) is allowed; an unfiltered or other-user query is denied', async () => {
+    const db = as('rep1');
+    await assertSucceeds(getDocs(query(collection(db, 'expenses'), where('createdBy', '==', 'rep1'), where('category', 'in', ['Transport', 'Meals', 'Other']))));
+    await assertDenied(getDocs(query(collection(db, 'expenses'), where('createdBy', '==', 'rep1'))));
+    await assertDenied(getDocs(query(collection(db, 'expenses'), where('createdBy', '==', 'rep2'), where('category', 'in', ['Transport', 'Meals', 'Other']))));
+    await assertDenied(getDocs(collection(db, 'expenses')));
+  });
+  it('rep: edits his own Transport record within his categories; cannot move it to Fuel, cannot edit his Fuel record, cannot reassign', async () => {
+    await assertSucceeds(updateDoc(doc(as('rep1'), 'expenses', 'r1T'), { category: 'Meals', amount: 200, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as('rep1'), 'expenses', 'r1T'), { category: 'Fuel', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as('rep1'), 'expenses', 'r1F'), { category: 'Transport', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as('rep1'), 'expenses', 'r1T'), { createdBy: 'rep2' }));
+    await assertFails(deleteDoc(doc(as('rep1'), 'expenses', 'r1T')));
+  });
+  it('deliverer: still logs, reads and edits his own Fuel; cannot read others', async () => {
+    await assertSucceeds(addDoc(collection(as('deliv'), 'expenses'), e({ category: 'Fuel', createdBy: 'deliv', createdByEmail: 'deliv@example.com' })));
+    await assertSucceeds(getDoc(doc(as('deliv'), 'expenses', 'dF')));
+    await assertSucceeds(updateDoc(doc(as('deliv'), 'expenses', 'dF'), { amount: 300, updatedAt: serverTimestamp() }));
+    await assertDenied(getDoc(doc(as('deliv'), 'expenses', 'r1T')));
+  });
+  it('manager: reads every record (including the rep\'s older Fuel/Stock), logs any category, deletes', async () => {
+    for (const id of ['r1T', 'r1F', 'r1S', 'r2M', 'dF', 'mS']) await assertSucceeds(getDoc(doc(as('mgr'), 'expenses', id)));
+    await assertSucceeds(getDocs(collection(as('mgr'), 'expenses')));
+    await assertSucceeds(addDoc(collection(as('mgr'), 'expenses'), e({ category: 'Stock', createdBy: 'mgr', createdByEmail: 'mgr@example.com' })));
+    await assertSucceeds(deleteDoc(doc(as('mgr'), 'expenses', 'r1S')));
+  });
+  it('app: fetchMyExpensesPage as rep1 returns only his Transport/Meals/Other (needs the composite index on a real project)', async () => {
+    const a = await appAs('rep1');
+    const page = await a.expenses.fetchMyExpensesPage('rep1');
+    must(page.items.map(x => x.id).join() === 'r1T', 'items ' + page.items.map(x => x.id).join());
+  });
+});
+
+describe('RC6.3-PIN. location-capture attribution: first capture only, caller\'s identity, server time, never changed', () => {
+  const unpinned = () => adminSet(['customers', 'c1'], { ...shop, lat: null, lng: null });
+  const stamp = (who = 'rep1') => ({ firstPinnedBy: who, firstPinnedByEmail: who + '@example.com', firstPinnedAt: serverTimestamp() });
+  const newCust = (over = {}) => ({ name: 'New Shop', phone: '', location: 'Area 3', lat: -13.9, lng: 33.7, active: true, assignedDay: null, createdBy: 'rep1', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over });
+  it('create: a stamp with the caller\'s identity and server time is accepted; forged identity/time or a partial stamp is refused; no stamp is still accepted', async () => {
+    await assertSucceeds(addDoc(collection(as('rep1'), 'customers'), newCust(stamp())));
+    await assertSucceeds(addDoc(collection(as('rep1'), 'customers'), newCust()));
+    await assertFails(addDoc(collection(as('rep1'), 'customers'), newCust(stamp('rep2'))));
+    await assertFails(addDoc(collection(as('rep1'), 'customers'), newCust({ ...stamp(), firstPinnedAt: Timestamp.fromMillis(1) })));
+    await assertFails(addDoc(collection(as('rep1'), 'customers'), newCust({ firstPinnedBy: 'rep1' })));
+  });
+  it('update: the first valid pin on an unpinned customer may carry the caller\'s stamp; not with someone else\'s identity, not without a valid pin', async () => {
+    await unpinned();
+    await assertFails(updateDoc(doc(as('rep1'), 'customers', 'c1'), { lat: -13.9, lng: 33.7, ...stamp('rep2') }));
+    await assertFails(updateDoc(doc(as('rep1'), 'customers', 'c1'), { ...stamp() }));                       // no pin
+    await assertSucceeds(updateDoc(doc(as('rep1'), 'customers', 'c1'), { lat: -13.9, lng: 33.7, ...stamp() }));
+  });
+  it('once stamped, the stamp can never be changed or removed (a re-pin keeps the original credit)', async () => {
+    await unpinned();
+    await assertSucceeds(updateDoc(doc(as('rep1'), 'customers', 'c1'), { lat: -13.9, lng: 33.7, ...stamp() }));
+    await assertSucceeds(updateDoc(doc(as('rep2'), 'customers', 'c1'), { lat: -13.95, lng: 33.75 }));          // re-pin without touching the stamp
+    await assertFails(updateDoc(doc(as('rep2'), 'customers', 'c1'), { lat: -13.96, lng: 33.76, ...stamp('rep2') }));
+    await assertFails(updateDoc(doc(as('mgr'), 'customers', 'c1'), { firstPinnedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as('rep1'), 'customers', 'c1'), { firstPinnedBy: deleteField() }));
+  });
+  it('a customer that was pinned before RC6.3 cannot be given a stamp later (it was not a first capture)', async () => {
+    await assertFails(updateDoc(doc(as('rep1'), 'customers', 'c1'), { lat: -13.91, lng: 33.71, ...stamp() }));
+  });
+  it('app: addCustomer and updateCustomerLocation write exactly what the rules accept', async () => {
+    const a = await appAs('rep1');
+    const id = await a.customers.addCustomer({ name: 'App Shop', phone: '', location: 'Area 3', lat: -13.9, lng: 33.7, uid: 'rep1', email: 'rep1@example.com' });
+    must((await adminGet('customers', id)).firstPinnedBy === 'rep1', 'create stamp');
+    await unpinned();
+    const r = await a.customers.updateCustomerLocation('c1', { lat: -13.9, lng: 33.7, uid: 'rep1', email: 'rep1@example.com' });
+    must(r.firstCapture === true && (await adminGet('customers', 'c1')).firstPinnedBy === 'rep1', 'first capture stamp');
+    const b = await appAs('rep2');
+    await b.customers.updateCustomerLocation('c1', { lat: -13.95, lng: 33.75, uid: 'rep2', email: 'rep2@example.com' });
+    must((await adminGet('customers', 'c1')).firstPinnedBy === 'rep1', 're-pin moved the credit');
   });
 });

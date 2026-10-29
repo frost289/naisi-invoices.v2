@@ -212,13 +212,11 @@ describe('decision 3 - manager-entered orders', () => {
     expect(at(F.store, 'orders/')).toHaveLength(1);
     expect(F.store.get('orderCounters/naisiOrder').counter).toBe(42);
   });
-  it('refuses an inactive, merging or unpinned customer, and invalid items', async () => {
+  it('refuses an inactive or merging customer and invalid items (RC6.3: an unpinned customer is NOT refused, see below)', async () => {
     F.store.set('customers/c1', pinned({ active: false }));
     await expect(enter()).rejects.toThrow(/inactive/);
     F.store.set('customers/c1', pinned({ mergeLock: { into: 'c2' } }));
     await expect(enter()).rejects.toMatchObject({ code: 'customer-merging' });
-    F.store.set('customers/c1', pinned({ lat: null, lng: null }));
-    await expect(enter()).rejects.toThrow(/pinned/);
     F.store.set('customers/c1', pinned());
     await expect(enter({ items: [] })).rejects.toThrow(/at least one item/i);
     expect(at(F.store, 'orders/')).toHaveLength(0);

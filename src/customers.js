@@ -139,7 +139,7 @@ export function hasPin(customer) {
 // customer; only a manager gives it a visit day (setCustomerVisitDay below), and until then it is listed as
 // "awaiting scheduling" for managers and is not a target for any rep. The security rules refuse a new customer
 // that carries a day, is inactive, or carries any schedule/merge field.
-export async function addCustomer({ name, phone, location, lat, lng, uid }) {
+export async function addCustomer({ name, phone, location, lat, lng, uid, email }) {
   if (!isValidPin(lat, lng)) throw new Error('A pinned location is required to add a customer.');
   const docRef = await addDoc(collection(db, 'customers'), {
     name: normalizeText(name), phone: phone || '', location: normalizeText(location),
@@ -147,8 +147,20 @@ export async function addCustomer({ name, phone, location, lat, lng, uid }) {
     lng: (typeof lng === 'number' && !isNaN(lng)) ? lng : null,
     active: true, assignedDay: null,
     createdBy: uid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    // RC6.3: a location captured when the customer is created gets the same first-capture credit as one added later.
+    ...firstPinStamp(uid, email),
   });
   return docRef.id;
+}
+
+// RC6.3 location-capture attribution. The FIRST time a customer gets a valid pin, the pin is stamped with who captured it
+// (uid + email) and the server time. The rules accept the stamp only with the caller's own identity and the request time,
+// only together with that first valid pin, and never allow it to be changed or removed afterwards - so a later re-pin
+// cannot move the credit into another week. Customers pinned before RC6.3 have no stamp and are not counted.
+// The resulting "locations captured" figure is INFORMATIONAL: it is not part of coverage or any performance percentage.
+export const FIRST_PIN_KEYS = ['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt'];
+function firstPinStamp(uid, email) {
+  return uid ? { firstPinnedBy: uid, firstPinnedByEmail: email || '', firstPinnedAt: serverTimestamp() } : {};
 }
 
 export const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -216,11 +228,18 @@ export async function updateCustomer(id, { name, phone, location, lat, lng }) {
 
 // Location-only patch, used by the "Set Location" pin button on an
 // existing customer row — doesn't require re-sending name/phone/location.
-export async function updateCustomerLocation(id, { lat, lng }) {
-  await updateDoc(doc(db, 'customers', id), {
-    lat: (typeof lat === 'number' && !isNaN(lat)) ? lat : null,
-    lng: (typeof lng === 'number' && !isNaN(lng)) ? lng : null,
-    updatedAt: serverTimestamp(),
+// RC6.3: read-then-write in one transaction so the first-capture stamp (see firstPinStamp) is added ONLY when the customer
+// had no valid pin and no stamp yet. Re-pinning keeps the original stamp untouched.
+export async function updateCustomerLocation(id, { lat, lng, uid, email }) {
+  if (!isValidPin(lat, lng)) throw new Error('That is not a valid map location.');
+  const ref = doc(db, 'customers', id);
+  return await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('That customer no longer exists.');
+    const c = snap.data();
+    const firstCapture = !isValidPin(c.lat, c.lng) && !FIRST_PIN_KEYS.some(k => k in c);
+    tx.update(ref, { lat, lng, updatedAt: serverTimestamp(), ...(firstCapture ? firstPinStamp(uid, email) : {}) });
+    return { firstCapture: firstCapture && !!uid };
   });
 }
 

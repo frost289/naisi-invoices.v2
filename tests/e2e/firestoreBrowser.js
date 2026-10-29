@@ -8,12 +8,14 @@ F.setClock(null);
 try { const saved = localStorage.getItem(KEY); if (saved) F.restore(saved); } catch (e) { /* ignore */ }
 F.events.onChange = () => { try { localStorage.setItem(KEY, F.serialize()); } catch (e) { /* ignore */ } };
 
-let failCommits = 0, failAfter = 0, holdVisitRange = [];
+let failCommits = 0, failAfter = 0, holdVisitRange = [], failQueryPaths = new Map();   // path -> remaining failures
 F.hooks.failCommit = () => (failCommits > 0 ? (failCommits--, new Error('Simulated network failure')) : null);
 F.hooks.failAfterCommit = () => (failAfter > 0 ? (failAfter--, new Error('Simulated lost acknowledgement')) : null);
 
 // slow answers for the manager's date-range visit query: holdVisitRange is a queue of delays (ms), used in order
 F.hooks.holdQuery = (q) => (q && q.path === 'visits' && (q.cs || []).some(c => c.f === 'date' && c.op === '>=') && holdVisitRange.length ? holdVisitRange.shift() : 0);
+// RC6.3: fail the next n queries on a collection (e.g. 'visits', 'scheduleChanges') to test "data unavailable" handling
+F.hooks.failQuery = (q) => { const p = q && q.path; const n = failQueryPaths.get(p) || 0; if (!n) return null; failQueryPaths.set(p, n - 1); return new Error('Simulated load failure (' + p + ')'); };
 const decode = (d) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, v && typeof v === 'object' && '__ts' in v ? F.ts(v.__ts) : v]));
 window.__fake = {
   seed(entries) { F.store.clear(); for (const [p, d] of Object.entries(entries)) F.store.set(p, decode(d)); F.events.onChange(); },
@@ -23,4 +25,5 @@ window.__fake = {
   failNextCommits(n = 1) { failCommits = n; },
   failNextAcks(n = 1) { failAfter = n; },
   delayVisitRangeQueries(list) { holdVisitRange = [...list]; },
+  failNextQueries(path, n = 1) { failQueryPaths.set(path, n); },
 };

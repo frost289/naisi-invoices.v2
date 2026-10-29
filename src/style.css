@@ -539,7 +539,7 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .persist-notice-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ---- Today's Visits ---- */
-.visit-progress { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; text-align:center; }
+.visit-progress { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; text-align:center; }
 .visit-progress > div { background:#f7f6f2; border-radius:8px; padding:8px 2px; }
 .visit-progress strong { display:block; font-size:1.25rem; color:var(--forest-2); }
 .visit-progress span { font-size:0.68rem; color:var(--muted); }
@@ -549,3 +549,81 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .visit-status.order { background:#eef6ea; color:#1f5c30; }
 .visit-status.noorder { background:#fbe4e4; color:#b23b3b; }
 .todays-route-item.visited { opacity:.85; }
+
+/* RC6.2: location nudges for reps */
+.visit-progress > .vp-pin { background:#fff4e0; }
+.visit-progress > .vp-pin strong { color:#7a5210; }
+.visit-progress > .vp-pin.done { background:#eef6ea; }
+.visit-progress > .vp-pin.done strong { color:var(--forest-2); }
+.pin-nudge { background:#fff8ec; border:1.5px solid var(--amber); border-left-width:5px; border-radius:10px; padding:12px 14px; margin:10px 0 12px; font-size:0.85rem; color:#5c3d0c; }
+.pin-nudge strong { display:block; font-size:0.92rem; color:#5c3d0c; }
+.pin-nudge p { margin:6px 0 10px; line-height:1.45; }
+.pin-nudge-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.pin-nudge-actions .generate-btn { width:auto; flex:1 1 220px; margin:0; }
+.pin-nudge-actions .list-action-btn { flex:0 0 auto; }
+.pin-nudge.done { background:#eef6ea; border-color:var(--leaf); color:var(--forest-2); }
+.pin-nudge.done strong { color:var(--forest-2); }
+
+/* ===================== RC6.2 Weekly Schedule board ===================== */
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.sched-toolbar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px 16px; }
+.sched-toolbar h2 { margin:0; flex:1 1 180px; }
+.sched-weeknav { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.sched-week-label { font-family:'Baloo 2', sans-serif; font-weight:700; color:var(--forest); font-size:0.95rem; min-width:150px; text-align:center; }
+.sched-weeknav .list-action-btn { width:auto; margin:0; }
+.sched-arrow { min-width:44px; font-size:1.2rem; line-height:1; }
+.sched-rep { margin:0; min-width:170px; }
+.sched-kpis { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px; margin-top:14px; }
+.sched-kpi { background:#f7f6f2; border-radius:10px; padding:10px 12px; display:flex; flex-direction:column; gap:2px; min-width:0; }
+.sched-kpi strong { font-family:'JetBrains Mono', monospace; font-size:1.2rem; color:var(--forest); line-height:1.2; }
+.sched-kpi-label { font-size:0.64rem; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); }
+.sched-kpi-sub { font-size:0.7rem; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sched-kpi.good { background:#eef6ea; }
+.sched-kpi.warn { background:#fff4e0; } .sched-kpi.warn strong { color:#7a5210; }
+.sched-kpi.bad { background:#fde8e8; } .sched-kpi.bad strong { color:#b23b3b; }
+.sched-awaiting { border-left:5px solid var(--amber); }
+.sched-await-row { display:grid; grid-template-columns:1fr auto; grid-template-areas:'shop sel' 'area sel'; gap:0 10px; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
+.sched-await-row .sched-shop { grid-area:shop; } .sched-await-row .sched-area { grid-area:area; } .sched-await-row select { grid-area:sel; }
+.sched-board { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:12px; margin:0 0 16px; align-items:start; }
+.sched-day { background:var(--paper); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.sched-day.phase-today { border:2px solid var(--leaf); box-shadow:0 2px 10px rgba(76,175,80,0.15); }
+.sched-day.phase-past { background:#fbfaf6; }
+.sched-day-head { list-style:none; cursor:pointer; padding:12px 14px; display:grid; grid-template-columns:1fr auto; gap:4px 8px; align-items:center; border-bottom:1px solid transparent; }
+.sched-day[open] .sched-day-head { border-bottom-color:var(--line); }
+.sched-day-head::-webkit-details-marker { display:none; }
+.sched-day-head::after { content:'▾'; grid-column:2; grid-row:1; color:var(--muted); transition:transform .15s; }
+.sched-day:not([open]) .sched-day-head::after { transform:rotate(-90deg); }
+.sched-day-title { grid-column:1; display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
+.sched-day-name { font-family:'Baloo 2', sans-serif; font-weight:700; color:var(--forest); font-size:1rem; }
+.sched-day-date { font-size:0.78rem; color:var(--muted); }
+.sched-chip { background:var(--leaf); color:#fff; font-size:0.62rem; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; padding:2px 7px; border-radius:20px; }
+.sched-day-stats { grid-column:1 / -1; font-size:0.76rem; color:var(--muted); }
+.sched-bar { grid-column:1 / -1; height:5px; background:#ece8dc; border-radius:3px; overflow:hidden; }
+.sched-bar > span { display:block; height:100%; background:var(--leaf); border-radius:3px; }
+.sched-rows { list-style:none; margin:0; padding:4px 0; }
+.sched-row { display:grid; grid-template-columns:22px 1fr auto; gap:8px; align-items:center; padding:8px 14px; border-bottom:1px solid #efebe0; }
+.sched-row:last-child { border-bottom:none; }
+.sched-ico { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; font-size:0.72rem; font-weight:800; background:#ece8dc; color:var(--muted); }
+.sched-row-main { display:flex; flex-direction:column; min-width:0; }
+.sched-shop { font-weight:600; font-size:0.86rem; color:var(--ink); overflow:hidden; text-overflow:ellipsis; }
+.sched-area { font-size:0.72rem; color:var(--muted); }
+.sched-nopin { color:#b23b3b; font-weight:600; }
+.sched-status { font-size:0.74rem; color:var(--muted); margin-top:1px; }
+.sched-move select { padding:4px 6px; font-size:0.76rem; min-width:64px; border:1.5px solid var(--line); border-radius:6px; }
+.st-order .sched-ico { background:#e3f3df; color:var(--forest-2); } .st-order .sched-status { color:var(--forest-2); font-weight:600; }
+.st-noorder .sched-ico { background:#fff1dc; color:#a0660f; } .st-noorder .sched-status { color:#7a5210; }
+.st-missed .sched-ico { background:#fde8e8; color:#b23b3b; } .st-missed .sched-status { color:#b23b3b; font-weight:600; }
+.st-due .sched-ico { background:#e8f0fe; color:#1a56a0; } .st-due .sched-status { color:#1a56a0; font-weight:600; }
+.sched-empty { margin:0; padding:14px; font-size:0.8rem; color:var(--muted); }
+.sched-extra { background:#f7f6f2; padding:8px 14px 10px; border-top:1px dashed var(--line); }
+.sched-extra-label { display:block; font-size:0.64rem; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); margin-bottom:4px; }
+.sched-extra-row { font-size:0.78rem; padding:2px 0; }
+.sched-tools { padding:0; }
+.sched-tools > summary { cursor:pointer; padding:14px 18px; font-family:'Baloo 2', sans-serif; font-weight:700; color:var(--forest); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.sched-tools > summary .dot { width:8px; height:8px; border-radius:50%; background:var(--leaf); }
+.sched-tools-body { padding:0 18px 16px; }
+@media (max-width:700px) { .sched-kpis { grid-template-columns:repeat(2, minmax(0,1fr)); } .sched-board { grid-template-columns:1fr; } .sched-week-label { min-width:0; flex:1; } .sched-rep { flex:1 1 100%; } }
+/* RC6.3: honest "not measured" states on the Weekly Schedule */
+.sched-unavailable { margin:0; padding:12px 14px; font-size:0.78rem; line-height:1.45; color:#5c4a1e; background:#fbf6e9; border-bottom:1px solid var(--line); }
+.sched-day.is-unavailable .sched-day-stats { color:#7a5210; font-weight:600; }
+.st-uncertain .sched-ico { background:#efeaf7; color:#6a3fa0; } .st-uncertain .sched-status { color:#6a3fa0; }

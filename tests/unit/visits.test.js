@@ -61,12 +61,10 @@ describe('validation (data layer, not only the form)', () => {
     await expect(order({ customerId: '' })).rejects.toThrow(/customer/i);
     await expect(order({ uid: '' })).rejects.toThrow(/signed in/i);
   });
-  it('inactive, unknown, or un-pinned customers are refused', async () => {
+  it('inactive or unknown customers are refused (RC6.3: an un-pinned customer is NOT refused - see rc63.test.js)', async () => {
     F.store.set('customers/c1', customer({ active: false }));
     await expect(order()).rejects.toThrow(/inactive/i); await expect(noOrder()).rejects.toThrow(/inactive/i);
     await expect(order({ customerId: 'nope' })).rejects.toThrow(/no longer exists/i);
-    F.store.set('customers/c1', customer({ lat: null, lng: null }));
-    await expect(order()).rejects.toThrow(/pinned/i);
     expect(ordersIn()).toHaveLength(0);
   });
 });

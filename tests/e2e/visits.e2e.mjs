@@ -302,9 +302,9 @@ try {
     return 'definitions present on screen';
   });
   await R.check('E21', 'Manager changes a weekly visit day (dated); rep sees it; history keeps earlier days unchanged (was: report warned that history changes)', async () => {
-    await page.click('#navCustomersBtn'); await page.waitForSelector('#weeklyScheduleCard', { state: 'visible' });
-    await page.click('.schedule-day-tab[data-day="Fri"]');
-    await page.selectOption('#scheduleDayList .customer-day-select >> nth=0', 'Thu');   // Echo Friday -> Thursday
+    // RC6.2: visit days are changed on the one Weekly Schedule board (the Friday column is upcoming, so it is editable).
+    await page.click('#navScheduleBtn'); await page.waitForSelector('#schedBoard .sched-row[data-id="c5"] .customer-day-select', { state: 'visible' });
+    await page.selectOption('#schedBoard .sched-row[data-id="c5"] .customer-day-select', 'Thu');   // Echo Friday -> Thursday
     await page.waitForFunction(() => /Visit day updated/.test(document.body.innerText));
     const c5 = await doc('customers/c5');
     eq(c5.assignedDay, 'Thu', 'saved day');

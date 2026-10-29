@@ -16,6 +16,6 @@ export function requestReport(guard, { from, to, fetch, apply, onError, onInvali
     setLoading,
     fetch: () => fetch({ from, to }),
     apply: (result) => apply(result, { from, to }),
-    onError,
+    onError: onError && ((err) => onError(err, { from, to })),   // RC6.3: the error knows which dates failed
   });
 }
