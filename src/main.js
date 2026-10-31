@@ -24,7 +24,7 @@ import {
   fetchAllLocations, addLocation, deleteLocation, markLocationReviewed, findLocationByName, googleMapsSearchUrlForLocation
 } from './locations.js';
 import {
-  fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail
+  fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail, ensureMyProfile
 } from './userProfiles.js';
 import {
   fetchAllExpensesPage, fetchMyExpensesPage, addExpense, updateExpense, deleteExpense
@@ -63,7 +63,7 @@ import { repDayProgress, scheduledForDate, buildPerformanceReport } from './visi
 import { buildScheduleIndex, awaitingScheduling, findScheduleMismatches } from './scheduleHistory.js';
 import { fetchScheduleHistory, startScheduleHistory } from './scheduleStore.js';
 import { submitOrderAsManager } from './managerOrders.js';
-import { fetchRepEmails } from './roles.js';
+import { fetchRepEmails, fetchFloatHolderEmails } from './roles.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
   initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc, mergeById,
@@ -80,11 +80,12 @@ import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from '
 import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
 import { buildWeekBoard, weekStartOf } from './weekBoard.js';
-import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, EXPENSE_CATEGORIES_V2, categoryLabel } from './expenseCategories.js';
+import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, EXPENSE_CATEGORIES_V2, ALL_CLAIM_CATEGORY_VALUES, categoryLabel } from './expenseCategories.js';
 import { fetchActiveVehicles, fetchAllVehicles, addVehicle, updateVehicle, deactivateVehicle, activateVehicle } from './vehicles.js';
 import { fetchAllFloatSettings, fetchFloatSettings, setFloatSettings } from './floatAccounts.js';
 import { fetchLatestProductCosts, setProductCost } from './productCosts.js';
 import { loadFloatPeriodsView, loadMyFloatView } from './floatUi.js';
+import { loadApprovalsView } from './claimsUi.js';
 
 initOfflineBanner();
 
@@ -116,6 +117,9 @@ watchAuth(
   async (user) => {
     loginScreen.style.display = 'none';
     const role = await getUserRole(user.email);
+    // Phase 1: make sure every staff member has a users/{uid} document, so a manager can pick them in Float Settings
+    // (drivers never see the Profile screen). Only the email is written, merged; a saved display name is kept.
+    if (role) ensureMyProfile(user.uid, user.email).catch(() => {});
     if (role === 'manager' || role === 'submitter') {
       noAccessScreen.style.display = 'none';
       appRoot.style.display = 'block';
@@ -271,6 +275,7 @@ async function initApp(user, role) {
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
     // Phase 1 — manager screens
+    approvals: document.getElementById('approvalsView'),
     floatPeriods: document.getElementById('floatPeriodsView'),
     myfloat: document.getElementById('myFloatView'),
     floatSettings: document.getElementById('floatSettingsView'),
@@ -291,6 +296,7 @@ async function initApp(user, role) {
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
     // Phase 1 — nav buttons
+    approvals: document.getElementById('navApprovalsBtn'),
     floatPeriods: document.getElementById('navFloatPeriodsBtn'),
     myfloat: document.getElementById('navMyFloatBtn'),
     floatSettings: document.getElementById('navFloatSettingsBtn'),
@@ -299,7 +305,7 @@ async function initApp(user, role) {
   };
 
   const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule',
-    'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
+    'approvals', 'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
   const submitterOnlyNav = ['logvisit', 'myvisits', 'myfloat'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
@@ -338,7 +344,8 @@ async function initApp(user, role) {
     myvisits: resetAndLoadMyVisits,
     logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
     floatPeriods: async () => { if (isManager) await loadFloatPeriodsView({ user, profiles: await fetchAllProfiles() }); },
-    myfloat: async () => loadMyFloatView({ user, profiles: await fetchAllProfiles() }),
+    myfloat: async () => loadMyFloatView({ user, profiles: await fetchAllProfiles(), role: 'rep' }),
+    approvals: async () => { if (isManager) await loadApprovalsView({ user, profiles: await fetchAllProfiles() }); },
     floatSettings: resetAndLoadFloatSettings,
     vehicles: resetAndLoadVehicles,
     productCosts: resetAndLoadProductCosts,
@@ -4734,16 +4741,19 @@ async function initApp(user, role) {
     const tbody = document.getElementById('floatSettingsBody');
 
     // Populate staff dropdown from cached profiles
+    // Float holders only: sales reps and drivers (config/roles). A person appears once they have signed in at least once.
     const profiles = await fetchAllProfiles();
-    const reps = await fetchRepEmails();
-    staffSelect.innerHTML = '<option value="">Select staff member…</option>';
-    Object.entries(profiles).forEach(([uid, p]) => {
-      staffSelect.innerHTML += `<option value="${esc(uid)}" data-email="${esc(p.email)}">${esc(p.name || p.email)}</option>`;
-    });
+    const { submitters, deliverers } = await fetchFloatHolderEmails();
+    const roleOf = (email) => (submitters.includes(email) ? 'Sales rep' : deliverers.includes(email) ? 'Driver' : null);
+    const eligible = Object.entries(profiles)
+      .filter(([, p]) => p && roleOf(p.email))
+      .sort((a, b) => String(a[1].name || a[1].email).localeCompare(String(b[1].name || b[1].email)));
+    staffSelect.innerHTML = '<option value="">Select staff member…</option>' + eligible.map(([uid, p]) =>
+      `<option value="${esc(uid)}" data-email="${esc(p.email)}">${esc((p.name || p.email) + ' (' + roleOf(p.email) + ')')}</option>`).join('');
 
     // Build category checkboxes
     function buildCategoryCheckboxes(allowedCategories = []) {
-      checkboxContainer.innerHTML = EXPENSE_CATEGORIES_V2.map(c =>
+      checkboxContainer.innerHTML = EXPENSE_CATEGORIES_V2.filter(c => ALL_CLAIM_CATEGORY_VALUES.includes(c.value)).map(c =>
         `<label style="display:flex;align-items:center;gap:0.3rem;font-size:0.85rem;background:var(--surface2,#f3f4f6);padding:0.3rem 0.6rem;border-radius:6px;">
           <input type="checkbox" value="${esc(c.value)}" ${esc(allowedCategories.includes(c.value) ? 'checked' : '')}>
           ${esc(c.label)}
@@ -5041,6 +5051,16 @@ async function initDeliveryApp(user) {
   deliveryExpenseCancelBtn.addEventListener('click', () => {
     deliveryExpenseForm.style.display = 'none';
     resetDeliveryExpenseForm();
+  });
+
+  // ---- Phase 1 Stage 3: the driver's cash float and expense claims ----
+  const deliveryFloatToggleBtn = document.getElementById('deliveryFloatToggleBtn');
+  const deliveryFloatPanel = document.getElementById('deliveryFloatPanel');
+  deliveryFloatToggleBtn.addEventListener('click', async () => {
+    const opening = deliveryFloatPanel.style.display === 'none';
+    deliveryFloatPanel.style.display = opening ? 'block' : 'none';
+    // Drivers cannot read staff profiles (users rules), so names fall back to the stored emails.
+    if (opening) await loadMyFloatView({ user, role: 'deliverer', body: document.getElementById('deliveryFloatBody') });
   });
 
   deliveryExpenseForm.querySelectorAll('.delivery-expense-cat-btn').forEach(btn => {

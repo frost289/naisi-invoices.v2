@@ -61,6 +61,11 @@
       <button type="button" id="deliveryExpenseCancelBtn" class="list-action-btn" style="width:100%; margin-top:10px; padding:14px;">Cancel</button>
     </div>
 
+    <button type="button" id="deliveryFloatToggleBtn" class="list-action-btn" style="width:100%; padding:16px; font-size:1.05rem; margin-bottom:20px;">💵 My Float &amp; Claims</button>
+    <div id="deliveryFloatPanel" style="display:none; background:#fff; border:2px solid var(--line); border-radius:14px; padding:18px; margin-bottom:20px;">
+      <div id="deliveryFloatBody"></div>
+    </div>
+
     <div style="background:#eef6ea; border-radius:14px; padding:20px; text-align:center; margin-bottom:20px;">
       <div id="deliveryReadyCount" style="font-size:2.4rem; font-weight:800; color:var(--forest-2); line-height:1;">0</div>
       <div style="font-size:1rem; color:var(--muted); margin-top:4px;">Orders to deliver</div>
@@ -109,6 +114,7 @@
   <!-- Shared -->
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
+  <button type="button" class="nav-tab" data-view="approvals" id="navApprovalsBtn">Expense Approvals</button>
   <button type="button" class="nav-tab" data-view="floatPeriods" id="navFloatPeriodsBtn">Float Periods</button>
   <button type="button" class="nav-tab" data-view="floatSettings" id="navFloatSettingsBtn">Float Settings</button>
   <button type="button" class="nav-tab" data-view="vehicles" id="navVehiclesBtn">Vehicles</button>
@@ -685,6 +691,18 @@
   </div>
 </div>
 
+<!-- ===================== EXPENSE APPROVALS VIEW (manager only — M4) ===================== -->
+<div id="approvalsView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Expense Approvals</h2>
+    <p style="color:var(--muted); font-size:0.85rem; margin-bottom:1rem;">
+      Approve or reject each claimed expense. Approved amounts come off the person's float balance; rejected ones do not.
+    </p>
+    <div id="approvalsBody"></div>
+  </div>
+  <div class="card" id="approvalsDetail" style="display:none;"></div>
+</div>
+
 <!-- ===================== FLOAT PERIODS VIEW (manager only — M3 + M2 Issue Money) ===================== -->
 <div id="floatPeriodsView" class="list-section" style="display:none;">
   <div class="card">
@@ -726,7 +744,8 @@
       <input type="number" id="floatTargetInput" min="0" step="500" placeholder="e.g. 20000">
     </div>
     <div class="field">
-      <label>Allowed Expense Categories</label>
+      <label>Categories this person may claim</label>
+      <p style="color:var(--muted); font-size:0.75rem; margin:0.2rem 0 0;">None ticked = every category for their role (rep: Transport, Meals, Other, Emergency Cash; driver: Transport, Meals, Other, Vehicle/Maintenance). Fuel stays outside the float.</p>
       <div id="floatCategoryCheckboxes" style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.4rem;"></div>
     </div>
     <div style="display:flex; gap:0.5rem; margin-top:1rem;">

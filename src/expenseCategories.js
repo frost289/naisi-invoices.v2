@@ -60,6 +60,23 @@ export function expenseCategoriesV2For(userRole) {
   return filterFor(EXPENSE_CATEGORIES_V2, userRole);
 }
 
+// Categories a float holder may CLAIM on an expense report (Stage 3). Must match claimCategoryOk in the rules.
+// Fuel is outside the float system (logged in the Expenses tab / delivery "Log an Expense"); Stock and Manager
+// Business are manager costs, not claims.
+export const CLAIM_CATEGORIES = {
+  rep: ['Transport', 'Meals', 'Other', 'EmergencyCash'],
+  deliverer: ['Transport', 'Meals', 'Other', 'VehicleMaintenance'],
+};
+export const ALL_CLAIM_CATEGORY_VALUES = ['Transport', 'Meals', 'Other', 'EmergencyCash', 'VehicleMaintenance'];
+
+// The person's claimable categories: their role's set, narrowed to the manager's ticked list when one is set
+// (an empty list means "all categories for the role").
+export function claimCategoriesFor(role, allowedCategories) {
+  const base = CLAIM_CATEGORIES[role] || [];
+  const allowed = Array.isArray(allowedCategories) && allowedCategories.length ? base.filter(c => allowedCategories.includes(c)) : base;
+  return allowed.map(v => ({ value: v, label: categoryLabel(v) }));
+}
+
 export function categoryLabel(value) {
   const c = EXPENSE_CATEGORIES_V2.find(x => x.value === value);
   return c ? c.label : String(value || '');

@@ -34,12 +34,10 @@ function makeDocId(productName, effectiveFrom, uid) {
 
 // Fetch all cost records for a product, newest first.
 export async function fetchProductCostHistory(productName) {
-  const snap = await getDocs(
-    query(collection(db, COL),
-      where('productName', '==', productName),
-      orderBy('effectiveFrom', 'desc'))
-  );
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  // Filter only; sorted here (a filter + orderBy on another field would need a composite index).
+  const snap = await getDocs(query(collection(db, COL), where('productName', '==', productName)));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => String(b.effectiveFrom).localeCompare(String(a.effectiveFrom)));
 }
 
 // Fetch the most recent cost entry for every product (for the manager overview).

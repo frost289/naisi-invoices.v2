@@ -11,6 +11,8 @@ import {
   openPeriod, issueMoney, reverseIssue, closePeriod,
 } from './floatPeriods.js';
 import { periodPosition, newRequestId, ISSUE_METHODS } from './floatMath.js';
+import { fetchPendingReportsFor } from './expenseReports.js';
+import { renderClaims } from './claimsUi.js';
 
 const fmtTs = (t) => (t && t.toDate ? t.toDate().toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
 const fmtDay = (t) => (t && t.toDate ? t.toDate().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
@@ -226,9 +228,16 @@ export async function loadFloatPeriodsView({ user, profiles }) {
 
     const closeBtn = document.getElementById('fpCloseBtn');
     closeBtn.onclick = async () => {
-      if (!confirm('Close ' + name + '\'s period with a closing balance of ' + mwk(pos.balance) + '? This cannot be undone.')) return;
       closeBtn.disabled = true;
       try {
+        // Approvals land in the open period, so a person's waiting claims must be decided before it closes.
+        const waiting = await fetchPendingReportsFor(uid);
+        if (waiting.length) {
+          showToast(name + ' has ' + waiting.length + ' expense report(s) waiting for approval. Review them in Expense Approvals first.', 'error', 6000);
+          closeBtn.disabled = false;
+          return;
+        }
+        if (!confirm('Close ' + name + '\'s period with a closing balance of ' + mwk(pos.balance) + '? This cannot be undone.')) { closeBtn.disabled = false; return; }
         const res = await closePeriod({ periodIdValue: period.id, notes: document.getElementById('fpCloseNotes').value, managerUid: user.uid });
         showToast('Closed. Closing balance ' + mwk(res.closingBalance) + ', proposed top-up ' + mwk(res.proposedTopUp) + '.', 'success', 6000);
         await refresh(uid);
@@ -251,11 +260,11 @@ export async function loadFloatPeriodsView({ user, profiles }) {
 }
 
 // ===================================================================================================
-// R1 — My Float (rep)
+// R1 — My Float (rep; and driver inside delivery mode): float position, money received, expense claims.
 // ===================================================================================================
-export async function loadMyFloatView({ user, profiles }) {
-  const body = document.getElementById('myFloatBody');
+export async function loadMyFloatView({ user, profiles = {}, role = 'rep', body = document.getElementById('myFloatBody') }) {
   body.innerHTML = `<p style="color:var(--muted);">${esc('Loading…')}</p>`;
+  let floatHtml;
   try {
     const s = await fetchFloatSettings(user.uid);
     if (!s) {
@@ -264,20 +273,28 @@ export async function loadMyFloatView({ user, profiles }) {
     }
     const period = await fetchOpenPeriod(user.uid);
     if (!period) {
-      body.innerHTML = `<p style="font-size:0.85rem;">${esc('Float target: ' + mwk(s.floatTarget || 0) + '.')}</p>
+      floatHtml = `<p style="font-size:0.85rem;">${esc('Float target: ' + mwk(s.floatTarget || 0) + '.')}</p>
         <p style="color:var(--muted); font-size:0.85rem;">${esc(s.lastClosingBalance != null
           ? 'Your last period closed with a balance of ' + mwk(s.lastClosingBalance) + '. A new period has not been opened yet.'
           : 'Your float period has not been opened yet.')}</p>`;
-      return;
+    } else {
+      const pos = periodPosition(period);
+      const movements = await fetchMovementsForPeriod(period.id, user.uid);
+      floatHtml = `<p style="font-size:0.85rem; color:var(--muted);">${esc('Current period since ' + (period.startDate || '') + '.')}</p>
+        ${tilesHtml(pos, { forRep: true })}
+        <p style="font-size:0.8rem; color:var(--muted);">${esc('Balance = opening + money received − approved expenses. This is the cash you should be holding.')}</p>
+        <h3 style="margin-top:1rem;">${esc('Money received this period')}</h3>
+        ${movementsTableHtml(movements, profiles, { canReverse: false })}`;
     }
-    const pos = periodPosition(period);
-    const movements = await fetchMovementsForPeriod(period.id, user.uid);
-    body.innerHTML = `<p style="font-size:0.85rem; color:var(--muted);">${esc('Current period since ' + (period.startDate || '') + '.')}</p>
-      ${tilesHtml(pos)}
-      <p style="font-size:0.8rem; color:var(--muted);">${esc('Balance = opening + money received − approved expenses. This is the cash you should be holding.')}</p>
-      <h3 style="margin-top:1rem;">${esc('Money received this period')}</h3>
-      ${movementsTableHtml(movements, profiles, { canReverse: false })}`;
   } catch (err) {
     body.innerHTML = `<p style="color:#b3261e;">${esc('Could not load your float: ' + err.message)}</p>`;
+    return;
   }
+  body.innerHTML = floatHtml;
+  const heading = document.createElement('h3');
+  heading.style.marginTop = '1.5rem';
+  heading.textContent = 'My expense claims';
+  const claims = document.createElement('div');
+  body.append(heading, claims);
+  await renderClaims(claims, { user, role });
 }

@@ -23,10 +23,10 @@ const COL = 'vehicles';
 
 // Fetch all active vehicles (manager and deliverer screens).
 export async function fetchActiveVehicles() {
-  const snap = await getDocs(
-    query(collection(db, COL), where('active', '==', true), orderBy('registration', 'asc'))
-  );
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  // Filter only; sorted here (a filter + orderBy on another field would need a composite index).
+  const snap = await getDocs(query(collection(db, COL), where('active', '==', true)));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => String(a.registration).localeCompare(String(b.registration)));
 }
 
 // Fetch all vehicles including inactive (manager admin view).
