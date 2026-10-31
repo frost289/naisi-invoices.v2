@@ -833,5 +833,163 @@ service cloud.firestore {
         request.resource.data.email == request.auth.token.email;
       allow delete: if false;
     }
+
+    // =====================================================================
+    // PHASE 1, STAGE 1 — EXPENSE CONTROL FOUNDATION
+    // Added 2026-10-31. get() budget: +20 (projected total: 101, well within 1,000 limit).
+    // =====================================================================
+
+    // ---------- floatSettings/{uid} ----------
+    // One document per staff member who holds a cash float.
+    // Document id = uid (deterministic; no duplicate risk).
+    // Reads: manager OR the staff member whose uid matches the document id.
+    // Writes: manager only (a staff member never sets their own float target).
+    match /floatSettings/{staffUid} {
+      allow get:  if isManager() || (request.auth != null && request.auth.uid == staffUid);  // +1 get()
+      allow list: if isManager();
+      allow create, update: if isManager() &&
+        request.resource.data.staffUid == staffUid &&
+        request.resource.data.staffEmail is string &&
+        request.resource.data.floatTarget is number &&
+        request.resource.data.floatTarget >= 0 &&
+        request.resource.data.allowedCategories is list &&
+        request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // ---------- vehicles/{vehicleId} ----------
+    // Manager manages vehicles; deliverers read (to select a vehicle when logging fuel).
+    // Soft-delete only (active = false field) — financial records referencing a vehicle must remain.
+    match /vehicles/{vehicleId} {
+      allow read:   if isManager() || isDeliverer();             // no extra get() (role functions already counted)
+      allow create: if isManager() &&
+        request.resource.data.registration is string &&
+        request.resource.data.registration.size() > 0 &&
+        request.resource.data.active == true &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if isManager() &&
+        // Prevent hard-delete workarounds: only allow recognised field changes.
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['registration', 'description', 'assignedToUid', 'active', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // ---------- productCosts/{id} ----------
+    // Cost price history. Manager reads and writes; no other role has access.
+    // Append-only by convention (each price change is a new doc); no delete or overwrite.
+    match /productCosts/{costId} {
+      allow read:   if isManager();
+      allow create: if isManager() &&
+        request.resource.data.productName is string &&
+        request.resource.data.productName.size() > 0 &&
+        request.resource.data.costPrice is number &&
+        request.resource.data.costPrice >= 0 &&
+        request.resource.data.effectiveFrom is string &&
+        request.resource.data.updatedBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---------- floatPeriods/{periodId} ----------
+    // Phase 1 Stage 2+ only. Rules defined now to avoid a future re-deploy race.
+    // periodId is deterministic: fp_<staffUid>_<YYYYMMDD>  (same-day re-open = idempotent).
+    // At most one 'open' period per staffUid is enforced by the deterministic id.
+    match /floatPeriods/{periodId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.staffUid == request.auth.uid);  // +1 get()
+      allow list: if isManager();
+      allow create: if isManager() &&
+        request.resource.data.staffUid is string &&
+        request.resource.data.status == 'open' &&
+        request.resource.data.openedBy == request.auth.uid;
+      allow update: if isManager() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'closedBy', 'closedAt', 'updatedAt', 'floatTarget',
+                    'openingBalance', 'closingBalance', 'totalIssued', 'totalApproved',
+                    'proposedTopUp', 'notes']);
+      allow delete: if false;
+    }
+
+    // ---------- moneyIssued/{id} ----------
+    // Phase 1 Stage 2+ only. Rules defined now.
+    // id is deterministic: mi_<recipientUid>_<requestId> (manager-generated).
+    // Append-only; a reversal is a new document with reversedById referencing this one.
+    match /moneyIssued/{issuedId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.recipientUid == request.auth.uid);  // +1 get()
+      allow list: if isManager();
+      allow create: if isManager() &&
+        request.resource.data.recipientUid is string &&
+        request.resource.data.amount is number &&
+        request.resource.data.amount > 0 &&
+        request.resource.data.issuedBy == request.auth.uid;
+      // Only one update is permitted post-create: recording a reversal reference.
+      allow update: if isManager() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['reversedById', 'reversedAt', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // ---------- expenseReports/{reportId} ----------
+    // Phase 1 Stage 3+ only. Rules defined now.
+    // A rep or deliverer submits; a manager approves or rejects.
+    // ownerUid is denormalised into the report document and into every expenseLine,
+    // so the submitter's create/update never needs a parent get().
+    match /expenseReports/{reportId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.ownerUid == request.auth.uid);  // +1 get()
+      allow list: if isManager();
+      // Submitter or deliverer creates a report in 'draft' status only.
+      allow create: if (isSubmitter() || isDeliverer()) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.status == 'draft' &&
+        request.resource.data.submittedAt == null;
+      // Owner submits (draft → submitted); manager approves/rejects (submitted → approved/rejected).
+      allow update: if
+        // Owner submits their own draft report
+        ((isSubmitter() || isDeliverer()) &&
+         resource.data.ownerUid == request.auth.uid &&
+         resource.data.status == 'draft' &&
+         request.resource.data.status == 'submitted' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'submittedAt', 'updatedAt', 'totalAmount', 'lineCount']))
+        ||
+        // Manager approves or rejects a submitted report
+        (isManager() &&
+         resource.data.status == 'submitted' &&
+         request.resource.data.status in ['approved', 'rejected'] &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'reviewedBy', 'reviewedAt', 'reviewNotes', 'updatedAt']));
+      allow delete: if false;
+    }
+
+    // ---------- expenseLines/{lineId} ----------
+    // Phase 1 Stage 3+ only. Rules defined now.
+    // ownerUid is denormalised so the creator's writes never need a parent document get().
+    // Only one manager update is allowed post-draft: stamping approved/rejected on a line.
+    match /expenseLines/{lineId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.ownerUid == request.auth.uid);  // +1 get()
+      allow list: if isManager();
+      // Owner creates a line on their own draft report (ownerUid must match).
+      allow create: if (isSubmitter() || isDeliverer()) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.amount is number &&
+        request.resource.data.amount > 0 &&
+        request.resource.data.category is string;
+      // Owner edits their own line while the report is still a draft.
+      allow update: if
+        ((isSubmitter() || isDeliverer()) &&
+         resource.data.ownerUid == request.auth.uid &&
+         resource.data.reportStatus == 'draft' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['date', 'category', 'subcategory', 'amount', 'notes',
+                     'vehicleId', 'payee', 'receiptRef', 'updatedAt']))
+        ||
+        // Manager stamps approved/rejected on individual lines
+        (isManager() &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['lineStatus', 'reviewNotes', 'reviewedBy', 'reviewedAt', 'updatedAt']));
+      allow delete: if false;
+    }
   }
 }

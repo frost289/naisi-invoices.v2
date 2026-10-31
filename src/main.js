@@ -80,7 +80,10 @@ import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from '
 import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
 import { buildWeekBoard, weekStartOf } from './weekBoard.js';
-import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense } from './expenseCategories.js';
+import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, ALL_OPERATING_EXPENSE_CATEGORIES, subcategoriesFor } from './expenseCategories.js';
+import { fetchActiveVehicles, fetchAllVehicles, addVehicle, updateVehicle, deactivateVehicle, activateVehicle } from './vehicles.js';
+import { fetchAllFloatSettings, fetchFloatSettings, setFloatSettings } from './floatAccounts.js';
+import { fetchLatestProductCosts, setProductCost } from './productCosts.js';
 
 initOfflineBanner();
 
@@ -266,6 +269,10 @@ async function initApp(user, role) {
     schedule: document.getElementById('scheduleView'),
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
+    // Phase 1 — manager screens
+    floatSettings: document.getElementById('floatSettingsView'),
+    vehicles: document.getElementById('vehiclesView'),
+    productCosts: document.getElementById('productCostsView'),
   };
   const navBtns = {
     form: document.getElementById('navFormBtn'),
@@ -280,9 +287,14 @@ async function initApp(user, role) {
     schedule: document.getElementById('navScheduleBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
+    // Phase 1 — manager nav buttons
+    floatSettings: document.getElementById('navFloatSettingsBtn'),
+    vehicles: document.getElementById('navVehiclesBtn'),
+    productCosts: document.getElementById('navProductCostsBtn'),
   };
 
-  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule'];
+  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule',
+    'floatSettings', 'vehicles', 'productCosts'];
   const submitterOnlyNav = ['logvisit', 'myvisits'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
@@ -320,6 +332,9 @@ async function initApp(user, role) {
     schedule: async () => { if (window.__loadWeekBoard) await window.__loadWeekBoard(); },
     myvisits: resetAndLoadMyVisits,
     logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
+    floatSettings: resetAndLoadFloatSettings,
+    vehicles: resetAndLoadVehicles,
+    productCosts: resetAndLoadProductCosts,
   };
 
   async function showView(view) {
@@ -4694,6 +4709,260 @@ async function initApp(user, role) {
     };
   }
   async function loadSummaryView() { if (window.loadSummaryView) await window.loadSummaryView(); }
+
+  // ============= PHASE 1, STAGE 1 — M5: FLOAT SETTINGS (manager only) =============
+  async function resetAndLoadFloatSettings() {
+    if (!isManager) return;
+    const staffSelect = document.getElementById('floatStaffSelect');
+    const loadBtn = document.getElementById('loadFloatSettingsBtn');
+    const saveBtn = document.getElementById('saveFloatSettingsBtn');
+    const cancelBtn = document.getElementById('cancelFloatSettingsBtn');
+    const form = document.getElementById('floatSettingsForm');
+    const titleEl = document.getElementById('floatSettingsTitle');
+    const targetInput = document.getElementById('floatTargetInput');
+    const checkboxContainer = document.getElementById('floatCategoryCheckboxes');
+    const msgEl = document.getElementById('floatSettingsMsg');
+    const listEmpty = document.getElementById('floatSettingsListEmpty');
+    const table = document.getElementById('floatSettingsTable');
+    const tbody = document.getElementById('floatSettingsBody');
+
+    // Populate staff dropdown from cached profiles
+    const profiles = await fetchAllProfiles();
+    const reps = await fetchRepEmails();
+    staffSelect.innerHTML = '<option value="">Select staff member…</option>';
+    Object.entries(profiles).forEach(([uid, p]) => {
+      staffSelect.innerHTML += `<option value="${esc(uid)}" data-email="${esc(p.email)}">${esc(p.name || p.email)}</option>`;
+    });
+
+    // Build category checkboxes
+    function buildCategoryCheckboxes(allowedCategories = []) {
+      checkboxContainer.innerHTML = ALL_OPERATING_EXPENSE_CATEGORIES.map(c =>
+        `<label style="display:flex;align-items:center;gap:0.3rem;font-size:0.85rem;background:var(--surface2,#f3f4f6);padding:0.3rem 0.6rem;border-radius:6px;">
+          <input type="checkbox" value="${esc(c.value)}" ${allowedCategories.includes(c.value) ? 'checked' : ''}>
+          ${esc(c.label)}
+        </label>`
+      ).join('');
+    }
+
+    function getCheckedCategories() {
+      return [...checkboxContainer.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value);
+    }
+
+    function showForm(uid, name, settings) {
+      titleEl.textContent = `Float Settings for ${name}`;
+      targetInput.value = settings ? settings.floatTarget : '';
+      buildCategoryCheckboxes(settings ? settings.allowedCategories : []);
+      form.dataset.uid = uid;
+      form.dataset.email = staffSelect.querySelector(`option[value="${uid}"]`)?.dataset.email || '';
+      form.style.display = 'block';
+      msgEl.textContent = '';
+    }
+
+    loadBtn.onclick = async () => {
+      const uid = staffSelect.value;
+      if (!uid) { showToast('Select a staff member first.', 'info'); return; }
+      try {
+        const settings = await fetchFloatSettings(uid);
+        const name = staffSelect.options[staffSelect.selectedIndex].textContent;
+        showForm(uid, name, settings);
+      } catch (err) { showToast('Could not load: ' + err.message, 'error'); }
+    };
+
+    saveBtn.onclick = async () => {
+      const uid = form.dataset.uid;
+      const email = form.dataset.email;
+      const floatTarget = parseFloat(targetInput.value);
+      if (!uid) { msgEl.textContent = 'No staff member selected.'; return; }
+      if (isNaN(floatTarget) || floatTarget < 0) { msgEl.textContent = 'Enter a valid float target (≥ 0).'; return; }
+      const allowedCategories = getCheckedCategories();
+      saveBtn.disabled = true;
+      msgEl.textContent = 'Saving…';
+      try {
+        await setFloatSettings({ staffUid: uid, staffEmail: email, floatTarget, allowedCategories, managerUid: user.uid });
+        msgEl.textContent = '✓ Saved.';
+        showToast('Float settings saved.', 'success');
+        await renderFloatSettingsList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    cancelBtn.onclick = () => { form.style.display = 'none'; msgEl.textContent = ''; };
+
+    async function renderFloatSettingsList() {
+      try {
+        const all = await fetchAllFloatSettings();
+        if (!all.length) { listEmpty.style.display = 'block'; table.style.display = 'none'; return; }
+        listEmpty.style.display = 'none'; table.style.display = 'table';
+        tbody.innerHTML = all.map(s => `<tr>
+          <td>${esc(s.staffEmail)}</td>
+          <td>${esc(mwk(s.floatTarget))}</td>
+          <td style="font-size:0.78rem;">${esc((s.allowedCategories || []).join(', ') || '—')}</td>
+          <td style="font-size:0.78rem;">${s.updatedAt?.toDate ? s.updatedAt.toDate().toLocaleDateString() : '—'}</td>
+          <td><button class="secondary-btn" style="font-size:0.78rem;" onclick="document.getElementById('floatStaffSelect').value='${esc(s.staffUid)}'; document.getElementById('loadFloatSettingsBtn').click();">Edit</button></td>
+        </tr>`).join('');
+      } catch (err) { showToast('Could not load float list: ' + err.message, 'error'); }
+    }
+
+    await renderFloatSettingsList();
+  }
+
+  // ============= PHASE 1, STAGE 1 — M7: VEHICLES (manager only) =============
+  async function resetAndLoadVehicles() {
+    if (!isManager) return;
+    const regInput = document.getElementById('vehicleRegInput');
+    const descInput = document.getElementById('vehicleDescInput');
+    const assignedSelect = document.getElementById('vehicleAssignedSelect');
+    const editIdInput = document.getElementById('vehicleEditId');
+    const saveBtn = document.getElementById('saveVehicleBtn');
+    const clearBtn = document.getElementById('clearVehicleFormBtn');
+    const showInactiveChk = document.getElementById('vehicleShowInactive');
+    const msgEl = document.getElementById('vehicleFormMsg');
+    const tbody = document.getElementById('vehiclesBody');
+    const listEmpty = document.getElementById('vehicleListEmpty');
+
+    // Populate deliverer dropdown
+    const profiles = await fetchAllProfiles();
+    assignedSelect.innerHTML = '<option value="">— Pool vehicle —</option>' +
+      Object.entries(profiles).map(([uid, p]) =>
+        `<option value="${esc(uid)}">${esc(p.name || p.email)}</option>`
+      ).join('');
+
+    function clearForm() {
+      regInput.value = ''; descInput.value = ''; assignedSelect.value = '';
+      editIdInput.value = ''; msgEl.textContent = '';
+      saveBtn.textContent = 'Save Vehicle';
+    }
+    clearBtn.onclick = clearForm;
+
+    function editVehicle(v) {
+      regInput.value = v.registration; descInput.value = v.description;
+      assignedSelect.value = v.assignedToUid || '';
+      editIdInput.value = v.id;
+      saveBtn.textContent = 'Update Vehicle';
+      msgEl.textContent = '';
+      document.getElementById('vehiclesView').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    saveBtn.onclick = async () => {
+      const registration = regInput.value.trim();
+      const description = descInput.value.trim();
+      const assignedToUid = assignedSelect.value || null;
+      const editId = editIdInput.value;
+      if (!registration) { msgEl.textContent = 'Registration is required.'; return; }
+      if (!description) { msgEl.textContent = 'Description is required.'; return; }
+      saveBtn.disabled = true; msgEl.textContent = 'Saving…';
+      try {
+        if (editId) {
+          await updateVehicle(editId, { registration, description, assignedToUid });
+        } else {
+          await addVehicle({ registration, description, assignedToUid, uid: user.uid });
+        }
+        showToast('Vehicle saved.', 'success');
+        clearForm();
+        await renderVehicleList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    showInactiveChk.onchange = () => renderVehicleList();
+
+    async function renderVehicleList() {
+      const showAll = showInactiveChk.checked;
+      const vehicles = showAll ? await fetchAllVehicles() : await fetchActiveVehicles();
+      if (!vehicles.length) { listEmpty.style.display = 'block'; tbody.innerHTML = ''; return; }
+      listEmpty.style.display = 'none';
+      const profileMap = await fetchAllProfiles();
+      tbody.innerHTML = vehicles.map(v => {
+        const assignee = v.assignedToUid ? (profileMap[v.assignedToUid]?.name || profileMap[v.assignedToUid]?.email || v.assignedToUid) : '—';
+        const statusLabel = v.active ? '<span style="color:#16a34a;">Active</span>' : '<span style="color:#9ca3af;">Inactive</span>';
+        const toggleLabel = v.active ? 'Deactivate' : 'Activate';
+        return `<tr data-vid="${esc(v.id)}">
+          <td>${esc(v.registration)}</td>
+          <td>${esc(v.description)}</td>
+          <td>${esc(assignee)}</td>
+          <td>${statusLabel}</td>
+          <td style="display:flex;gap:0.3rem;">
+            <button class="secondary-btn v-edit-btn" style="font-size:0.78rem;">Edit</button>
+            <button class="secondary-btn v-toggle-btn" style="font-size:0.78rem;">${esc(toggleLabel)}</button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      tbody.querySelectorAll('tr').forEach((row, idx) => {
+        const v = vehicles[idx];
+        row.querySelector('.v-edit-btn').onclick = () => editVehicle(v);
+        row.querySelector('.v-toggle-btn').onclick = async () => {
+          try {
+            if (v.active) await deactivateVehicle(v.id);
+            else await activateVehicle(v.id);
+            await renderVehicleList();
+          } catch (err) { showToast('Could not update vehicle: ' + err.message, 'error'); }
+        };
+      });
+    }
+
+    await renderVehicleList();
+  }
+
+  // ============= PHASE 1, STAGE 1 — M8: PRODUCT COSTS (manager only) =============
+  async function resetAndLoadProductCosts() {
+    if (!isManager) return;
+    const productSelect = document.getElementById('costProductSelect');
+    const priceInput = document.getElementById('costPriceInput');
+    const fromInput = document.getElementById('costEffectiveFromInput');
+    const saveBtn = document.getElementById('saveCostPriceBtn');
+    const msgEl = document.getElementById('costPriceMsg');
+    const listEmpty = document.getElementById('costListEmpty');
+    const table = document.getElementById('productCostsTable');
+    const tbody = document.getElementById('productCostsBody');
+
+    // Default effective date to today
+    const today = new Date().toISOString().slice(0, 10);
+    fromInput.value = today;
+
+    // Populate product dropdown from products cache
+    const allProducts = (typeof productsCache !== 'undefined' ? productsCache : []);
+    productSelect.innerHTML = '<option value="">Select product…</option>' +
+      allProducts.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+
+    const profiles = await fetchAllProfiles();
+
+    saveBtn.onclick = async () => {
+      const productName = productSelect.value;
+      const costPrice = parseFloat(priceInput.value);
+      const effectiveFrom = fromInput.value;
+      if (!productName) { msgEl.textContent = 'Select a product.'; return; }
+      if (isNaN(costPrice) || costPrice < 0) { msgEl.textContent = 'Enter a valid cost price.'; return; }
+      if (!effectiveFrom) { msgEl.textContent = 'Enter an effective date.'; return; }
+      saveBtn.disabled = true; msgEl.textContent = 'Saving…';
+      try {
+        await setProductCost({ productName, costPrice, effectiveFrom, uid: user.uid });
+        msgEl.textContent = '✓ Cost price saved.';
+        showToast('Cost price saved.', 'success');
+        await renderCostList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    async function renderCostList() {
+      try {
+        const costs = await fetchLatestProductCosts();
+        if (!costs.length) { listEmpty.style.display = 'block'; table.style.display = 'none'; return; }
+        listEmpty.style.display = 'none'; table.style.display = 'table';
+        tbody.innerHTML = costs.map(c => {
+          const enterer = profiles[c.updatedBy]?.name || profiles[c.updatedBy]?.email || c.updatedBy || '—';
+          return `<tr>
+            <td>${esc(c.productName)}</td>
+            <td>${esc(mwk(c.costPrice))}</td>
+            <td>${esc(c.effectiveFrom)}</td>
+            <td style="font-size:0.78rem;">${esc(enterer)}</td>
+          </tr>`;
+        }).join('');
+      } catch (err) { showToast('Could not load cost prices: ' + err.message, 'error'); }
+    }
+
+    await renderCostList();
+  }
 
   // Default landing view per role — called last, after every section
   // above has run its setup code (their `let`/`const` state variables
