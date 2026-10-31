@@ -45,7 +45,7 @@ export async function fetchMyExpensesPage(uid, cursor = null, { categories = REP
 //   subcategory   – string: subcategory within the category
 //   vehicleId     – string: Firestore doc id of the vehicle (deliverers / Fuel / VehicleMaintenance)
 //   payee         – string: who was paid (person or vendor name)
-//   receiptRef    – string: receipt number, photo filename, or other reference
+//   receiptRef    – string: receipt number or other reference (stored as receiptReference, the field name the rules allow)
 //   reportId      – string: expenseReport doc id this line belongs to (Phase 1 Stage 3+)
 //   floatPeriodId – string: floatPeriod doc id (Phase 1 Stage 2+)
 export async function addExpense({ date, category, amount, notes, uid, email,
@@ -63,7 +63,7 @@ export async function addExpense({ date, category, amount, notes, uid, email,
   if (subcategory)    expenseData.subcategory   = subcategory;
   if (vehicleId)      expenseData.vehicleId      = vehicleId;
   if (payee)          expenseData.payee          = payee;
-  if (receiptRef)     expenseData.receiptRef     = receiptRef;
+  if (receiptRef)     expenseData.receiptReference = receiptRef;
   if (reportId)       expenseData.reportId       = reportId;
   if (floatPeriodId)  expenseData.floatPeriodId  = floatPeriodId;
 

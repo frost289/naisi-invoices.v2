@@ -80,10 +80,11 @@ import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from '
 import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
 import { buildWeekBoard, weekStartOf } from './weekBoard.js';
-import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, ALL_OPERATING_EXPENSE_CATEGORIES, subcategoriesFor } from './expenseCategories.js';
+import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, EXPENSE_CATEGORIES_V2, categoryLabel } from './expenseCategories.js';
 import { fetchActiveVehicles, fetchAllVehicles, addVehicle, updateVehicle, deactivateVehicle, activateVehicle } from './vehicles.js';
 import { fetchAllFloatSettings, fetchFloatSettings, setFloatSettings } from './floatAccounts.js';
 import { fetchLatestProductCosts, setProductCost } from './productCosts.js';
+import { loadFloatPeriodsView, loadMyFloatView } from './floatUi.js';
 
 initOfflineBanner();
 
@@ -270,6 +271,8 @@ async function initApp(user, role) {
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
     // Phase 1 — manager screens
+    floatPeriods: document.getElementById('floatPeriodsView'),
+    myfloat: document.getElementById('myFloatView'),
     floatSettings: document.getElementById('floatSettingsView'),
     vehicles: document.getElementById('vehiclesView'),
     productCosts: document.getElementById('productCostsView'),
@@ -287,15 +290,17 @@ async function initApp(user, role) {
     schedule: document.getElementById('navScheduleBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
-    // Phase 1 — manager nav buttons
+    // Phase 1 — nav buttons
+    floatPeriods: document.getElementById('navFloatPeriodsBtn'),
+    myfloat: document.getElementById('navMyFloatBtn'),
     floatSettings: document.getElementById('navFloatSettingsBtn'),
     vehicles: document.getElementById('navVehiclesBtn'),
     productCosts: document.getElementById('navProductCostsBtn'),
   };
 
   const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule',
-    'floatSettings', 'vehicles', 'productCosts'];
-  const submitterOnlyNav = ['logvisit', 'myvisits'];
+    'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
+  const submitterOnlyNav = ['logvisit', 'myvisits', 'myfloat'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
   submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
@@ -332,6 +337,8 @@ async function initApp(user, role) {
     schedule: async () => { if (window.__loadWeekBoard) await window.__loadWeekBoard(); },
     myvisits: resetAndLoadMyVisits,
     logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
+    floatPeriods: async () => { if (isManager) await loadFloatPeriodsView({ user, profiles: await fetchAllProfiles() }); },
+    myfloat: async () => loadMyFloatView({ user, profiles: await fetchAllProfiles() }),
     floatSettings: resetAndLoadFloatSettings,
     vehicles: resetAndLoadVehicles,
     productCosts: resetAndLoadProductCosts,
@@ -4736,9 +4743,9 @@ async function initApp(user, role) {
 
     // Build category checkboxes
     function buildCategoryCheckboxes(allowedCategories = []) {
-      checkboxContainer.innerHTML = ALL_OPERATING_EXPENSE_CATEGORIES.map(c =>
+      checkboxContainer.innerHTML = EXPENSE_CATEGORIES_V2.map(c =>
         `<label style="display:flex;align-items:center;gap:0.3rem;font-size:0.85rem;background:var(--surface2,#f3f4f6);padding:0.3rem 0.6rem;border-radius:6px;">
-          <input type="checkbox" value="${esc(c.value)}" ${allowedCategories.includes(c.value) ? 'checked' : ''}>
+          <input type="checkbox" value="${esc(c.value)}" ${esc(allowedCategories.includes(c.value) ? 'checked' : '')}>
           ${esc(c.label)}
         </label>`
       ).join('');
@@ -4796,10 +4803,13 @@ async function initApp(user, role) {
         tbody.innerHTML = all.map(s => `<tr>
           <td>${esc(s.staffEmail)}</td>
           <td>${esc(mwk(s.floatTarget))}</td>
-          <td style="font-size:0.78rem;">${esc((s.allowedCategories || []).join(', ') || '—')}</td>
-          <td style="font-size:0.78rem;">${s.updatedAt?.toDate ? s.updatedAt.toDate().toLocaleDateString() : '—'}</td>
-          <td><button class="secondary-btn" style="font-size:0.78rem;" onclick="document.getElementById('floatStaffSelect').value='${esc(s.staffUid)}'; document.getElementById('loadFloatSettingsBtn').click();">Edit</button></td>
+          <td style="font-size:0.78rem;">${esc((s.allowedCategories || []).map(categoryLabel).join(', ') || '—')}</td>
+          <td style="font-size:0.78rem;">${esc(s.updatedAt?.toDate ? s.updatedAt.toDate().toLocaleDateString() : '—')}</td>
+          <td><button type="button" class="list-action-btn fs-edit-btn" style="font-size:0.78rem;" data-uid="${esc(s.staffUid)}">Edit</button></td>
         </tr>`).join('');
+        tbody.querySelectorAll('.fs-edit-btn').forEach(b => {
+          b.onclick = () => { staffSelect.value = b.dataset.uid; loadBtn.click(); };
+        });
       } catch (err) { showToast('Could not load float list: ' + err.message, 'error'); }
     }
 
@@ -4874,16 +4884,15 @@ async function initApp(user, role) {
       const profileMap = await fetchAllProfiles();
       tbody.innerHTML = vehicles.map(v => {
         const assignee = v.assignedToUid ? (profileMap[v.assignedToUid]?.name || profileMap[v.assignedToUid]?.email || v.assignedToUid) : '—';
-        const statusLabel = v.active ? '<span style="color:#16a34a;">Active</span>' : '<span style="color:#9ca3af;">Inactive</span>';
         const toggleLabel = v.active ? 'Deactivate' : 'Activate';
         return `<tr data-vid="${esc(v.id)}">
           <td>${esc(v.registration)}</td>
           <td>${esc(v.description)}</td>
           <td>${esc(assignee)}</td>
-          <td>${statusLabel}</td>
+          <td><span style="color:${esc(v.active ? '#16a34a' : '#9ca3af')};">${esc(v.active ? 'Active' : 'Inactive')}</span></td>
           <td style="display:flex;gap:0.3rem;">
-            <button class="secondary-btn v-edit-btn" style="font-size:0.78rem;">Edit</button>
-            <button class="secondary-btn v-toggle-btn" style="font-size:0.78rem;">${esc(toggleLabel)}</button>
+            <button class="list-action-btn v-edit-btn" style="font-size:0.78rem;">Edit</button>
+            <button class="list-action-btn v-toggle-btn" style="font-size:0.78rem;">${esc(toggleLabel)}</button>
           </td>
         </tr>`;
       }).join('');

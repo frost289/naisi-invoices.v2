@@ -449,7 +449,9 @@ service cloud.firestore {
     function expenseFieldsOk(d) {
       let allowed = ['date', 'category', 'amount', 'notes', 'createdBy', 'createdByEmail', 'createdAt', 'updatedAt',
                      'payee', 'paidBy', 'paymentMethod', 'receiptReference', 'businessPurpose',
-                     'vehicleId', 'litres', 'route'];
+                     'vehicleId', 'litres', 'route',
+                     // Phase 1 optional fields (src/expenses.js addExpense)
+                     'subcategory', 'reportId', 'floatPeriodId'];
       return d.keys().hasAll(['date', 'category', 'amount', 'createdBy', 'createdByEmail']) &&
              d.keys().hasOnly(allowed);
     }
@@ -839,13 +841,29 @@ service cloud.firestore {
     // Added 2026-10-31. get() budget: +20 (projected total: 101, well within 1,000 limit).
     // =====================================================================
 
+    // ---------- Phase 1 path helpers ----------
+    function floatSettingsPath(uid) { return /databases/$(database)/documents/floatSettings/$(uid); }
+    function floatPeriodPath(id) { return /databases/$(database)/documents/floatPeriods/$(id); }
+    function moneyIssuedPath(id) { return /databases/$(database)/documents/moneyIssued/$(id); }
+
     // ---------- floatSettings/{uid} ----------
-    // One document per staff member who holds a cash float.
-    // Document id = uid (deterministic; no duplicate risk).
-    // Reads: manager OR the staff member whose uid matches the document id.
-    // Writes: manager only (a staff member never sets their own float target).
+    // One document per staff member who holds a cash float. Document id = uid.
+    // Reads: manager, or the person themself (single get only). Writes: manager only.
+    // openPeriodId (Stage 2) points to the person's ONE open period. It may only change together with that period:
+    //   null -> X  only when period X is created open for this person in the same commit;
+    //   X -> null  only when period X is closed in the same commit.
+    function floatPointerOk(staffUid) {
+      let before = resource == null ? null : resource.data.get('openPeriodId', null);
+      let after = request.resource.data.get('openPeriodId', null);
+      return before == after ||
+        (before == null && after is string && !exists(floatPeriodPath(after)) &&
+          getAfter(floatPeriodPath(after)).data.status == 'open' &&
+          getAfter(floatPeriodPath(after)).data.staffUid == staffUid) ||
+        (after == null && before is string &&
+          getAfter(floatPeriodPath(before)).data.status == 'closed');
+    }
     match /floatSettings/{staffUid} {
-      allow get:  if isManager() || (request.auth != null && request.auth.uid == staffUid);  // +1 get()
+      allow get:  if isManager() || (request.auth != null && request.auth.uid == staffUid);
       allow list: if isManager();
       allow create, update: if isManager() &&
         request.resource.data.staffUid == staffUid &&
@@ -853,7 +871,8 @@ service cloud.firestore {
         request.resource.data.floatTarget is number &&
         request.resource.data.floatTarget >= 0 &&
         request.resource.data.allowedCategories is list &&
-        request.resource.data.updatedBy == request.auth.uid;
+        request.resource.data.updatedBy == request.auth.uid &&
+        floatPointerOk(staffUid);
       allow delete: if false;
     }
 
@@ -889,43 +908,104 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // ---------- floatPeriods/{periodId} ----------
-    // Phase 1 Stage 2+ only. Rules defined now to avoid a future re-deploy race.
-    // periodId is deterministic: fp_<staffUid>_<YYYYMMDD>  (same-day re-open = idempotent).
-    // At most one 'open' period per staffUid is enforced by the deterministic id.
+    // ---------- floatPeriods/{periodId}  (Stage 2) ----------
+    // id fp_<staffUid>_<YYYYMMDD>_<request>. The ledger summary of one float period (src/floatPeriods.js).
+    // Created open, with zero totals, in the same commit that points floatSettings.openPeriodId at it (and only if
+    // no period was open). While open, totalIssued changes ONLY together with the moneyIssued record named in
+    // lastMovementId, by exactly that record's amount (+ issue, - reversal). Closing freezes closingBalance and
+    // proposedTopUp, which must equal the formula, and clears the pointer. A closed period never changes.
+    // totalApproved stays 0 until Stage 3 adds the expense-approval path.
+    function periodMovementOk(periodId) {
+      let mid = request.resource.data.lastMovementId;
+      let m = getAfter(moneyIssuedPath(mid)).data;
+      let delta = request.resource.data.totalIssued - resource.data.totalIssued;
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalIssued', 'lastMovementId', 'updatedAt']) &&
+        request.resource.data.status == 'open' &&
+        mid is string && mid != resource.data.get('lastMovementId', null) &&
+        !exists(moneyIssuedPath(mid)) &&
+        m.floatPeriodId == periodId &&
+        ((m.kind == 'issue' && math.abs(delta - m.amount) <= 0.01) ||
+         (m.kind == 'reversal' && math.abs(delta + m.amount) <= 0.01));
+    }
+    function periodCloseOk(periodId) {
+      let d = request.resource.data;
+      let closing = resource.data.openingBalance + resource.data.totalIssued - resource.data.totalApproved;
+      let gap = resource.data.floatTarget - closing;
+      return d.diff(resource.data).affectedKeys().hasOnly(['status', 'closingBalance', 'proposedTopUp', 'notes', 'closedBy', 'closedAt', 'updatedAt']) &&
+        d.status == 'closed' &&
+        d.closedBy == request.auth.uid &&
+        d.closingBalance is number && math.abs(d.closingBalance - closing) <= 0.01 &&
+        d.proposedTopUp is number &&
+        ((gap > 0 && math.abs(d.proposedTopUp - gap) <= 0.01) || (gap <= 0 && d.proposedTopUp == 0)) &&
+        getAfter(floatSettingsPath(resource.data.staffUid)).data.get('openPeriodId', null) != periodId;
+    }
     match /floatPeriods/{periodId} {
       allow get:  if isManager() ||
-        (request.auth != null && resource != null && resource.data.staffUid == request.auth.uid);  // +1 get()
-      allow list: if isManager();
+        (request.auth != null && resource != null && resource.data.staffUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.staffUid == request.auth.uid);
       allow create: if isManager() &&
+        request.resource.data.keys().hasOnly(['staffUid', 'staffEmail', 'status', 'openingBalance', 'floatTarget',
+          'totalIssued', 'totalApproved', 'lastMovementId', 'startDate', 'openedBy', 'openedAt', 'updatedAt']) &&
         request.resource.data.staffUid is string &&
+        periodId.matches('fp_' + request.resource.data.staffUid + '_[0-9]{8}_[A-Za-z0-9]{1,8}') &&
         request.resource.data.status == 'open' &&
-        request.resource.data.openedBy == request.auth.uid;
+        request.resource.data.openingBalance is number &&
+        request.resource.data.floatTarget is number &&
+        request.resource.data.totalIssued == 0 &&
+        request.resource.data.totalApproved == 0 &&
+        request.resource.data.lastMovementId == null &&
+        request.resource.data.openedBy == request.auth.uid &&
+        get(floatSettingsPath(request.resource.data.staffUid)).data.get('openPeriodId', null) == null &&
+        getAfter(floatSettingsPath(request.resource.data.staffUid)).data.openPeriodId == periodId;
       allow update: if isManager() &&
-        request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['status', 'closedBy', 'closedAt', 'updatedAt', 'floatTarget',
-                    'openingBalance', 'closingBalance', 'totalIssued', 'totalApproved',
-                    'proposedTopUp', 'notes']);
+        resource.data.status == 'open' &&
+        ((request.resource.data.status == 'open' && periodMovementOk(periodId)) ||
+         (request.resource.data.status == 'closed' && periodCloseOk(periodId)));
       allow delete: if false;
     }
 
-    // ---------- moneyIssued/{id} ----------
-    // Phase 1 Stage 2+ only. Rules defined now.
-    // id is deterministic: mi_<recipientUid>_<requestId> (manager-generated).
-    // Append-only; a reversal is a new document with reversedById referencing this one.
+    // ---------- moneyIssued/{id}  (Stage 2) ----------
+    // Issue:    id mi_<recipientUid>_<request>, kind 'issue'.
+    // Reversal: id mr_<originalId>, kind 'reversal', same amount/recipient/period as the original, which gets
+    //           reversedById in the same commit. An issue can be reversed once. Nothing is ever deleted.
+    // Either kind must be written together with its open period's running total (lastMovementId == this id).
+    function issuedKeysOk(d) {
+      return d.keys().hasOnly(['kind', 'recipientUid', 'recipientEmail', 'amount', 'method', 'reference', 'notes',
+        'floatPeriodId', 'issuedBy', 'issuedByEmail', 'issuedAt', 'reversedById', 'reversesId']);
+    }
+    function reversalOk(issuedId, d) {
+      let o = get(moneyIssuedPath(d.reversesId)).data;
+      return d.reversesId is string && issuedId == 'mr_' + d.reversesId &&
+        o.kind == 'issue' && o.get('reversedById', null) == null &&
+        o.amount == d.amount && o.recipientUid == d.recipientUid && o.floatPeriodId == d.floatPeriodId &&
+        getAfter(moneyIssuedPath(d.reversesId)).data.reversedById == issuedId;
+    }
     match /moneyIssued/{issuedId} {
       allow get:  if isManager() ||
-        (request.auth != null && resource != null && resource.data.recipientUid == request.auth.uid);  // +1 get()
-      allow list: if isManager();
+        (request.auth != null && resource != null && resource.data.recipientUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.recipientUid == request.auth.uid);
       allow create: if isManager() &&
-        request.resource.data.recipientUid is string &&
+        issuedKeysOk(request.resource.data) &&
+        request.resource.data.issuedBy == request.auth.uid &&
         request.resource.data.amount is number &&
-        request.resource.data.amount > 0 &&
-        request.resource.data.issuedBy == request.auth.uid;
-      // Only one update is permitted post-create: recording a reversal reference.
+        request.resource.data.amount > 0 && request.resource.data.amount <= 1000000000 &&
+        request.resource.data.reversedById == null &&
+        request.resource.data.floatPeriodId is string &&
+        get(floatPeriodPath(request.resource.data.floatPeriodId)).data.status == 'open' &&
+        get(floatPeriodPath(request.resource.data.floatPeriodId)).data.staffUid == request.resource.data.recipientUid &&
+        getAfter(floatPeriodPath(request.resource.data.floatPeriodId)).data.lastMovementId == issuedId &&
+        ((request.resource.data.kind == 'issue' &&
+          issuedId.matches('mi_' + request.resource.data.recipientUid + '_[A-Za-z0-9]{1,24}')) ||
+         (request.resource.data.kind == 'reversal' && reversalOk(issuedId, request.resource.data)));
+      // The only change ever made to a record: marking an issue as reversed, together with its reversal record.
       allow update: if isManager() &&
-        request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['reversedById', 'reversedAt', 'updatedAt']);
+        resource.data.kind == 'issue' &&
+        resource.data.get('reversedById', null) == null &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reversedById', 'reversedAt']) &&
+        request.resource.data.reversedById == 'mr_' + issuedId &&
+        existsAfter(moneyIssuedPath('mr_' + issuedId));
       allow delete: if false;
     }
 

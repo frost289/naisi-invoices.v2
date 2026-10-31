@@ -35,8 +35,8 @@ export async function fetchAllFloatSettings() {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-// Create or fully replace float settings for a staff member.
-// Uses setDoc with merge:false so the manager's intent is explicit.
+// Create or update float settings for a staff member.
+// merge:true so the Stage 2 openPeriodId pointer (managed by floatPeriods.js) is never wiped by a settings edit.
 export async function setFloatSettings({ staffUid, staffEmail, floatTarget, allowedCategories, managerUid }) {
   const data = {
     staffUid,
@@ -46,5 +46,5 @@ export async function setFloatSettings({ staffUid, staffEmail, floatTarget, allo
     updatedBy: managerUid,
     updatedAt: serverTimestamp(),
   };
-  await setDoc(doc(db, COL, staffUid), data);
+  await setDoc(doc(db, COL, staffUid), data, { merge: true });
 }

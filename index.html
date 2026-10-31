@@ -109,12 +109,14 @@
   <!-- Shared -->
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
+  <button type="button" class="nav-tab" data-view="floatPeriods" id="navFloatPeriodsBtn">Float Periods</button>
   <button type="button" class="nav-tab" data-view="floatSettings" id="navFloatSettingsBtn">Float Settings</button>
   <button type="button" class="nav-tab" data-view="vehicles" id="navVehiclesBtn">Vehicles</button>
   <button type="button" class="nav-tab" data-view="productCosts" id="navProductCostsBtn">Product Costs</button>
   <!-- Submitter-only -->
   <button type="button" class="nav-tab" data-view="logvisit" id="navLogVisitBtn">Today's Visits</button>
   <button type="button" class="nav-tab" data-view="myvisits" id="navMyVisitsBtn">My Visits</button>
+  <button type="button" class="nav-tab" data-view="myfloat" id="navMyFloatBtn">My Float</button>
 </div>
 
 <!-- ===================== LOG VISIT VIEW (submitter) ===================== -->
@@ -683,6 +685,26 @@
   </div>
 </div>
 
+<!-- ===================== FLOAT PERIODS VIEW (manager only — M3 + M2 Issue Money) ===================== -->
+<div id="floatPeriodsView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Float Periods</h2>
+    <p style="color:var(--muted); font-size:0.85rem; margin-bottom:1rem;">
+      Each person's cash float: open a period, issue money, reverse a mistake, and close the period after a cash count.
+    </p>
+    <div id="fpBoard"></div>
+  </div>
+  <div class="card" id="fpDetail" style="display:none;"></div>
+</div>
+
+<!-- ===================== MY FLOAT VIEW (rep — R1) ===================== -->
+<div id="myFloatView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>My Float</h2>
+    <div id="myFloatBody"></div>
+  </div>
+</div>
+
 <!-- ===================== FLOAT SETTINGS VIEW (manager only — M5) ===================== -->
 <div id="floatSettingsView" class="list-section" style="display:none;">
   <div class="card">
@@ -709,7 +731,7 @@
     </div>
     <div style="display:flex; gap:0.5rem; margin-top:1rem;">
       <button type="button" class="generate-btn" id="saveFloatSettingsBtn">Save Settings</button>
-      <button type="button" class="secondary-btn" id="cancelFloatSettingsBtn">Cancel</button>
+      <button type="button" class="list-action-btn" id="cancelFloatSettingsBtn">Cancel</button>
     </div>
     <p id="floatSettingsMsg" style="font-size:0.8rem; margin-top:0.5rem;"></p>
   </div>
@@ -744,7 +766,7 @@
     </div>
     <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
       <button type="button" class="generate-btn" id="saveVehicleBtn">Save Vehicle</button>
-      <button type="button" class="secondary-btn" id="clearVehicleFormBtn">Clear</button>
+      <button type="button" class="list-action-btn" id="clearVehicleFormBtn">Clear</button>
     </div>
     <p id="vehicleFormMsg" style="font-size:0.8rem; margin-top:0.5rem;"></p>
   </div>
