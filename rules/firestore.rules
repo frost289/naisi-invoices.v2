@@ -1,6 +1,6 @@
 rules_version = '2';
 // =============================================================================================
-// NAISI FOODS - COMPLETE FIRESTORE RULES, RELEASE CANDIDATE 4 (2026-10-18)
+// NAISI FOODS - COMPLETE FIRESTORE RULES, RC6.5 (2026-10-31; header text below describes the RC3/RC4 decisions)
 // NOT deployed. Run tests/rules against the local emulator before any use (docs/WINDOWS-TESTING.md).
 //
 // RC2 behaviour kept: first-save reads at a rep's own deterministic ids, validated rep visits/orders tied to the
@@ -23,7 +23,7 @@ rules_version = '2';
 //      names the old status, the new status and the ONLY fields each move may touch. Invoiced/Delivered/Rejected/Cancelled
 //      orders cannot go back to Approved (so they cannot be cancelled later). The invoicing lock is owned: finishing or releasing
 //      an attempt must present the attempt token (invoicingAttemptEnded), so a stale attempt cannot release or complete a newer one.
-//   3  Order lines and money: orders carry at most 12 lines; every line has a positive quantity (whole for stock-tracked lines),
+//   3  Order lines and money: orders carry at most 6 lines (RC6.5; was 12); every line has a positive quantity (whole for stock-tracked lines),
 //      a non-negative price and total = qty x price (0.01 tolerance); grandTotal = sum of the line totals. Checked on create, on edit,
 //      before approval, and before a cancellation that restores stock. Every new invoice must have internally consistent lines and total. (Whether an order's invoice may differ from its order is a business decision left unchanged; see docs/RC4-REVIEW-FIXES.md.)
 //   8  Customer merge lock: customers/{id}.mergeLock blocks new Invoicing, new visits/orders/invoices and schedule
@@ -268,13 +268,15 @@ service cloud.firestore {
         id == 'sa_' + request.auth.uid + '_' + d.requestId &&
         customerFree(d.get('customerId', null));
     }
+    // RC6.5 (decision 8): an issued invoice keeps its customer. It is re-pointed ONLY by a merge, under the merge lock, customer
+    // fields only. The RC4-RC6.4 clause that also let a manager move an invoice between any two unlocked customers is removed:
+    // it let a manager silently move a debt (receivable) to another shop with no record, and it contradicted decision 8.
     function invoiceCustomerOk() {
       let oldId = resource.data.get('customerId', null);
       let newId = request.resource.data.get('customerId', null);
       return newId == oldId ||
         (lockedInto(oldId, newId) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customer', 'phone', 'location'])) ||
-        (customerFree(oldId) && customerFree(newId));
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customerId', 'customer', 'phone', 'location']));
     }
 
     match /invoices/{invoiceId} {
@@ -282,7 +284,7 @@ service cloud.firestore {
         invoiceNumberOk(invoiceId, request.resource.data) &&
         (orderInvoiceOk(invoiceId, request.resource.data) || standaloneInvoiceOk(invoiceId, request.resource.data));
       allow read: if isManager();
-      // Editing an invoice (customer, items...) is allowed; its identity is not.
+      // Editing an invoice (customer contact details, items...) is allowed; its identity and its customer (customerId) are not.
       allow update: if isManager() &&
         !request.resource.data.diff(resource.data).affectedKeys()
           .hasAny(['orderId', 'invoiceNo', 'createdBy', 'createdAt', 'kind', 'requestId']) &&
@@ -484,7 +486,7 @@ service cloud.firestore {
 
     // ---------- order lines and money (RC4 finding 3, RC5 finding B) ----------
     // Rules have no loops and a budget of 1,000 evaluated expressions per request, so the lines are checked by a BOUNDED, unrolled
-    // schema: 1 to 12 lines. The constants below are the ones in src/money.js (tests/unit/money.test.js compares them).
+    // schema: 1 to 6 lines (RC6.5; was 12, which the emulator showed is over the budget). The constants below are the ones in src/money.js (tests/unit/money.test.js compares them).
     // Money: qty > 0 (<= 1000000), price >= 0 (<= 1000000000), |total - qty x price| <= 0.01 on the UNROUNDED product (the app stores
     // round2(qty x price), which always passes), |grandTotal - sum of line totals| <= 0.01, grandTotal <= 1000000000000.
     // A line is exactly one kind:
@@ -494,10 +496,10 @@ service cloud.firestore {
     // modes: 'catalogue' = goods order creation (tracked only: a rep order can never skip stock identity),
     //        'order' = a stored/edited order (tracked or explicit custom), 'invoice' = invoices (tracked, custom or legacy).
     // Whether a tracked productId really exists in /products is checked by the approval transaction (src/stock.js), not here: an exists() per
-    // line would need 12 document reads, over the 10-per-request limit for a single write.
+    // line would need up to 6 more document reads per write, on top of the role and customer lookups (10 per write, 20 per transaction).
     // A comparison on a missing or non-numeric field is an error in rules, which denies the write, so those cases are refused too.
     // Cost note: a comparison on a missing or non-numeric field is an error, which denies the write, so there are no separate `is number`
-    // checks (each would add expressions, and 12 lines are evaluated against a budget of 1,000 per request that could not be tested here).
+    // checks (each would add expressions, and every line is evaluated against the shared budget of 1,000 per request).
     function lineMoneyOk(l) {
       return l.qty > 0 && l.qty <= 1000000 && l.price >= 0 && l.price <= 1000000000 && math.abs(l.total - l.qty * l.price) <= 0.01;
     }
@@ -511,18 +513,16 @@ service cloud.firestore {
         (mode == 'invoice' && l.get('productId', null) == null && !('custom' in l)));
     }
     function lineAt(items, i, mode) { return items.size() <= i || lineValid(items[i], mode); }
+    // RC6.5: unrolled for 6 lines (MAX_ORDER_LINES in src/money.js). 12 lines exceeded the 1,000-expression budget on the emulator.
     function linesSum(items) {
       return (items.size() > 0 ? items[0].total : 0) + (items.size() > 1 ? items[1].total : 0) + (items.size() > 2 ? items[2].total : 0) +
-        (items.size() > 3 ? items[3].total : 0) + (items.size() > 4 ? items[4].total : 0) + (items.size() > 5 ? items[5].total : 0) +
-        (items.size() > 6 ? items[6].total : 0) + (items.size() > 7 ? items[7].total : 0) + (items.size() > 8 ? items[8].total : 0) +
-        (items.size() > 9 ? items[9].total : 0) + (items.size() > 10 ? items[10].total : 0) + (items.size() > 11 ? items[11].total : 0);
+        (items.size() > 3 ? items[3].total : 0) + (items.size() > 4 ? items[4].total : 0) + (items.size() > 5 ? items[5].total : 0);
     }
     // d is an order or an invoice document (the same line shape).
     function linesAndTotalOk(d, mode) {
       let items = d.get('items', null);
-      return items is list && items.size() >= 1 && items.size() <= 12 &&
+      return items is list && items.size() >= 1 && items.size() <= 6 &&
         lineAt(items, 0, mode) && lineAt(items, 1, mode) && lineAt(items, 2, mode) && lineAt(items, 3, mode) && lineAt(items, 4, mode) && lineAt(items, 5, mode) &&
-        lineAt(items, 6, mode) && lineAt(items, 7, mode) && lineAt(items, 8, mode) && lineAt(items, 9, mode) && lineAt(items, 10, mode) && lineAt(items, 11, mode) &&
         d.get('grandTotal', null) is number && d.grandTotal >= 0 && d.grandTotal <= 1000000000000 &&
         math.abs(d.grandTotal - linesSum(items)) <= 0.01;
     }

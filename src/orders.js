@@ -3,6 +3,7 @@ import {
   collection, doc, getDoc, getDocs,
   serverTimestamp, query, where, orderBy, limit, startAfter, runTransaction
 } from 'firebase/firestore';
+import { runTransactionWithRetry } from './contention.js';
 import { COUNTER_DOC, buildInvoiceNo } from './numbering.js';
 import { makeError, orderRevisionKey } from './orderRevision.js';
 
@@ -175,8 +176,10 @@ export async function commitInvoice({ orderId = null, attemptToken = null, invoi
     throw new Error('A stand-alone invoice needs its request id (standaloneInvoiceIdFor).');
   }
   const targetId = orderId ? invoiceIdForOrder(orderId) : invoiceId;
+  const watch = [COUNTER_DOC, doc(db, 'invoices', targetId), ...(orderId ? [doc(db, 'orders', orderId)] : [])];
 
-  return await runTransaction(db, async (tx) => {
+  // RC6.5: two invoices at the same moment race for the counter; the loser re-runs and takes the next number (contention.js).
+  return await runTransactionWithRetry(db, async (tx) => {
     // All reads first (Firestore requirement).
     const counterSnap = await tx.get(COUNTER_DOC);
     const invoiceRef = doc(db, 'invoices', targetId);
@@ -235,7 +238,7 @@ export async function commitInvoice({ orderId = null, attemptToken = null, invoi
       });
     }
     return { invoiceId: targetId, invoiceNo, grandTotal, next, alreadySaved: false };
-  });
+  }, { watch });
 }
 
 // What identifies "the same stand-alone invoice" on a retry: customer, date, items and total.

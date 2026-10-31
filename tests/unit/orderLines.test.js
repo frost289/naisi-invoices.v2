@@ -30,7 +30,7 @@ describe('validateOrderLines', () => {
     expect(validateOrderLines([{ qty: 3, desc: 'x', price: 33.33, total: 99.99, productId: 'p1' }]).ok).toBe(true);
     expect(validateOrderLines([line(2)], 250).ok).toBe(false);
   });
-  it('MAX_ORDER_LINES is 12 and round2 rounds to 2 decimals', () => { expect(MAX_ORDER_LINES).toBe(12); expect(round2(1.005 + 1e-9)).toBe(1.01); });
+  it('MAX_ORDER_LINES is 6 (RC6.5; 12 exceeded the rules budget) and round2 rounds to 2 decimals', () => { expect(MAX_ORDER_LINES).toBe(6); expect(round2(1.005 + 1e-9)).toBe(1.01); });
 });
 
 describe('the stored order is revalidated (defense in depth)', () => {
@@ -84,10 +84,10 @@ describe('the stored order is revalidated (defense in depth)', () => {
 });
 
 describe('UI validator', () => {
-  it('validateOrderItems refuses more than 12 lines', async () => {
+  it('validateOrderItems refuses more than MAX_ORDER_LINES lines', async () => {
     const { validateOrderItems } = await import('../../src/visits.js');
-    expect(validateOrderItems(Array.from({ length: 13 }, () => line(1)))).toMatch(/at most 12/);
-    expect(validateOrderItems(Array.from({ length: 12 }, () => line(1)))).toBe(null);
+    expect(validateOrderItems(Array.from({ length: MAX_ORDER_LINES + 1 }, () => line(1)))).toMatch(new RegExp(`at most ${MAX_ORDER_LINES}`));
+    expect(validateOrderItems(Array.from({ length: MAX_ORDER_LINES }, () => line(1)))).toBe(null);
   });
 });
 

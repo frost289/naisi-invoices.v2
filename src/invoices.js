@@ -62,6 +62,23 @@ export async function fetchInvoiceById(id) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
+// RC6.5: an issued invoice keeps its customer (the rules refuse a change of customerId outside a merge). Checked here first so
+// the manager gets a clear message instead of a permission error. Contact details (name, phone, location) can still be edited.
 export async function updateInvoice(id, data) {
-  await updateDoc(doc(db, 'invoices', id), data);
+  const ref = doc(db, 'invoices', id);
+  if (data && 'customerId' in data) {
+    const snap = await getDoc(ref);
+    const current = snap.exists() ? (snap.data().customerId ?? null) : null;
+    const requested = data.customerId ?? null;
+    if (requested === null && current !== null) {
+      // Retyping the customer name on the edit screen clears the picker's id. That is a contact-detail edit, not a move:
+      // keep the invoice linked to its customer.
+      data = { ...data, customerId: current };
+    } else if (requested !== current) {
+      const err = new Error('An issued invoice cannot be moved to a different customer. Nothing was saved. Keep the original customer, or issue a new invoice for the correct customer.');
+      err.code = 'invoice-customer-locked';
+      throw err;
+    }
+  }
+  await updateDoc(ref, data);
 }

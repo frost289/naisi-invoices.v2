@@ -4,6 +4,7 @@ import {
   doc, runTransaction, collection, serverTimestamp,
   query, where, orderBy, limit, startAfter, getDocs
 } from 'firebase/firestore';
+import { runTransactionWithRetry } from './contention.js';
 import { wholeNumber } from './numbers.js';
 import { makeError, orderItemsKey, orderRevisionKey } from './orderRevision.js';
 import { reviewOrderPrices } from './orderPriceReview.js';
@@ -250,7 +251,8 @@ export async function cancelOrder(order, { reason, uid, email, recoverWithoutRes
   const cleanReason = (recoverWithoutRestore ? RECOVERY_REASON_PREFIX : '') + String(reason).trim();
   if (cleanReason.length > MAX_CANCEL_REASON) throw new Error(`The reason is too long (${cleanReason.length} characters; maximum ${MAX_CANCEL_REASON}).`);
   const orderId = order.id;
-  return await runTransaction(db, async (tx) => {
+  // RC6.5: two cancel clicks race; the loser re-runs and reports alreadyCancelled (contention.js).
+  return await runTransactionWithRetry(db, async (tx) => {
     const orderRef = doc(db, 'orders', orderId);
     const cancelRef = doc(db, 'orderCancellations', orderId);
     const orderSnap = await tx.get(orderRef);
@@ -297,7 +299,7 @@ export async function cancelOrder(order, { reason, uid, email, recoverWithoutRes
       reasonFor: () => `Order cancelled: ${cleanReason}`,
     });
     return { alreadyCancelled: false, stockRestored: restoreStock, priorStatus: current.status };
-  });
+  }, { watch: [doc(db, 'orders', orderId), doc(db, 'orderCancellations', orderId)] });
 }
 
 // ---- Editing a Submitted or Approved order: ONE transaction ----

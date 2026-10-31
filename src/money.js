@@ -5,7 +5,11 @@
 //   Limits: 1..MAX_ORDER_LINES lines; 0 < qty <= MAX_QTY; 0 <= price <= MAX_PRICE; 0 <= grandTotal <= MAX_TOTAL; 0 < expense <= MAX_EXPENSE.
 //   A stock-tracked line (has productId) needs a whole-number quantity; an explicit custom line (custom:true, no productId) may be fractional.
 export const MONEY_TOLERANCE = 0.01;
-export const MAX_ORDER_LINES = 12;
+// RC6.5: lowered from 12 to 6. On the Firestore emulator, 12-line orders exceeded the rules' budget of 1,000 evaluated
+// expressions per request (approve, edit, invoice, cancel and even a single 12-line create were refused). The price card has
+// 4 products, so 6 lines leaves room for every product plus extra lines. Lowering or raising this is a one-constant change
+// here PLUS the unrolled line checks in rules/firestore.rules (linesAndTotalOk / linesSum); the tests follow this constant.
+export const MAX_ORDER_LINES = 6;
 export const MAX_QTY = 1000000;
 export const MAX_PRICE = 1000000000;
 export const MAX_TOTAL = 1000000000000;

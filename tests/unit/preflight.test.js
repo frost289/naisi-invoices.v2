@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { reconcile } from '../../tools/reconcile-logic.js';
 import { planMigration } from '../../tools/migrate-logic.js';
+import { MAX_ORDER_LINES } from '../../src/money.js';
 
 const ok = (n = 1, pid = 'p1') => Array.from({ length: n }, (_, i) => ({ qty: 2, desc: 'Amanda ' + i, price: 5, total: 10, productId: pid + (n > 1 ? i : '') }));
 const O = (id, status, items, over = {}) => ({ id, orderNo: 'ORD-' + id, status, customerId: 'c1', customerName: 'Shop', items, grandTotal: items.reduce((s, i) => s + (Number(i.total) || 0), 0), ...over });
@@ -21,13 +22,13 @@ describe('D. order-line preflight inside reconcile()', () => {
     expect(f[0].detail).toMatch(/quantity/i);
     expect(f[0].recovery).toMatch(/edit|reject|cancel/i);
   });
-  it('an oversized order (13 lines) is reported with the cap and the line count', () => {
-    const r = reconcile({ orders: [O('big', 'Approved', ok(13), { stockApplied: true })], invoices: [], ...FULL });
+  it('an oversized order (MAX_ORDER_LINES + 1 lines) is reported with the cap and the line count', () => {
+    const r = reconcile({ orders: [O('big', 'Approved', ok(MAX_ORDER_LINES + 1), { stockApplied: true })], invoices: [], ...FULL });
     const f = only(r, 'INVALID_ORDER_LINES');
     expect(f).toHaveLength(1);
-    expect(f[0].detail).toMatch(/at most 12/);
+    expect(f[0].detail).toMatch(new RegExp(`at most ${MAX_ORDER_LINES}`));
     expect(r.preflight.oversizedOrders).toEqual(['big']);
-    expect(r.preflight.maxLinesFound).toBe(13);
+    expect(r.preflight.maxLinesFound).toBe(MAX_ORDER_LINES + 1);
   });
   it('every reason class is detected: fractional tracked qty, total mismatch, aggregate mismatch, missing/unknown/malformed product', () => {
     const cases = {
@@ -65,12 +66,12 @@ describe('D. order-line preflight inside reconcile()', () => {
     const r = reconcile({ orders: ['Invoiced', 'Delivered', 'Cancelled', 'Rejected'].map(s => O('h' + s, s, bad, s === 'Invoiced' ? { invoiceId: 'i' } : {})), invoices: [{ id: 'i', invoiceNo: 'NF-INV-3' }], ...FULL, invoiceNumbers: [{ id: 'NF-INV-3' }], cancellations: [{ id: 'hCancelled', stockRestored: false }] });
     expect(only(r, 'INVALID_ORDER_LINES').every(f => f.severity === 'info')).toBe(true);
   });
-  it('CONTROL: valid orders (including exactly 12 lines and a custom freight line) stay clean', () => {
-    const r = reconcile({ orders: [O('ok12', 'Approved', ok(12), { stockApplied: true }), O('fr', 'Submitted', [...ok(1), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }])],
-      invoices: [], ...FULL, products: [{ id: 'p1' }, ...ok(12).map(i => ({ id: i.productId }))] });
+  it('CONTROL: valid orders (including exactly MAX_ORDER_LINES lines and a custom freight line) stay clean', () => {
+    const r = reconcile({ orders: [O('ok12', 'Approved', ok(MAX_ORDER_LINES), { stockApplied: true }), O('fr', 'Submitted', [...ok(1), { qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }])],
+      invoices: [], ...FULL, products: [{ id: 'p1' }, ...ok(MAX_ORDER_LINES).map(i => ({ id: i.productId }))] });
     expect(types(r).filter(t => /INVALID|UNKNOWN/.test(t))).toEqual([]);
     expect(r.status).toBe('CLEAN');
-    expect(r.preflight.maxLinesFound).toBe(12);
+    expect(r.preflight.maxLinesFound).toBe(MAX_ORDER_LINES);
   });
   it('legacy orders without the explicit custom flag but without a product are reported (a manager must confirm them as custom lines)', () => {
     const r = reconcile({ orders: [O('leg', 'Approved', [{ qty: 1, desc: 'Freight', price: 100, total: 100 }], { stockApplied: true })], invoices: [], ...FULL });

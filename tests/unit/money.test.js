@@ -84,7 +84,7 @@ describe('Currency policy: client validation uses EXACTLY the formula and limits
     expect(orderLines.validateOrderLines([{ qty: 2.5, desc: 'Amanda', price: 4, total: 10, productId: 'p1' }]).ok).toBe(false);
   });
   it('aggregate: sum of line totals within 0.01; above 1e12 refused', () => {
-    const lines = Array.from({ length: 12 }, (_, i) => ({ qty: 1, desc: 'x', price: 0.1 + i / 100, total: 0.1 + i / 100, productId: 'p' + i }));
+    const lines = Array.from({ length: M.MAX_ORDER_LINES }, (_, i) => ({ qty: 1, desc: 'x', price: 0.1 + i / 100, total: 0.1 + i / 100, productId: 'p' + i }));
     const sum = lines.reduce((s, l) => s + l.total, 0);
     expect(orderLines.validateOrderLines(lines, sum).ok).toBe(true);
     expect(orderLines.validateOrderLines(lines, sum + 0.02).ok).toBe(false);

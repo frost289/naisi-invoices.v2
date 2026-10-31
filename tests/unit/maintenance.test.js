@@ -70,11 +70,12 @@ describe('RC6 operations plan and report carry the required statements', () => {
   it('report and guide carry the prominent incomplete-verification statement', () => {
     for (const f of ['docs/RC6.1-RELEASE-REPORT.md', 'docs/RC6.1-DEVELOPER-REVIEW-GUIDE.md']) expect(rd(f)).toContain('REAL FIREBASE VERIFICATION INCOMPLETE');
   });
-  it('RC6.4: the rules file matches the hash recorded for RC6.4 (pins required again, RC6.3 expense categories, stock-purchase collection withdrawn)', () => {
+  it('RC6.5: the rules file matches the hash recorded for RC6.5 (6-line cap, invoice customer fixed outside merges)', () => {
     const crypto = require_crypto();
     const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'rules/firestore.rules'))).digest('hex');
     expect(actual).not.toBe('471a2419253581d9e8fe14b54e7db76009f1b53320e79b977875b0990c0c0e32');   // the RC5-RC6.2 rules are no longer the release rules
-    expect(fs.readFileSync(path.join(root, 'rules/RC6.4-RULES-SHA256.txt'), 'utf8').split(/\s+/)[0]).toBe(actual);
+    expect(actual).not.toBe('7bf580267d3d43a9d533b22f70519cb58e4fa283ff9fe1850e77ff7fcbfd1624');   // nor the RC6.4 rules (12-line cap, failed on the emulator)
+    expect(fs.readFileSync(path.join(root, 'rules/RC6.5-RULES-SHA256.txt'), 'utf8').split(/\s+/)[0]).toBe(actual);
   });
 });
 

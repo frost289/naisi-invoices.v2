@@ -1,5 +1,6 @@
 import { db } from './firebase.js';
 import { collection, doc, getDoc, getDocs, setDoc, runTransaction, onSnapshot, serverTimestamp, query, orderBy, limit } from 'firebase/firestore';
+import { runTransactionWithRetry } from './contention.js';
 import { malawiYear } from './malawiTime.js';
 import { makeError } from './orderRevision.js';
 
@@ -76,7 +77,8 @@ export async function adjustInvoiceCounter({ prefix, counter, reason, requestId,
   const adjRef = doc(db, 'counterAdjustments', adjustmentIdFor(uid, requestId));
   const cleanReason = String(reason).trim();
 
-  return await runTransaction(db, async (tx) => {
+  // RC6.5: an adjustment racing an invoice re-runs on fresh data (contention.js).
+  return await runTransactionWithRetry(db, async (tx) => {
     const counterSnap = await tx.get(COUNTER_DOC);
     const adjSnap = await tx.get(adjRef);
     if (adjSnap.exists()) {
@@ -98,7 +100,7 @@ export async function adjustInvoiceCounter({ prefix, counter, reason, requestId,
       adjustedBy: uid, adjustedByEmail: email, adjustedAt: serverTimestamp(),
     });
     return { alreadyApplied: false, previous: { prefix: before.prefix, counter: before.counter }, next: { prefix, counter } };
-  });
+  }, { watch: [COUNTER_DOC, adjRef] });
 }
 
 // Newest first. Managers only (the rules allow nobody else to read it).

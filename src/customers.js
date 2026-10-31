@@ -159,8 +159,11 @@ export async function addCustomer({ name, phone, location, lat, lng, uid, email 
 // cannot move the credit into another week. Customers pinned before RC6.3 have no stamp and are not counted.
 // The resulting "locations captured" figure is INFORMATIONAL: it is not part of coverage or any performance percentage.
 export const FIRST_PIN_KEYS = ['firstPinnedBy', 'firstPinnedByEmail', 'firstPinnedAt'];
+// RC6.5: the rules accept the stamp only with the caller's REAL login email. Stamping with an empty email made the rules refuse the
+// whole write, so a caller without an email could not add a customer at all. Without both uid and email the customer is saved
+// unstamped (allowed by the rules; it is simply not counted as a "location captured").
 function firstPinStamp(uid, email) {
-  return uid ? { firstPinnedBy: uid, firstPinnedByEmail: email || '', firstPinnedAt: serverTimestamp() } : {};
+  return uid && email ? { firstPinnedBy: uid, firstPinnedByEmail: email, firstPinnedAt: serverTimestamp() } : {};
 }
 
 export const VISIT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

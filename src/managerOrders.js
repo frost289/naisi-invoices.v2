@@ -12,7 +12,8 @@
 // Retries are safe: the order id is derived from the request id (m_<uid>_<requestId>); an identical retry returns the
 // saved order, a changed retry is refused with 'order-conflict' and nothing is overwritten.
 import { db } from './firebase.js';
-import { doc, runTransaction, serverTimestamp } from 'firebase/firestore';
+import { doc, serverTimestamp } from 'firebase/firestore';
+import { runTransactionWithRetry } from './contention.js';
 import { ORDER_COUNTER_DOC, buildOrderNo } from './orderNumbering.js';
 import { isValidPin } from './customers.js';
 import { makeError } from './orderRevision.js';
@@ -36,7 +37,8 @@ export async function submitOrderAsManager({ customerId, items, notes, attribute
   const orderRef = doc(db, 'orders', managerOrderIdFor(uid, requestId));
   const grandTotal = items.reduce((sum, it) => sum + it.total, 0);
 
-  return await runTransaction(db, async (tx) => {
+  // RC6.5: a double click races two commits; the retry finds the saved order (see contention.js).
+  return await runTransactionWithRetry(db, async (tx) => {
     const orderSnap = await tx.get(orderRef);
     const customerSnap = await tx.get(doc(db, 'customers', customerId));
     const counterSnap = await tx.get(ORDER_COUNTER_DOC);
@@ -71,5 +73,5 @@ export async function submitOrderAsManager({ customerId, items, notes, attribute
       managerNotes: '', invoiceId: null, invoiceNo: null, visitId: null,
     });
     return { orderId: orderRef.id, orderNo, alreadySaved: false };
-  });
+  }, { watch: [orderRef, ORDER_COUNTER_DOC] });
 }

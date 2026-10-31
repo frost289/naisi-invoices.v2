@@ -16,6 +16,9 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
+// RC6.5: the maximum order size follows the app constant (it was 12; the emulator showed 12 lines exceed the rules budget).
+import { MAX_ORDER_LINES } from '../../src/money.js';
+const MAXL = MAX_ORDER_LINES;
 import {
   doc, setDoc, getDoc, getDocs, collection, query, where, updateDoc, deleteDoc, addDoc, deleteField,
   runTransaction, writeBatch, serverTimestamp, Timestamp,
@@ -207,9 +210,11 @@ describe('D. rep no-order visits', () => {
   });
   it('manager can re-point customerId/customerName ONLY while the old customer carries a merge lock into the new one; no other edit, no delete', async () => {
     await assertSucceeds(put());
-    await assertFails(updateDoc(doc(as('mgr'), 'visits', V), { customerId: 'c2', customerName: 'Closed Shop' }));      // no lock: refused
+    // RC6.5: a merge re-point always records the visit's original shop (src/customers.js; rules finding 4), so the test sends it too.
+    await assertFails(updateDoc(doc(as('mgr'), 'visits', V), { customerId: 'c2', customerName: 'Closed Shop', originalCustomerId: 'c1' }));      // no lock: refused
     await env.withSecurityRulesDisabled(async (ctx) => { await updateDoc(doc(ctx.firestore(), 'customers', 'c1'), { mergeLock: { into: 'c2', by: 'mgr', at: Timestamp.now() } }); });
-    await assertSucceeds(updateDoc(doc(as('mgr'), 'visits', V), { customerId: 'c2', customerName: 'Closed Shop' }));
+    await assertSucceeds(updateDoc(doc(as('mgr'), 'visits', V), { customerId: 'c2', customerName: 'Closed Shop', originalCustomerId: 'c1' }));
+    await assertFails(updateDoc(doc(as('mgr'), 'visits', V), { originalCustomerId: 'c9' }));   // the original shop can never be rewritten
     await assertFails(updateDoc(doc(as('mgr'), 'visits', V), { outcome: 'Order Placed' }));
     await assertFails(updateDoc(doc(as('mgr'), 'visits', V), { repId: 'rep2' }));
     await assertFails(deleteDoc(doc(as('mgr'), 'visits', V)));
@@ -971,13 +976,13 @@ describe('K. cancellation keeps history, restores stock exactly once (decision 2
     must(err && err.code === 'cancel-not-allowed' && /returns|credit/i.test(err.message), 'expected cancel-not-allowed: ' + (err && err.message));
     must((await adminGet('orders', 'oInv')).status === 'Invoiced' && (await adminGet('invoices', 'ord_oInv')), 'invoiced order or invoice changed');
   });
-  it('app: an order with 12 different product lines cancels in one transaction (rule-lookup limits)', async () => {
+  it(`app: an order with ${MAXL} (the maximum) different product lines cancels in one transaction (rule-lookup limits)`, async () => {
     const items = []; 
-    for (let i = 1; i <= 12; i++) { await adminSet(['products', 'p' + i], { productName: 'P' + i, packLabel: 'x', stockOnHand: 10 }); items.push({ qty: 1, price: 100, total: 100, productId: 'p' + i, desc: 'P' + i }); }
-    await adminSet(['orders', 'oBig'], approved({ items, grandTotal: 1200 }));
+    for (let i = 1; i <= MAXL; i++) { await adminSet(['products', 'p' + i], { productName: 'P' + i, packLabel: 'x', stockOnHand: 10 }); items.push({ qty: 1, price: 100, total: 100, productId: 'p' + i, desc: 'P' + i }); }
+    await adminSet(['orders', 'oBig'], approved({ items, grandTotal: MAXL * 100 }));
     const a = await appAs('mgr');
     await a.stock.cancelOrder({ id: 'oBig' }, { reason: 'Large order cancelled', ...MGR });
-    for (let i = 1; i <= 12; i++) must((await adminGet('products', 'p' + i)).stockOnHand === 11, 'product p' + i + ' not restored');
+    for (let i = 1; i <= MAXL; i++) must((await adminGet('products', 'p' + i)).stockOnHand === 11, 'product p' + i + ' not restored');
   });
 });
 
@@ -1060,11 +1065,12 @@ describe('L. manager-entered orders (decision 3)', () => {
     must(!mine.docs.some(d => d.id === r.orderId), 'the rep list contains the manager-entered order');
   });
   it('app: a rep and a stranger cannot call the manager-entry function', async () => {
+    const ordersBefore = await adminCount('orders');   // RC6.5: was a fixed 3; the shared fixture has held 4 orders since RC4
     for (const who of ['rep1', 'stranger']) {
       const a = await appAs(who);
       await assertRejects(enter(a, { uid: who, email: who + '@example.com', requestId: 'req-eeeeeeee-5555' }));
     }
-    must((await adminCount('orders')) === 3, 'a refused entry created an order');
+    must((await adminCount('orders')) === ordersBefore, 'a refused entry created an order');
   });
   it('app: refuses a customer that is being merged or inactive (a missing pin is refused too, see RC6.4-ORD)', async () => {
     const a = await appAs('mgr');
@@ -1186,10 +1192,11 @@ describe('M. invoice number control (decision 6)', () => {
   });
   it('raw: the year part of an invoice number must still be four digits', async () => {
     const SAI = `sa_mgr_${REQ}`;
-    const b = writeBatch(as('mgr'));
-    b.set(doc(as('mgr'), 'counters', 'naisiInvoice'), { prefix: 'NF-INV', counter: 371, lastInvoiceId: SAI });
-    b.set(doc(as('mgr'), 'invoiceNumbers', 'NF-INV-ABCD-0370'), { invoiceId: SAI, issuedBy: 'mgr', issuedAt: serverTimestamp() });
-    b.set(doc(as('mgr'), 'invoices', SAI), { orderId: null, kind: 'standalone', requestId: REQ, invoiceNo: 'NF-INV-ABCD-0370', items: [], createdBy: 'mgr', createdAt: serverTimestamp() });
+    const db = as('mgr');            // RC6.5: ONE instance (each as() call makes a new one, which the SDK rejects inside one batch)
+    const b = writeBatch(db);
+    b.set(doc(db, 'counters', 'naisiInvoice'), { prefix: 'NF-INV', counter: 371, lastInvoiceId: SAI });
+    b.set(doc(db, 'invoiceNumbers', 'NF-INV-ABCD-0370'), { invoiceId: SAI, issuedBy: 'mgr', issuedAt: serverTimestamp() });
+    b.set(doc(db, 'invoices', SAI), { orderId: null, kind: 'standalone', requestId: REQ, invoiceNo: 'NF-INV-ABCD-0370', items: [], createdBy: 'mgr', createdAt: serverTimestamp() });
     await assertFails(b.commit());
   });
 });
@@ -1327,7 +1334,7 @@ describe('P. merges and invoicing (decision 8)', () => {
     await adminSet(['orders', 'moInv'], { orderNo: 'ORD-2026-0150', status: 'Invoicing', invoicingAttempt: 't', invoicingLeaseStartedAt: Timestamp.now(), customerId: 'c3', customerName: 'Dup', items: [], grandTotal: 1, createdBy: 'rep1' });
     const mv = (coll, id, extra = {}, to = 'c1') => updateDoc(doc(as('mgr'), coll, id), { customerId: to, customerName: 'Shop', ...extra });
     await assertSucceeds(mv('orders', 'mo0', { customerPhone: '0999', customerLocation: 'Area 25' }));
-    await assertSucceeds(mv('visits', 'v_rep1_mv0'));
+    await assertSucceeds(mv('visits', 'v_rep1_mv0', { originalCustomerId: 'c3' }));   // RC6.5: as the app's merge writes it
     await assertSucceeds(updateDoc(doc(as('mgr'), 'invoices', 'ord_mi0'), { customerId: 'c1', customer: 'Shop', phone: '0999', location: 'Area 25' }));
     await assertFails(mv('orders', 'mo1', {}, 'c2'));                      // not the lock target
     await assertFails(mv('orders', 'mo1', { grandTotal: 1 }));              // money cannot change during a merge
@@ -1338,7 +1345,7 @@ describe('P. merges and invoicing (decision 8)', () => {
   });
   it('raw: without a lock nothing is re-pointed (orders, visits, invoices)', async () => {
     await seedAway();
-    await assertFails(updateDoc(doc(as('mgr'), 'visits', 'v_rep1_mv0'), { customerId: 'c1', customerName: 'Shop' }));
+    await assertFails(updateDoc(doc(as('mgr'), 'visits', 'v_rep1_mv0'), { customerId: 'c1', customerName: 'Shop', originalCustomerId: 'c3' }));
     await assertFails(updateDoc(doc(as('mgr'), 'invoices', 'ord_mi0'), { customerId: 'c1', customer: 'Shop' }));
     await assertSucceeds(updateDoc(doc(as('mgr'), 'orders', 'mo0'), { customerId: 'c1', customerName: 'Shop' }));   // an ordinary edit of an OPEN order between two free customers stays possible
   });
@@ -1398,7 +1405,9 @@ describe('P. merges and invoicing (decision 8)', () => {
     const r = await appAs('rep1');
     await assertRejects(r.visits.recordNoOrderVisit({ customerId: 'c3', reason: 'Shop closed', notes: '', requestId: REQ, uid: 'rep1', email: 'rep1@example.com', now: NOW0 }));
     await assertDenied(setDoc(doc(as('rep1'), 'visits', V), visit({ customerId: 'c3', customerName: 'Dup' })));
-    await assertDenied(a.customers.setCustomerVisitDay('c3', 'Fri', MGR));
+    // RC6.5: the app now refuses this itself ('customer-merging', a clear message) before the rules are reached; the rules
+    // refusal of a schedule change on a locked customer is covered by the raw tests (scheduleChangeOk requires no mergeLock).
+    await assertRejects(a.customers.setCustomerVisitDay('c3', 'Fri', MGR));
     await a.customers.mergeCustomers('c1', 'c3', MGR);
     must((await adminGet('customers', 'c3')) === null, 'resume did not finish');
     must((await readAsAdmin((adb) => getDocs(query(collection(adb, 'orders'), where('customerId', '==', 'c3'))))).size === 0, 'orders left behind');
@@ -1572,7 +1581,7 @@ describe('RC4-I. order lines and money are validated by the rules (finding 3)', 
     'missing price': [{ qty: 2, desc: 'x', total: 10, productId: 'p1' }],
     'NaN-like missing total': [{ qty: 2, desc: 'x', price: 5, productId: 'p1' }],
     'numeric productId': [ln({ productId: 7 })],
-    '13 lines': Array.from({ length: 13 }, () => ln({ qty: 1, total: 5 })),
+    [`${MAXL + 1} lines`]: Array.from({ length: MAXL + 1 }, () => ln({ qty: 1, total: 5 })),
     'no lines': [],
   };
   for (const [name, items] of Object.entries(BAD)) {
@@ -1649,10 +1658,10 @@ describe('RC5-B. a rep order must carry catalogue stock identity on EVERY line; 
   };
   for (const [name, mk] of Object.entries(BAD)) it(`rep raw order refused: ${name}`, async () => { await assertFails(save(mk())); });
   it('CONTROL: a catalogue order with tracked lines is accepted', async () => { await assertSucceeds(save([L()])); });
-  it('CONTROL: exactly 12 tracked lines (the maximum supported size) is accepted by the rules without hitting an evaluation limit', async () => {
-    await assertSucceeds(save(Array.from({ length: 12 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }))));
+  it(`CONTROL: exactly ${MAXL} tracked lines (the maximum supported size) is accepted by the rules without hitting an evaluation limit`, async () => {
+    await assertSucceeds(save(Array.from({ length: MAXL }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }))));
   });
-  it('13 lines is refused', async () => { await assertFails(save(Array.from({ length: 13 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 })))); });
+  it(`${MAXL + 1} lines is refused`, async () => { await assertFails(save(Array.from({ length: MAXL + 1 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 })))); });
   it('a manager approving a STORED order that has an untracked line is refused by the rules; with an explicit custom line it is accepted', async () => {
     const base = { orderNo: 'ORD-2026-0095', status: 'Submitted', customerId: 'c1', customerName: 'Shop', createdBy: 'rep1' };
     const u = L(); delete u.productId;
@@ -1675,9 +1684,9 @@ describe('RC5-B. a rep order must carry catalogue stock identity on EVERY line; 
     b.set(doc(db, 'invoices', SA), { orderId: null, kind: 'standalone', requestId: REQ, invoiceNo: 'NF-INV-2026-0370', customer: 'Walk-in', items: [{ qty: 1.5, desc: 'Freight', price: 100, total: 150, custom: true }], grandTotal: 150, createdBy: 'mgr', createdAt: serverTimestamp() });
     await assertSucceeds(b.commit());
   });
-  it('maximum size, other paths: a 12-line Approved order can be cancelled with stock restore; its 12-line invoice commit works', async () => {
-    const items = Array.from({ length: 12 }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }));
-    await adminSet(['orders', 'o12'], { orderNo: 'ORD-2026-0098', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items, grandTotal: 60 });
+  it(`maximum size, other paths: a ${MAXL}-line Approved order can be cancelled with stock restore`, async () => {
+    const items = Array.from({ length: MAXL }, (_, i) => L({ productId: 'p' + (i + 1), qty: 1, price: 5, total: 5 }));
+    await adminSet(['orders', 'o12'], { orderNo: 'ORD-2026-0098', status: 'Approved', stockApplied: true, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items, grandTotal: MAXL * 5 });
     const db = as('mgr'); const b = writeBatch(db);
     b.update(doc(db, 'orders', 'o12'), { status: 'Cancelled', stockApplied: false, cancelReason: 'Customer cancelled', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelPriorStatus: 'Approved', cancelledAt: serverTimestamp(), updatedAt: serverTimestamp() });
     b.set(doc(db, 'orderCancellations', 'o12'), { orderId: 'o12', orderNo: 'ORD-2026-0098', priorStatus: 'Approved', stockRestored: true, reason: 'Customer cancelled', cancelledBy: 'mgr', cancelledByEmail: 'mgr@example.com', cancelledAt: serverTimestamp() });
@@ -1727,18 +1736,18 @@ describe('RC6-P3. invoice line edits: custom:true and the historical no-flag lin
 });
 
 // =============================================================================================
-// RC6-MAX. The maximum supported order size (12 lines) through the REAL app functions: approve (12 products, 12 movements), edit, invoice, cancel
+// RC6-MAX. The maximum supported order size (MAX_ORDER_LINES lines, 6 since RC6.5; was 12) through the REAL app functions: approve (12 products, 12 movements), edit, invoice, cancel
 // with restore. EMULATOR-ONLY: not executed in the authoring sandbox. Acceptance: all succeed with no "exceeded" / "maximum" rule-evaluation
 // or document-access error. If any fails with such an error, MAX_ORDER_LINES must be lowered (src/money.js, the unrolled rules, tests) and the owner told.
-describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation transactions', () => {
-  const ids = Array.from({ length: 12 }, (_, i) => 'p' + (i + 1));
+describe(`RC6-MAX. ${MAXL}-line orders: approval, edit, invoice and cancellation transactions`, () => {
+  const ids = Array.from({ length: MAXL }, (_, i) => 'p' + (i + 1));
   const items12 = (qty = 1) => ids.map((pid, i) => ({ productId: pid, desc: 'Product ' + (i + 1), qty, price: 100, total: qty * 100 }));
   const seed = async (orderId, status = 'Submitted') => {
     for (const pid of ids) await adminSet(['products', pid], { productName: pid, packLabel: '100g', stockOnHand: 50, unitsPerCase: 1 });
-    await adminSet(['orders', orderId], { orderNo: 'ORD-2026-0777', status, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: items12(), grandTotal: 1200, stockApplied: status === 'Approved' });
+    await adminSet(['orders', orderId], { orderNo: 'ORD-2026-0777', status, customerId: 'c1', customerName: 'Shop', createdBy: 'rep1', items: items12(), grandTotal: MAXL * 100, stockApplied: status === 'Approved' });
   };
   const stock = async () => Promise.all(ids.map(async (p) => (await adminGet('products', p)).stockOnHand));
-  it('approve: all 12 products are deducted once; a repeat is refused and changes nothing', async () => {
+  it(`approve: all ${MAXL} products are deducted once; a repeat is refused and changes nothing`, async () => {
     await seed('o12a'); const m = await appAs('mgr');
     await m.stock.approveOrderWithStock({ id: 'o12a', items: items12() }, MGR);
     must((await stock()).every((s) => s === 49), 'every product should be 49: ' + (await stock()));
@@ -1751,7 +1760,7 @@ describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation tran
     await m.stock.editOrderWithStock('o12b', { details: {}, items: items12(3) }, MGR);
     must((await stock()).every((s) => s === 47), 'every product should be 47 after editing 1 -> 3: ' + (await stock()));
   });
-  it('invoice: a 12-line invoice commit succeeds once and a second attempt is refused', async () => {
+  it(`invoice: a ${MAXL}-line invoice commit succeeds once and a second attempt is refused`, async () => {
     await seed('o12c'); const m = await appAs('mgr');
     await m.stock.approveOrderWithStock({ id: 'o12c', items: items12() }, MGR);
     const inv = await m.orders.issueInvoiceForOrder({ orderId: 'o12c', meta: { items: items12(), customer: 'Shop', customerId: 'c1', date: '2026-10-15' }, uid: 'mgr' });
@@ -1759,16 +1768,16 @@ describe('RC6-MAX. 12-line orders: approval, edit, invoice and cancellation tran
     let second; try { await m.orders.issueInvoiceForOrder({ orderId: 'o12c', meta: { items: items12(), customer: 'Shop', customerId: 'c1', date: '2026-10-15' }, uid: 'mgr' }); } catch (e) { second = e; }
     must(!!second, 'a second invoice for the same order must be refused');
   });
-  it('cancel with restore: all 12 products return to their original stock exactly once', async () => {
+  it(`cancel with restore: all ${MAXL} products return to their original stock exactly once`, async () => {
     await seed('o12d'); const m = await appAs('mgr');
     await m.stock.approveOrderWithStock({ id: 'o12d', items: items12() }, MGR);
     await m.stock.cancelOrder({ id: 'o12d', ...(await adminGet('orders', 'o12d')) }, { reason: 'Customer cancelled', uid: 'mgr', email: 'mgr@example.com' });
     must((await stock()).every((s) => s === 50), 'stock should be back to 50: ' + (await stock()));
   });
-  it('13 lines is refused by the app validator before any write (and by the rules if sent raw, see RC5-B)', async () => {
+  it(`${MAXL + 1} lines is refused by the app validator before any write (and by the rules if sent raw, see RC5-B)`, async () => {
     const m = await appAs('mgr');
-    const problem = m.visits.validateOrderItems([...items12(), { productId: 'p13', desc: 'x', qty: 1, price: 1, total: 1 }]);
-    must(typeof problem === 'string' && problem.length > 0, 'validateOrderItems must return a problem for 13 lines, got ' + problem);
+    const problem = m.visits.validateOrderItems([...items12(), { productId: 'p' + (MAXL + 1), desc: 'x', qty: 1, price: 1, total: 1 }]);
+    must(typeof problem === 'string' && problem.length > 0, `validateOrderItems must return a problem for ${MAXL + 1} lines, got ` + problem);
   });
 });
 
