@@ -13,7 +13,8 @@ const files = fs.readdirSync(srcDir).filter(f => f.endsWith('.js') && f !== 'log
 describe('RC5 the audit allowlist is honest', () => {
   const all = files.map(f => fs.readFileSync(path.join(srcDir, f), 'utf8')).join('\n');
   const helperNames = ['customerDayCellHtml', 'customerMapCellHtml', 'customerStatusCellHtml', 'visitStatusHtml', 'orderStatusBadge', 'badgeHtml', 'invalidAmountNote',
-    'topProductsHtml', 'itemsHtml', 'failText', 'statusBreakdown', 'expenseBreakdown'];
+    'topProductsHtml', 'itemsHtml', 'failText', 'statusBreakdown', 'expenseBreakdown',
+    'tilesHtml', 'movementsTableHtml', 'historyHtml'];
   it.each(helperNames)('exempt helper %s is defined in src and its own template is audited (no unescaped interpolation inside it)', (h) => {
     expect(all).toMatch(new RegExp(`(function ${h}\\b|const ${h}\\b)`));
   });

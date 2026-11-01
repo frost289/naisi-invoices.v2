@@ -6,6 +6,8 @@
 export const SAFE = [
   /^customerDayCellHtml\(/, /^customerMapCellHtml\(/, /^customerStatusCellHtml\(/, /^visitStatusHtml\(/, /^orderStatusBadge\(/, /^badgeHtml\(/, /^invalidAmountNote\(/,
   /^(options|optionsFor\(r\)|dayRows|skipped|blockedNote|byCell|byEditCell|actions|checkboxCell|baseCells|topProductsHtml|itemsHtml|failText|rows\.map\(line\)\.join\(''\)|moveRows|statusBreakdown|expenseBreakdown)$/, /^counts\.invoicing\.map\(esc\)/,
+  // Phase 1 float screens (src/floatUi.js): fragments built entirely with esc(); their templates are audited too.
+  /^tilesHtml\(pos(, \{ forRep: true \})?\)$/, /^movementsTableHtml\(/, /^historyHtml$/,
 ];
 
 export function analyze(src) {

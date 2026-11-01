@@ -11,6 +11,13 @@ export async function getUserRole(email) {
   return null;
 }
 
+// Phase 1: everyone who can hold a cash float (sales reps and drivers).
+export async function fetchFloatHolderEmails() {
+  const snap = await getDoc(doc(db, 'config', 'roles'));
+  const d = snap.exists() ? snap.data() : {};
+  return { submitters: [...(d.submitters || [])], deliverers: [...(d.deliverers || [])] };
+}
+
 // Emails of every sales rep (role "submitter"), so reports can list reps who
 // have not recorded any visit.
 export async function fetchRepEmails() {

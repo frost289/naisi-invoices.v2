@@ -40,8 +40,16 @@ export async function fetchMyExpensesPage(uid, cursor = null, { categories = REP
   };
 }
 
-// RC6.4: expenses with core fields for expense tracking.
-export async function addExpense({ date, category, amount, notes, uid, email }) {
+// Phase 1: expenses with core fields + optional Phase 1 extension fields.
+// Optional fields (all omitted if undefined/null/empty):
+//   subcategory   – string: subcategory within the category
+//   vehicleId     – string: Firestore doc id of the vehicle (deliverers / Fuel / VehicleMaintenance)
+//   payee         – string: who was paid (person or vendor name)
+//   receiptRef    – string: receipt number or other reference (stored as receiptReference, the field name the rules allow)
+//   reportId      – string: expenseReport doc id this line belongs to (Phase 1 Stage 3+)
+//   floatPeriodId – string: floatPeriod doc id (Phase 1 Stage 2+)
+export async function addExpense({ date, category, amount, notes, uid, email,
+  subcategory, vehicleId, payee, receiptRef, reportId, floatPeriodId }) {
   const expenseData = {
     date, category,
     amount: requireExpenseAmount(amount),
@@ -51,6 +59,14 @@ export async function addExpense({ date, category, amount, notes, uid, email }) 
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
+  // Attach optional Phase 1 fields only when provided (keeps legacy records clean)
+  if (subcategory)    expenseData.subcategory   = subcategory;
+  if (vehicleId)      expenseData.vehicleId      = vehicleId;
+  if (payee)          expenseData.payee          = payee;
+  if (receiptRef)     expenseData.receiptReference = receiptRef;
+  if (reportId)       expenseData.reportId       = reportId;
+  if (floatPeriodId)  expenseData.floatPeriodId  = floatPeriodId;
+
   await addDoc(collection(db, 'expenses'), expenseData);
 }
 

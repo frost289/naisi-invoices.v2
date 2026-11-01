@@ -1,12 +1,15 @@
-// RC6.4: expense categories (same set as RC6.3; the RC6.4 expansion was withdrawn).
+// Expense categories.
 //
-// A sales rep only records the costs of his own field day: transport, meals and other small items.
-// Fuel belongs to the delivery vehicle (deliverer logs it). Stock Purchase is a manager cost.
+// TWO SETS, deliberately kept apart:
 //
-// Role boundaries (enforced by Firestore rules):
-// - Rep (submitter): Transport, Meals, Other (own only)
-// - Deliverer: Fuel, Transport, Meals, Other (own only)
-// - Manager: Transport, Meals, Fuel, Stock Purchase, Other (everyone's)
+// 1. ALL_OPERATING_EXPENSE_CATEGORIES (5): the LIVE expense form (Expenses tab). These match the deployed
+//    `expenses` rules exactly (rep: Transport, Meals, Other; deliverer: + Fuel; manager: + Stock). Do not add
+//    to this list without changing repExpenseCategoryOk / delivererExpenseCategoryOk in rules/firestore.rules,
+//    or a rep's save will be refused.
+//
+// 2. EXPENSE_CATEGORIES_V2 (8): Phase 1 expense control (float settings, expense reports). Adds
+//    Emergency Cash (rep, manager), Manager Business (manager), Vehicle/Maintenance (deliverer, manager).
+//    Used by floatSettings.allowedCategories and, from Stage 3, by expenseLines.
 
 export const ALL_OPERATING_EXPENSE_CATEGORIES = [
   { value: 'Transport', label: 'Transport', roles: ['rep', 'deliverer', 'manager'] },
@@ -16,48 +19,90 @@ export const ALL_OPERATING_EXPENSE_CATEGORIES = [
   { value: 'Other', label: 'Other', roles: ['rep', 'deliverer', 'manager'] },
 ];
 
-export function expenseCategoriesFor(userRole) {
+export const EXPENSE_CATEGORIES_V2 = [
+  ...ALL_OPERATING_EXPENSE_CATEGORIES,
+  { value: 'EmergencyCash', label: 'Emergency Cash', roles: ['rep', 'manager'] },
+  { value: 'ManagerBusiness', label: 'Manager Business', roles: ['manager'] },
+  { value: 'VehicleMaintenance', label: 'Vehicle/Maintenance', roles: ['deliverer', 'manager'] },
+];
+
+// Subcategories per category (Phase 1). Empty array = no subcategory selector.
+export const EXPENSE_SUBCATEGORIES = {
+  Transport: ['Minibus', 'Taxi / Kabaza', 'Fuel (own vehicle)', 'Other'],
+  Meals: ['Breakfast', 'Lunch', 'Dinner', 'Team Meal', 'Other'],
+  Fuel: ['Diesel', 'Petrol'],
+  Stock: ['Stock Purchase', 'Other'],
+  Other: [],
+  EmergencyCash: ['Medical', 'Vehicle Breakdown', 'Customer Emergency', 'Other'],
+  ManagerBusiness: ['Client Entertainment', 'Office Supplies', 'Bank Charges', 'Licensing/Permits', 'Other'],
+  VehicleMaintenance: ['Oil Change', 'Tyre Repair', 'Brake Service', 'Battery', 'Wash/Clean', 'Other'],
+};
+
+function normaliseRole(userRole) {
   // userRole: 'rep', 'deliverer', 'manager', or boolean (backward compat: false=rep, true=manager)
-  let role = userRole;
-  if (typeof userRole === 'boolean') {
-    role = userRole ? 'manager' : 'rep';
-  }
-  if (!role || role === 'manager') {
-    return ALL_OPERATING_EXPENSE_CATEGORIES.slice();
-  }
-  return ALL_OPERATING_EXPENSE_CATEGORIES.filter(c => c.roles.includes(role));
+  if (typeof userRole === 'boolean') return userRole ? 'manager' : 'rep';
+  return userRole;
+}
+
+function filterFor(list, userRole) {
+  const role = normaliseRole(userRole);
+  if (!role || role === 'manager') return list.slice();
+  return list.filter(c => c.roles.includes(role));
+}
+
+// LIVE expense form (unchanged behaviour).
+export function expenseCategoriesFor(userRole) {
+  return filterFor(ALL_OPERATING_EXPENSE_CATEGORIES, userRole);
+}
+
+// Phase 1 expense control.
+export function expenseCategoriesV2For(userRole) {
+  return filterFor(EXPENSE_CATEGORIES_V2, userRole);
+}
+
+// Categories a float holder may CLAIM on an expense report (Stage 3). Must match claimCategoryOk in the rules.
+// Fuel is outside the float system (logged in the Expenses tab / delivery "Log an Expense"); Stock and Manager
+// Business are manager costs, not claims.
+export const CLAIM_CATEGORIES = {
+  rep: ['Transport', 'Meals', 'Other', 'EmergencyCash'],
+  deliverer: ['Transport', 'Meals', 'Other', 'VehicleMaintenance'],
+};
+export const ALL_CLAIM_CATEGORY_VALUES = ['Transport', 'Meals', 'Other', 'EmergencyCash', 'VehicleMaintenance'];
+
+// The person's claimable categories: their role's set, narrowed to the manager's ticked list when one is set
+// (an empty list means "all categories for the role").
+export function claimCategoriesFor(role, allowedCategories) {
+  const base = CLAIM_CATEGORIES[role] || [];
+  const allowed = Array.isArray(allowedCategories) && allowedCategories.length ? base.filter(c => allowedCategories.includes(c)) : base;
+  return allowed.map(v => ({ value: v, label: categoryLabel(v) }));
+}
+
+export function categoryLabel(value) {
+  const c = EXPENSE_CATEGORIES_V2.find(x => x.value === value);
+  return c ? c.label : String(value || '');
+}
+
+export function subcategoriesFor(categoryValue) {
+  return EXPENSE_SUBCATEGORIES[categoryValue] || [];
 }
 
 // Options for an edit box. A manager: every category, plus the record's own if it is unexpected.
-// A rep/deliverer: only their allowed categories; they never hold a record outside them (the query and rules exclude them).
+// A rep/deliverer: only their allowed categories.
 export function expenseCategoryOptionsForEdit(userRole, current) {
-  // userRole: 'rep', 'deliverer', 'manager', or boolean (backward compat: false=rep, true=manager)
-  let role = userRole;
-  if (typeof userRole === 'boolean') {
-    role = userRole ? 'manager' : 'rep';
-  }
-
+  const role = normaliseRole(userRole);
   const list = expenseCategoriesFor(role);
-  if (role === 'manager') {
-    if (current && !ALL_OPERATING_EXPENSE_CATEGORIES.some(c => c.value === current)) {
-      list.push({ value: String(current), label: String(current), roles: ['manager'] });
-    }
+  if (role === 'manager' && current && !ALL_OPERATING_EXPENSE_CATEGORIES.some(c => c.value === current)) {
+    list.push({ value: String(current), label: categoryLabel(current), roles: ['manager'] });
   }
   return list;
 }
 
 export function repMaySeeExpense(e, userRole = 'rep') {
   if (!e) return false;
-  const allowed = expenseCategoriesFor(userRole).map(c => c.value);
-  return allowed.includes(e.category);
+  return expenseCategoriesFor(userRole).map(c => c.value).includes(e.category);
 }
 
-// Summary tiles: exactly the role's categories. For reps/deliverers, records outside them are never counted.
+// Summary tiles: exactly the role's categories.
 export function expenseTilesFor(userRole, byCategory) {
-  // userRole: 'rep', 'deliverer', 'manager', or boolean (backward compat: false=rep, true=manager)
-  let role = userRole;
-  if (typeof userRole === 'boolean') {
-    role = userRole ? 'manager' : 'rep';
-  }
-  return expenseCategoriesFor(role).map(c => ({ ...c, amount: (byCategory && byCategory[c.value]) || 0 }));
+  return expenseCategoriesFor(normaliseRole(userRole)).map(c => ({ ...c, amount: (byCategory && byCategory[c.value]) || 0 }));
 }

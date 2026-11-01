@@ -12,6 +12,13 @@ export async function saveMyProfile(uid, { name, email }) {
   }, { merge: true });
 }
 
+// Phase 1: record my email on my own profile (merge) so managers can find me, without touching a saved name.
+// Allowed by the users rules (own document, email == login email). Drivers cannot read users, so no read first.
+export async function ensureMyProfile(uid, email) {
+  if (!uid || !email) return;
+  await setDoc(doc(db, 'users', uid), { email }, { merge: true });
+}
+
 // Fetches every user profile so emails can be resolved to display
 // names in reports (Rep Performance, Stock Movement History, Order
 // Preview, etc.) in one shot rather than one lookup per row.

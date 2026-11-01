@@ -24,7 +24,7 @@ import {
   fetchAllLocations, addLocation, deleteLocation, markLocationReviewed, findLocationByName, googleMapsSearchUrlForLocation
 } from './locations.js';
 import {
-  fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail
+  fetchMyProfile, saveMyProfile, fetchAllProfiles, resolveNameByEmail, ensureMyProfile
 } from './userProfiles.js';
 import {
   fetchAllExpensesPage, fetchMyExpensesPage, addExpense, updateExpense, deleteExpense
@@ -63,7 +63,7 @@ import { repDayProgress, scheduledForDate, buildPerformanceReport } from './visi
 import { buildScheduleIndex, awaitingScheduling, findScheduleMismatches } from './scheduleHistory.js';
 import { fetchScheduleHistory, startScheduleHistory } from './scheduleStore.js';
 import { submitOrderAsManager } from './managerOrders.js';
-import { fetchRepEmails } from './roles.js';
+import { fetchRepEmails, fetchFloatHolderEmails } from './roles.js';
 import {
   showToast, setButtonLoading, clearButtonLoading,
   initOfflineBanner, showAppOverlay, hideAppOverlay, fadeInView, esc, mergeById,
@@ -80,7 +80,13 @@ import { readTable, parseCsv, rowsFromWorksheet, planImport, buildMoves } from '
 import ExcelJS from 'exceljs';
 import { runBulkJob } from './bulkProgress.js';
 import { buildWeekBoard, weekStartOf } from './weekBoard.js';
-import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense } from './expenseCategories.js';
+import { expenseCategoriesFor, expenseCategoryOptionsForEdit, expenseTilesFor, repMaySeeExpense, EXPENSE_CATEGORIES_V2, ALL_CLAIM_CATEGORY_VALUES, categoryLabel } from './expenseCategories.js';
+import { fetchActiveVehicles, fetchAllVehicles, addVehicle, updateVehicle, deactivateVehicle, activateVehicle } from './vehicles.js';
+import { fetchAllFloatSettings, fetchFloatSettings, setFloatSettings } from './floatAccounts.js';
+import { fetchLatestProductCosts, setProductCost } from './productCosts.js';
+import { loadFloatPeriodsView, loadMyFloatView } from './floatUi.js';
+import { loadApprovalsView } from './claimsUi.js';
+import { initControlReportsView } from './controlReportsUi.js';
 
 initOfflineBanner();
 
@@ -112,6 +118,9 @@ watchAuth(
   async (user) => {
     loginScreen.style.display = 'none';
     const role = await getUserRole(user.email);
+    // Phase 1: make sure every staff member has a users/{uid} document, so a manager can pick them in Float Settings
+    // (drivers never see the Profile screen). Only the email is written, merged; a saved display name is kept.
+    if (role) ensureMyProfile(user.uid, user.email).catch(() => {});
     if (role === 'manager' || role === 'submitter') {
       noAccessScreen.style.display = 'none';
       appRoot.style.display = 'block';
@@ -266,6 +275,14 @@ async function initApp(user, role) {
     schedule: document.getElementById('scheduleView'),
     logvisit: document.getElementById('logvisitView'),
     myvisits: document.getElementById('myvisitsView'),
+    // Phase 1 — manager screens
+    approvals: document.getElementById('approvalsView'),
+    controlReports: document.getElementById('controlReportsView'),
+    floatPeriods: document.getElementById('floatPeriodsView'),
+    myfloat: document.getElementById('myFloatView'),
+    floatSettings: document.getElementById('floatSettingsView'),
+    vehicles: document.getElementById('vehiclesView'),
+    productCosts: document.getElementById('productCostsView'),
   };
   const navBtns = {
     form: document.getElementById('navFormBtn'),
@@ -280,10 +297,19 @@ async function initApp(user, role) {
     schedule: document.getElementById('navScheduleBtn'),
     logvisit: document.getElementById('navLogVisitBtn'),
     myvisits: document.getElementById('navMyVisitsBtn'),
+    // Phase 1 — nav buttons
+    approvals: document.getElementById('navApprovalsBtn'),
+    controlReports: document.getElementById('navControlReportsBtn'),
+    floatPeriods: document.getElementById('navFloatPeriodsBtn'),
+    myfloat: document.getElementById('navMyFloatBtn'),
+    floatSettings: document.getElementById('navFloatSettingsBtn'),
+    vehicles: document.getElementById('navVehiclesBtn'),
+    productCosts: document.getElementById('navProductCostsBtn'),
   };
 
-  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule'];
-  const submitterOnlyNav = ['logvisit', 'myvisits'];
+  const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule',
+    'approvals', 'controlReports', 'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
+  const submitterOnlyNav = ['logvisit', 'myvisits', 'myfloat'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
   submitterOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'none' : 'inline-flex'; });
@@ -320,6 +346,13 @@ async function initApp(user, role) {
     schedule: async () => { if (window.__loadWeekBoard) await window.__loadWeekBoard(); },
     myvisits: resetAndLoadMyVisits,
     logvisit: async () => { if (window.__loadTodaysVisits) await window.__loadTodaysVisits(); },
+    floatPeriods: async () => { if (isManager) await loadFloatPeriodsView({ user, profiles: await fetchAllProfiles() }); },
+    myfloat: async () => loadMyFloatView({ user, profiles: await fetchAllProfiles(), role: 'rep' }),
+    approvals: async () => { if (isManager) await loadApprovalsView({ user, profiles: await fetchAllProfiles() }); },
+    controlReports: async () => { if (isManager) initControlReportsView({ profiles: await fetchAllProfiles() }); },
+    floatSettings: resetAndLoadFloatSettings,
+    vehicles: resetAndLoadVehicles,
+    productCosts: resetAndLoadProductCosts,
   };
 
   async function showView(view) {
@@ -4695,6 +4728,265 @@ async function initApp(user, role) {
   }
   async function loadSummaryView() { if (window.loadSummaryView) await window.loadSummaryView(); }
 
+  // ============= PHASE 1, STAGE 1 — M5: FLOAT SETTINGS (manager only) =============
+  async function resetAndLoadFloatSettings() {
+    if (!isManager) return;
+    const staffSelect = document.getElementById('floatStaffSelect');
+    const loadBtn = document.getElementById('loadFloatSettingsBtn');
+    const saveBtn = document.getElementById('saveFloatSettingsBtn');
+    const cancelBtn = document.getElementById('cancelFloatSettingsBtn');
+    const form = document.getElementById('floatSettingsForm');
+    const titleEl = document.getElementById('floatSettingsTitle');
+    const targetInput = document.getElementById('floatTargetInput');
+    const checkboxContainer = document.getElementById('floatCategoryCheckboxes');
+    const msgEl = document.getElementById('floatSettingsMsg');
+    const listEmpty = document.getElementById('floatSettingsListEmpty');
+    const table = document.getElementById('floatSettingsTable');
+    const tbody = document.getElementById('floatSettingsBody');
+
+    // Populate staff dropdown from cached profiles
+    // Float holders only: sales reps and drivers (config/roles). A person appears once they have signed in at least once.
+    const profiles = await fetchAllProfiles();
+    const { submitters, deliverers } = await fetchFloatHolderEmails();
+    const roleOf = (email) => (submitters.includes(email) ? 'Sales rep' : deliverers.includes(email) ? 'Driver' : null);
+    const eligible = Object.entries(profiles)
+      .filter(([, p]) => p && roleOf(p.email))
+      .sort((a, b) => String(a[1].name || a[1].email).localeCompare(String(b[1].name || b[1].email)));
+    staffSelect.innerHTML = '<option value="">Select staff member…</option>' + eligible.map(([uid, p]) =>
+      `<option value="${esc(uid)}" data-email="${esc(p.email)}">${esc((p.name || p.email) + ' (' + roleOf(p.email) + ')')}</option>`).join('');
+
+    // Build category checkboxes
+    function buildCategoryCheckboxes(allowedCategories = []) {
+      checkboxContainer.innerHTML = EXPENSE_CATEGORIES_V2.filter(c => ALL_CLAIM_CATEGORY_VALUES.includes(c.value)).map(c =>
+        `<label style="display:flex;align-items:center;gap:0.3rem;font-size:0.85rem;background:var(--surface2,#f3f4f6);padding:0.3rem 0.6rem;border-radius:6px;">
+          <input type="checkbox" value="${esc(c.value)}" ${esc(allowedCategories.includes(c.value) ? 'checked' : '')}>
+          ${esc(c.label)}
+        </label>`
+      ).join('');
+    }
+
+    function getCheckedCategories() {
+      return [...checkboxContainer.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value);
+    }
+
+    function showForm(uid, name, settings) {
+      titleEl.textContent = `Float Settings for ${name}`;
+      targetInput.value = settings ? settings.floatTarget : '';
+      buildCategoryCheckboxes(settings ? settings.allowedCategories : []);
+      form.dataset.uid = uid;
+      form.dataset.email = staffSelect.querySelector(`option[value="${uid}"]`)?.dataset.email || '';
+      form.style.display = 'block';
+      msgEl.textContent = '';
+    }
+
+    loadBtn.onclick = async () => {
+      const uid = staffSelect.value;
+      if (!uid) { showToast('Select a staff member first.', 'info'); return; }
+      try {
+        const settings = await fetchFloatSettings(uid);
+        const name = staffSelect.options[staffSelect.selectedIndex].textContent;
+        showForm(uid, name, settings);
+      } catch (err) { showToast('Could not load: ' + err.message, 'error'); }
+    };
+
+    saveBtn.onclick = async () => {
+      const uid = form.dataset.uid;
+      const email = form.dataset.email;
+      const floatTarget = parseFloat(targetInput.value);
+      if (!uid) { msgEl.textContent = 'No staff member selected.'; return; }
+      if (isNaN(floatTarget) || floatTarget < 0) { msgEl.textContent = 'Enter a valid float target (≥ 0).'; return; }
+      const allowedCategories = getCheckedCategories();
+      saveBtn.disabled = true;
+      msgEl.textContent = 'Saving…';
+      try {
+        await setFloatSettings({ staffUid: uid, staffEmail: email, floatTarget, allowedCategories, managerUid: user.uid });
+        msgEl.textContent = '✓ Saved.';
+        showToast('Float settings saved.', 'success');
+        await renderFloatSettingsList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    cancelBtn.onclick = () => { form.style.display = 'none'; msgEl.textContent = ''; };
+
+    async function renderFloatSettingsList() {
+      try {
+        const all = await fetchAllFloatSettings();
+        if (!all.length) { listEmpty.style.display = 'block'; table.style.display = 'none'; return; }
+        listEmpty.style.display = 'none'; table.style.display = 'table';
+        tbody.innerHTML = all.map(s => `<tr>
+          <td>${esc(s.staffEmail)}</td>
+          <td>${esc(mwk(s.floatTarget))}</td>
+          <td style="font-size:0.78rem;">${esc((s.allowedCategories || []).map(categoryLabel).join(', ') || '—')}</td>
+          <td style="font-size:0.78rem;">${esc(s.updatedAt?.toDate ? s.updatedAt.toDate().toLocaleDateString() : '—')}</td>
+          <td><button type="button" class="list-action-btn fs-edit-btn" style="font-size:0.78rem;" data-uid="${esc(s.staffUid)}">Edit</button></td>
+        </tr>`).join('');
+        tbody.querySelectorAll('.fs-edit-btn').forEach(b => {
+          b.onclick = () => { staffSelect.value = b.dataset.uid; loadBtn.click(); };
+        });
+      } catch (err) { showToast('Could not load float list: ' + err.message, 'error'); }
+    }
+
+    await renderFloatSettingsList();
+  }
+
+  // ============= PHASE 1, STAGE 1 — M7: VEHICLES (manager only) =============
+  async function resetAndLoadVehicles() {
+    if (!isManager) return;
+    const regInput = document.getElementById('vehicleRegInput');
+    const descInput = document.getElementById('vehicleDescInput');
+    const assignedSelect = document.getElementById('vehicleAssignedSelect');
+    const editIdInput = document.getElementById('vehicleEditId');
+    const saveBtn = document.getElementById('saveVehicleBtn');
+    const clearBtn = document.getElementById('clearVehicleFormBtn');
+    const showInactiveChk = document.getElementById('vehicleShowInactive');
+    const msgEl = document.getElementById('vehicleFormMsg');
+    const tbody = document.getElementById('vehiclesBody');
+    const listEmpty = document.getElementById('vehicleListEmpty');
+
+    // Populate deliverer dropdown
+    const profiles = await fetchAllProfiles();
+    assignedSelect.innerHTML = '<option value="">— Pool vehicle —</option>' +
+      Object.entries(profiles).map(([uid, p]) =>
+        `<option value="${esc(uid)}">${esc(p.name || p.email)}</option>`
+      ).join('');
+
+    function clearForm() {
+      regInput.value = ''; descInput.value = ''; assignedSelect.value = '';
+      editIdInput.value = ''; msgEl.textContent = '';
+      saveBtn.textContent = 'Save Vehicle';
+    }
+    clearBtn.onclick = clearForm;
+
+    function editVehicle(v) {
+      regInput.value = v.registration; descInput.value = v.description;
+      assignedSelect.value = v.assignedToUid || '';
+      editIdInput.value = v.id;
+      saveBtn.textContent = 'Update Vehicle';
+      msgEl.textContent = '';
+      document.getElementById('vehiclesView').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    saveBtn.onclick = async () => {
+      const registration = regInput.value.trim();
+      const description = descInput.value.trim();
+      const assignedToUid = assignedSelect.value || null;
+      const editId = editIdInput.value;
+      if (!registration) { msgEl.textContent = 'Registration is required.'; return; }
+      if (!description) { msgEl.textContent = 'Description is required.'; return; }
+      saveBtn.disabled = true; msgEl.textContent = 'Saving…';
+      try {
+        if (editId) {
+          await updateVehicle(editId, { registration, description, assignedToUid });
+        } else {
+          await addVehicle({ registration, description, assignedToUid, uid: user.uid });
+        }
+        showToast('Vehicle saved.', 'success');
+        clearForm();
+        await renderVehicleList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    showInactiveChk.onchange = () => renderVehicleList();
+
+    async function renderVehicleList() {
+      const showAll = showInactiveChk.checked;
+      const vehicles = showAll ? await fetchAllVehicles() : await fetchActiveVehicles();
+      if (!vehicles.length) { listEmpty.style.display = 'block'; tbody.innerHTML = ''; return; }
+      listEmpty.style.display = 'none';
+      const profileMap = await fetchAllProfiles();
+      tbody.innerHTML = vehicles.map(v => {
+        const assignee = v.assignedToUid ? (profileMap[v.assignedToUid]?.name || profileMap[v.assignedToUid]?.email || v.assignedToUid) : '—';
+        const toggleLabel = v.active ? 'Deactivate' : 'Activate';
+        return `<tr data-vid="${esc(v.id)}">
+          <td>${esc(v.registration)}</td>
+          <td>${esc(v.description)}</td>
+          <td>${esc(assignee)}</td>
+          <td><span style="color:${esc(v.active ? '#16a34a' : '#9ca3af')};">${esc(v.active ? 'Active' : 'Inactive')}</span></td>
+          <td style="display:flex;gap:0.3rem;">
+            <button class="list-action-btn v-edit-btn" style="font-size:0.78rem;">Edit</button>
+            <button class="list-action-btn v-toggle-btn" style="font-size:0.78rem;">${esc(toggleLabel)}</button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      tbody.querySelectorAll('tr').forEach((row, idx) => {
+        const v = vehicles[idx];
+        row.querySelector('.v-edit-btn').onclick = () => editVehicle(v);
+        row.querySelector('.v-toggle-btn').onclick = async () => {
+          try {
+            if (v.active) await deactivateVehicle(v.id);
+            else await activateVehicle(v.id);
+            await renderVehicleList();
+          } catch (err) { showToast('Could not update vehicle: ' + err.message, 'error'); }
+        };
+      });
+    }
+
+    await renderVehicleList();
+  }
+
+  // ============= PHASE 1, STAGE 1 — M8: PRODUCT COSTS (manager only) =============
+  async function resetAndLoadProductCosts() {
+    if (!isManager) return;
+    const productSelect = document.getElementById('costProductSelect');
+    const priceInput = document.getElementById('costPriceInput');
+    const fromInput = document.getElementById('costEffectiveFromInput');
+    const saveBtn = document.getElementById('saveCostPriceBtn');
+    const msgEl = document.getElementById('costPriceMsg');
+    const listEmpty = document.getElementById('costListEmpty');
+    const table = document.getElementById('productCostsTable');
+    const tbody = document.getElementById('productCostsBody');
+
+    // Default effective date to today
+    const today = new Date().toISOString().slice(0, 10);
+    fromInput.value = today;
+
+    // Populate product dropdown from products cache
+    const allProducts = (typeof productsCache !== 'undefined' ? productsCache : []);
+    productSelect.innerHTML = '<option value="">Select product…</option>' +
+      allProducts.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+
+    const profiles = await fetchAllProfiles();
+
+    saveBtn.onclick = async () => {
+      const productName = productSelect.value;
+      const costPrice = parseFloat(priceInput.value);
+      const effectiveFrom = fromInput.value;
+      if (!productName) { msgEl.textContent = 'Select a product.'; return; }
+      if (isNaN(costPrice) || costPrice < 0) { msgEl.textContent = 'Enter a valid cost price.'; return; }
+      if (!effectiveFrom) { msgEl.textContent = 'Enter an effective date.'; return; }
+      saveBtn.disabled = true; msgEl.textContent = 'Saving…';
+      try {
+        await setProductCost({ productName, costPrice, effectiveFrom, uid: user.uid });
+        msgEl.textContent = '✓ Cost price saved.';
+        showToast('Cost price saved.', 'success');
+        await renderCostList();
+      } catch (err) { msgEl.textContent = 'Error: ' + err.message; }
+      finally { saveBtn.disabled = false; }
+    };
+
+    async function renderCostList() {
+      try {
+        const costs = await fetchLatestProductCosts();
+        if (!costs.length) { listEmpty.style.display = 'block'; table.style.display = 'none'; return; }
+        listEmpty.style.display = 'none'; table.style.display = 'table';
+        tbody.innerHTML = costs.map(c => {
+          const enterer = profiles[c.updatedBy]?.name || profiles[c.updatedBy]?.email || c.updatedBy || '—';
+          return `<tr>
+            <td>${esc(c.productName)}</td>
+            <td>${esc(mwk(c.costPrice))}</td>
+            <td>${esc(c.effectiveFrom)}</td>
+            <td style="font-size:0.78rem;">${esc(enterer)}</td>
+          </tr>`;
+        }).join('');
+      } catch (err) { showToast('Could not load cost prices: ' + err.message, 'error'); }
+    }
+
+    await renderCostList();
+  }
+
   // Default landing view per role — called last, after every section
   // above has run its setup code (their `let`/`const` state variables
   // need to exist before showView() can safely trigger their loaders).
@@ -4765,6 +5057,23 @@ async function initDeliveryApp(user) {
     resetDeliveryExpenseForm();
   });
 
+  // Phase 1 Stage 4: the vehicle assigned to this driver (exactly one active), attached to fuel entries automatically.
+  let myVehicleId = null;
+  fetchActiveVehicles().then(vs => {
+    const mine = vs.filter(v => v.assignedToUid === user.uid);
+    myVehicleId = mine.length === 1 ? mine[0].id : null;
+  }).catch(() => {});
+
+  // ---- Phase 1 Stage 3: the driver's cash float and expense claims ----
+  const deliveryFloatToggleBtn = document.getElementById('deliveryFloatToggleBtn');
+  const deliveryFloatPanel = document.getElementById('deliveryFloatPanel');
+  deliveryFloatToggleBtn.addEventListener('click', async () => {
+    const opening = deliveryFloatPanel.style.display === 'none';
+    deliveryFloatPanel.style.display = opening ? 'block' : 'none';
+    // Drivers cannot read staff profiles (users rules), so names fall back to the stored emails.
+    if (opening) await loadMyFloatView({ user, role: 'deliverer', body: document.getElementById('deliveryFloatBody') });
+  });
+
   deliveryExpenseForm.querySelectorAll('.delivery-expense-cat-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       selectedExpenseCategory = btn.dataset.category;
@@ -4785,9 +5094,11 @@ async function initDeliveryApp(user) {
     deliveryExpenseSaveBtn.textContent = 'Saving…';
     try {
       await addExpense({
-        date: new Date().toISOString().slice(0, 10),
+        date: malawiDate(),   // Malawi calendar day (was the UTC day, which put 00:00-02:00 entries on the previous day)
         category: selectedExpenseCategory, amount, notes: '',
         uid: user.uid, email: user.email,
+        // Phase 1 Stage 4: fuel is tied to the driver's assigned vehicle (Vehicles tab) for the Fuel by Vehicle report.
+        vehicleId: selectedExpenseCategory === 'Fuel' ? myVehicleId : null,
       });
       showToast('Expense saved.', 'success');
       deliveryExpenseForm.style.display = 'none';

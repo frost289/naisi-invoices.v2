@@ -449,7 +449,9 @@ service cloud.firestore {
     function expenseFieldsOk(d) {
       let allowed = ['date', 'category', 'amount', 'notes', 'createdBy', 'createdByEmail', 'createdAt', 'updatedAt',
                      'payee', 'paidBy', 'paymentMethod', 'receiptReference', 'businessPurpose',
-                     'vehicleId', 'litres', 'route'];
+                     'vehicleId', 'litres', 'route',
+                     // Phase 1 optional fields (src/expenses.js addExpense)
+                     'subcategory', 'reportId', 'floatPeriodId'];
       return d.keys().hasAll(['date', 'category', 'amount', 'createdBy', 'createdByEmail']) &&
              d.keys().hasOnly(allowed);
     }
@@ -832,6 +834,336 @@ service cloud.firestore {
       allow create, update: if request.auth != null && request.auth.uid == uid &&
         request.resource.data.email == request.auth.token.email;
       allow delete: if false;
+    }
+
+    // =====================================================================
+    // PHASE 1, STAGE 1 — EXPENSE CONTROL FOUNDATION
+    // Added 2026-10-31. get() budget: +20 (projected total: 101, well within 1,000 limit).
+    // =====================================================================
+
+    // ---------- Phase 1 path helpers ----------
+    function floatSettingsPath(uid) { return /databases/$(database)/documents/floatSettings/$(uid); }
+    function floatPeriodPath(id) { return /databases/$(database)/documents/floatPeriods/$(id); }
+    function moneyIssuedPath(id) { return /databases/$(database)/documents/moneyIssued/$(id); }
+
+    // ---------- floatSettings/{uid} ----------
+    // One document per staff member who holds a cash float. Document id = uid.
+    // Reads: manager, or the person themself (single get only). Writes: manager only.
+    // openPeriodId (Stage 2) points to the person's ONE open period. It may only change together with that period:
+    //   null -> X  only when period X is created open for this person in the same commit;
+    //   X -> null  only when period X is closed in the same commit.
+    function floatPointerOk(staffUid) {
+      let before = resource == null ? null : resource.data.get('openPeriodId', null);
+      let after = request.resource.data.get('openPeriodId', null);
+      return before == after ||
+        (before == null && after is string && !exists(floatPeriodPath(after)) &&
+          getAfter(floatPeriodPath(after)).data.status == 'open' &&
+          getAfter(floatPeriodPath(after)).data.staffUid == staffUid) ||
+        (after == null && before is string &&
+          getAfter(floatPeriodPath(before)).data.status == 'closed');
+    }
+    match /floatSettings/{staffUid} {
+      allow get:  if isManager() || (request.auth != null && request.auth.uid == staffUid);
+      allow list: if isManager();
+      allow create, update: if isManager() &&
+        request.resource.data.staffUid == staffUid &&
+        request.resource.data.staffEmail is string &&
+        request.resource.data.floatTarget is number &&
+        request.resource.data.floatTarget >= 0 &&
+        request.resource.data.allowedCategories is list &&
+        request.resource.data.updatedBy == request.auth.uid &&
+        floatPointerOk(staffUid);
+      allow delete: if false;
+    }
+
+    // ---------- vehicles/{vehicleId} ----------
+    // Manager manages vehicles; deliverers read (to select a vehicle when logging fuel).
+    // Soft-delete only (active = false field) — financial records referencing a vehicle must remain.
+    match /vehicles/{vehicleId} {
+      allow read:   if isManager() || isDeliverer();             // no extra get() (role functions already counted)
+      allow create: if isManager() &&
+        request.resource.data.registration is string &&
+        request.resource.data.registration.size() > 0 &&
+        request.resource.data.active == true &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if isManager() &&
+        // Prevent hard-delete workarounds: only allow recognised field changes.
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['registration', 'description', 'assignedToUid', 'active', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // ---------- productCosts/{id} ----------
+    // Cost price history. Manager reads and writes; no other role has access.
+    // Append-only by convention (each price change is a new doc); no delete or overwrite.
+    match /productCosts/{costId} {
+      allow read:   if isManager();
+      allow create: if isManager() &&
+        request.resource.data.productName is string &&
+        request.resource.data.productName.size() > 0 &&
+        request.resource.data.costPrice is number &&
+        request.resource.data.costPrice >= 0 &&
+        request.resource.data.effectiveFrom is string &&
+        request.resource.data.updatedBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---------- floatPeriods/{periodId}  (Stage 2) ----------
+    // id fp_<staffUid>_<YYYYMMDD>_<request>. The ledger summary of one float period (src/floatPeriods.js).
+    // Created open, with zero totals, in the same commit that points floatSettings.openPeriodId at it (and only if
+    // no period was open). While open, totalIssued changes ONLY together with the moneyIssued record named in
+    // lastMovementId, by exactly that record's amount (+ issue, - reversal). Closing freezes closingBalance and
+    // proposedTopUp, which must equal the formula, and clears the pointer. A closed period never changes.
+    // totalApproved changes ONLY with an approved expense line, by exactly its amount (periodApprovalOk, Stage 3).
+    function periodMovementOk(periodId) {
+      let mid = request.resource.data.lastMovementId;
+      let m = getAfter(moneyIssuedPath(mid)).data;
+      let delta = request.resource.data.totalIssued - resource.data.totalIssued;
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalIssued', 'lastMovementId', 'updatedAt']) &&
+        request.resource.data.status == 'open' &&
+        mid is string && mid != resource.data.get('lastMovementId', null) &&
+        !exists(moneyIssuedPath(mid)) &&
+        m.floatPeriodId == periodId &&
+        ((m.kind == 'issue' && math.abs(delta - m.amount) <= 0.01) ||
+         (m.kind == 'reversal' && math.abs(delta + m.amount) <= 0.01));
+    }
+    // Stage 3: approving an expense line adds exactly its amount to the owner's open period, in the same commit.
+    function periodApprovalOk(periodId) {
+      let lid = request.resource.data.lastApprovalLineId;
+      let before = get(expenseLinePath(lid)).data;
+      let after = getAfter(expenseLinePath(lid)).data;
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalApproved', 'lastApprovalLineId', 'updatedAt']) &&
+        lid is string &&
+        before.lineStatus == 'pending' && after.lineStatus == 'approved' &&
+        after.approvedInPeriodId == periodId &&
+        before.ownerUid == resource.data.staffUid &&
+        math.abs(request.resource.data.totalApproved - resource.data.totalApproved - before.amount) <= 0.01;
+    }
+    function periodCloseOk(periodId) {
+      let d = request.resource.data;
+      let closing = resource.data.openingBalance + resource.data.totalIssued - resource.data.totalApproved;
+      let gap = resource.data.floatTarget - closing;
+      return d.diff(resource.data).affectedKeys().hasOnly(['status', 'closingBalance', 'proposedTopUp', 'notes', 'closedBy', 'closedAt', 'updatedAt']) &&
+        d.status == 'closed' &&
+        d.closedBy == request.auth.uid &&
+        d.closingBalance is number && math.abs(d.closingBalance - closing) <= 0.01 &&
+        d.proposedTopUp is number &&
+        ((gap > 0 && math.abs(d.proposedTopUp - gap) <= 0.01) || (gap <= 0 && d.proposedTopUp == 0)) &&
+        getAfter(floatSettingsPath(resource.data.staffUid)).data.get('openPeriodId', null) != periodId;
+    }
+    match /floatPeriods/{periodId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.staffUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.staffUid == request.auth.uid);
+      allow create: if isManager() &&
+        request.resource.data.keys().hasOnly(['staffUid', 'staffEmail', 'status', 'openingBalance', 'floatTarget',
+          'totalIssued', 'totalApproved', 'lastMovementId', 'startDate', 'openedBy', 'openedAt', 'updatedAt']) &&
+        request.resource.data.staffUid is string &&
+        periodId.matches('fp_' + request.resource.data.staffUid + '_[0-9]{8}_[A-Za-z0-9]{1,8}') &&
+        request.resource.data.status == 'open' &&
+        request.resource.data.openingBalance is number &&
+        request.resource.data.floatTarget is number &&
+        request.resource.data.totalIssued == 0 &&
+        request.resource.data.totalApproved == 0 &&
+        request.resource.data.lastMovementId == null &&
+        request.resource.data.openedBy == request.auth.uid &&
+        get(floatSettingsPath(request.resource.data.staffUid)).data.get('openPeriodId', null) == null &&
+        getAfter(floatSettingsPath(request.resource.data.staffUid)).data.openPeriodId == periodId;
+      allow update: if isManager() &&
+        resource.data.status == 'open' &&
+        ((request.resource.data.status == 'open' &&
+            request.resource.data.get('lastApprovalLineId', null) == resource.data.get('lastApprovalLineId', null) &&
+            periodMovementOk(periodId)) ||
+         (request.resource.data.status == 'open' &&
+            request.resource.data.get('lastApprovalLineId', null) != resource.data.get('lastApprovalLineId', null) &&
+            periodApprovalOk(periodId)) ||
+         (request.resource.data.status == 'closed' && periodCloseOk(periodId)));
+      allow delete: if false;
+    }
+
+    // ---------- moneyIssued/{id}  (Stage 2) ----------
+    // Issue:    id mi_<recipientUid>_<request>, kind 'issue'.
+    // Reversal: id mr_<originalId>, kind 'reversal', same amount/recipient/period as the original, which gets
+    //           reversedById in the same commit. An issue can be reversed once. Nothing is ever deleted.
+    // Either kind must be written together with its open period's running total (lastMovementId == this id).
+    function issuedKeysOk(d) {
+      return d.keys().hasOnly(['kind', 'recipientUid', 'recipientEmail', 'amount', 'method', 'reference', 'notes',
+        'floatPeriodId', 'issuedBy', 'issuedByEmail', 'issuedAt', 'reversedById', 'reversesId']);
+    }
+    function reversalOk(issuedId, d) {
+      let o = get(moneyIssuedPath(d.reversesId)).data;
+      return d.reversesId is string && issuedId == 'mr_' + d.reversesId &&
+        o.kind == 'issue' && o.get('reversedById', null) == null &&
+        o.amount == d.amount && o.recipientUid == d.recipientUid && o.floatPeriodId == d.floatPeriodId &&
+        getAfter(moneyIssuedPath(d.reversesId)).data.reversedById == issuedId;
+    }
+    match /moneyIssued/{issuedId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.recipientUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.recipientUid == request.auth.uid);
+      allow create: if isManager() &&
+        issuedKeysOk(request.resource.data) &&
+        request.resource.data.issuedBy == request.auth.uid &&
+        request.resource.data.amount is number &&
+        request.resource.data.amount > 0 && request.resource.data.amount <= 1000000000 &&
+        request.resource.data.reversedById == null &&
+        request.resource.data.floatPeriodId is string &&
+        get(floatPeriodPath(request.resource.data.floatPeriodId)).data.status == 'open' &&
+        get(floatPeriodPath(request.resource.data.floatPeriodId)).data.staffUid == request.resource.data.recipientUid &&
+        getAfter(floatPeriodPath(request.resource.data.floatPeriodId)).data.lastMovementId == issuedId &&
+        ((request.resource.data.kind == 'issue' &&
+          issuedId.matches('mi_' + request.resource.data.recipientUid + '_[A-Za-z0-9]{1,24}')) ||
+         (request.resource.data.kind == 'reversal' && reversalOk(issuedId, request.resource.data)));
+      // The only change ever made to a record: marking an issue as reversed, together with its reversal record.
+      allow update: if isManager() &&
+        resource.data.kind == 'issue' &&
+        resource.data.get('reversedById', null) == null &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reversedById', 'reversedAt']) &&
+        request.resource.data.reversedById == 'mr_' + issuedId &&
+        existsAfter(moneyIssuedPath('mr_' + issuedId));
+      allow delete: if false;
+    }
+
+    // ---------- expenseReports / expenseLines  (Stage 3) ----------
+    // A float holder (rep or deliverer) drafts a report of claimed expenses and submits it; a manager approves or
+    // rejects each line. src/expenseReports.js. Nothing financial is deleted: only a DRAFT line can be removed.
+    //   Report: status draft -> submitted -> reviewed (submitted -> draft only by a manager, before any decision).
+    //           lineCount / lastLineChange move with every line add or remove (one line per commit).
+    //           decidedCount / approvedTotal / rejectedTotal / lastDecisionLineId move with every decision.
+    //   Line:   lineStatus pending -> approved | rejected, once. An approval adds the amount to the owner's open
+    //           float period in the same commit (periodApprovalOk); a rejection touches no money.
+    function expenseReportPath(id) { return /databases/$(database)/documents/expenseReports/$(id); }
+    function expenseLinePath(id) { return /databases/$(database)/documents/expenseLines/$(id); }
+
+    // Claimable categories: the role's set (src/expenseCategories.js CLAIM_CATEGORIES), narrowed by the manager's
+    // ticked list in floatSettings when that list is not empty. Fuel is outside the float system.
+    function claimCategoryOk(d) {
+      let allowed = get(floatSettingsPath(request.auth.uid)).data.get('allowedCategories', []);
+      return ((isSubmitter() && d.category in ['Transport', 'Meals', 'Other', 'EmergencyCash']) ||
+              (isDeliverer() && d.category in ['Transport', 'Meals', 'Other', 'VehicleMaintenance'])) &&
+             (allowed.size() == 0 || d.category in allowed);
+    }
+    function lineValuesOk(d) {
+      return d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}') &&
+        d.amount is number && d.amount > 0 && d.amount <= 10000000 &&
+        d.notes is string && d.notes.size() > 0 && d.notes.size() <= 300 &&
+        d.subcategory is string && d.payee is string && d.receiptRef is string &&
+        (d.vehicleId == null || d.vehicleId is string) &&
+        claimCategoryOk(d);
+    }
+    function reportOwnerDraft(id) {
+      let r = get(expenseReportPath(id)).data;
+      return r.ownerUid == request.auth.uid && r.status == 'draft';
+    }
+
+    match /expenseReports/{reportId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.ownerUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.ownerUid == request.auth.uid);
+      allow create: if (isSubmitter() || isDeliverer()) &&
+        request.resource.data.keys().hasOnly(['ownerUid', 'ownerEmail', 'ownerRole', 'title', 'status', 'lineCount',
+          'lastLineChange', 'decidedCount', 'approvedTotal', 'rejectedTotal', 'lastDecisionLineId', 'returnNote',
+          'createdAt', 'updatedAt', 'submittedAt']) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        reportId.matches('er_' + request.auth.uid + '_[A-Za-z0-9]{1,24}') &&
+        request.resource.data.ownerRole in ['rep', 'deliverer'] &&
+        request.resource.data.status == 'draft' &&
+        request.resource.data.lineCount == 0 && request.resource.data.decidedCount == 0 &&
+        request.resource.data.approvedTotal == 0 && request.resource.data.rejectedTotal == 0 &&
+        request.resource.data.submittedAt == null &&
+        exists(floatSettingsPath(request.auth.uid));
+
+      // Owner, while draft: one line added or removed (count moves by exactly one, with that line), or submit.
+      function lineCountChangeOk() {
+        let lid = request.resource.data.lastLineChange;
+        let delta = request.resource.data.lineCount - resource.data.lineCount;
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lineCount', 'lastLineChange', 'updatedAt']) &&
+          lid is string && request.resource.data.lineCount >= 0 && request.resource.data.lineCount <= 30 &&
+          ((delta == 1 && !exists(expenseLinePath(lid)) && existsAfter(expenseLinePath(lid))) ||
+           (delta == -1 && exists(expenseLinePath(lid)) && !existsAfter(expenseLinePath(lid))));
+      }
+      function submitOk() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'submittedAt', 'returnNote', 'updatedAt']) &&
+          request.resource.data.status == 'submitted' && resource.data.lineCount >= 1;
+      }
+      // Manager, while submitted: one decision on one of this report's pending lines, totals moved by its amount.
+      function decisionOk() {
+        let d = request.resource.data;
+        let lid = d.lastDecisionLineId;
+        let before = get(expenseLinePath(lid)).data;
+        let after = getAfter(expenseLinePath(lid)).data;
+        return d.diff(resource.data).affectedKeys().hasOnly(['decidedCount', 'approvedTotal', 'rejectedTotal',
+            'lastDecisionLineId', 'status', 'reviewedBy', 'reviewedAt', 'updatedAt']) &&
+          lid is string && lid != resource.data.get('lastDecisionLineId', null) &&
+          before.reportId == reportId && before.lineStatus == 'pending' &&
+          d.decidedCount == resource.data.decidedCount + 1 &&
+          ((after.lineStatus == 'approved' &&
+              math.abs(d.approvedTotal - resource.data.approvedTotal - before.amount) <= 0.01 &&
+              d.rejectedTotal == resource.data.rejectedTotal) ||
+           (after.lineStatus == 'rejected' &&
+              math.abs(d.rejectedTotal - resource.data.rejectedTotal - before.amount) <= 0.01 &&
+              d.approvedTotal == resource.data.approvedTotal)) &&
+          ((d.decidedCount == resource.data.lineCount && d.status == 'reviewed' && d.reviewedBy == request.auth.uid) ||
+           (d.decidedCount < resource.data.lineCount && d.status == 'submitted'));
+      }
+      function returnOk() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'returnNote', 'updatedAt']) &&
+          request.resource.data.status == 'draft' && resource.data.decidedCount == 0 &&
+          request.resource.data.returnNote is string && request.resource.data.returnNote.size() > 0;
+      }
+      allow update: if
+        ((isSubmitter() || isDeliverer()) && resource.data.ownerUid == request.auth.uid && resource.data.status == 'draft' &&
+          (lineCountChangeOk() || submitOk() ||
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt']))) ||
+        (isManager() && resource.data.status == 'submitted' &&
+          ((request.resource.data.status != 'draft' && decisionOk()) ||
+           (request.resource.data.status == 'draft' && returnOk())));
+      // An empty draft may be thrown away by its owner. Anything with lines, or submitted, is kept.
+      allow delete: if (isSubmitter() || isDeliverer()) && resource.data.ownerUid == request.auth.uid &&
+        resource.data.status == 'draft' && resource.data.lineCount == 0;
+    }
+
+    match /expenseLines/{lineId} {
+      allow get:  if isManager() ||
+        (request.auth != null && resource != null && resource.data.ownerUid == request.auth.uid);
+      allow list: if isManager() ||
+        (request.auth != null && resource.data.ownerUid == request.auth.uid);
+      allow create: if (isSubmitter() || isDeliverer()) &&
+        request.resource.data.keys().hasOnly(['date', 'category', 'subcategory', 'amount', 'notes', 'payee', 'receiptRef',
+          'vehicleId', 'ownerUid', 'reportId', 'lineStatus', 'decidedBy', 'decisionNote', 'approvedInPeriodId',
+          'createdAt', 'updatedAt']) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        lineId.matches('el_' + request.auth.uid + '_[A-Za-z0-9]{1,24}') &&
+        request.resource.data.lineStatus == 'pending' &&
+        request.resource.data.decidedBy == null && request.resource.data.approvedInPeriodId == null &&
+        reportOwnerDraft(request.resource.data.reportId) &&
+        getAfter(expenseReportPath(request.resource.data.reportId)).data.lastLineChange == lineId &&
+        lineValuesOk(request.resource.data);
+      allow update: if
+        // Owner edits a pending line of their own draft report (values only).
+        ((isSubmitter() || isDeliverer()) && resource.data.ownerUid == request.auth.uid &&
+          resource.data.lineStatus == 'pending' && reportOwnerDraft(resource.data.reportId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['date', 'category', 'subcategory', 'amount',
+            'notes', 'payee', 'receiptRef', 'vehicleId', 'updatedAt']) &&
+          lineValuesOk(request.resource.data)) ||
+        // Manager decides a pending line of a submitted report, together with the report (and the float when approved).
+        (isManager() && resource.data.lineStatus == 'pending' &&
+          get(expenseReportPath(resource.data.reportId)).data.status == 'submitted' &&
+          getAfter(expenseReportPath(resource.data.reportId)).data.lastDecisionLineId == lineId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lineStatus', 'decidedBy', 'decidedAt',
+            'decisionNote', 'approvedInPeriodId', 'updatedAt']) &&
+          request.resource.data.decidedBy == request.auth.uid &&
+          ((request.resource.data.lineStatus == 'rejected' && request.resource.data.approvedInPeriodId == null &&
+              request.resource.data.decisionNote is string && request.resource.data.decisionNote.size() > 0) ||
+           (request.resource.data.lineStatus == 'approved' && request.resource.data.approvedInPeriodId is string &&
+              getAfter(floatPeriodPath(request.resource.data.approvedInPeriodId)).data.lastApprovalLineId == lineId)));
+      // Only a pending line of the owner's own draft report can be removed, together with the report's count.
+      allow delete: if (isSubmitter() || isDeliverer()) && resource.data.ownerUid == request.auth.uid &&
+        resource.data.lineStatus == 'pending' && reportOwnerDraft(resource.data.reportId) &&
+        getAfter(expenseReportPath(resource.data.reportId)).data.lastLineChange == lineId;
     }
   }
 }

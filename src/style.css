@@ -627,3 +627,10 @@ input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; accent-colo
 .sched-unavailable { margin:0; padding:12px 14px; font-size:0.78rem; line-height:1.45; color:#5c4a1e; background:#fbf6e9; border-bottom:1px solid var(--line); }
 .sched-day.is-unavailable .sched-day-stats { color:#7a5210; font-weight:600; }
 .st-uncertain .sched-ico { background:#efeaf7; color:#6a3fa0; } .st-uncertain .sched-status { color:#6a3fa0; }
+
+/* Phase 1 float screens (src/floatUi.js) */
+.fp-tiles { grid-template-columns: repeat(3, 1fr); }
+.fp-tile { background: var(--surface2, #f3f2ec); }
+.fp-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.fp-scroll table th, .fp-scroll table td { white-space: nowrap; }
+@media (max-width: 600px) { .exp-summary-tiles.fp-tiles { grid-template-columns: repeat(2, 1fr); } }
