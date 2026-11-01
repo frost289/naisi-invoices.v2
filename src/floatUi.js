@@ -291,6 +291,22 @@ export async function loadMyFloatView({ user, profiles = {}, role = 'rep', body 
     return;
   }
   body.innerHTML = floatHtml;
+  // My Float History (Stage 4): own closed periods, newest first.
+  try {
+    const closed = (await fetchPeriodsForStaff(user.uid)).filter(p => p.status === 'closed');
+    if (closed.length) {
+      const hist = document.createElement('div');
+      hist.innerHTML = `<h3 style="margin-top:1.5rem;">${esc('My float history')}</h3>
+        <div class="fp-scroll"><table class="items-table" style="width:100%;">
+          <thead><tr><th>Period</th><th>Received</th><th>Approved</th><th>Closing</th><th>Opening</th></tr></thead>
+          <tbody>${closed.map(h => `<tr>
+            <td style="font-size:0.8rem;">${esc((h.startDate || '') + ' to ' + fmtDay(h.closedAt))}</td>
+            <td>${esc(mwk(h.totalIssued || 0))}</td><td>${esc(mwk(h.totalApproved || 0))}</td>
+            <td>${esc(mwk(h.closingBalance || 0))}</td><td>${esc(mwk(h.openingBalance || 0))}</td>
+          </tr>`).join('')}</tbody></table></div>`;
+      body.append(hist);
+    }
+  } catch (e) { /* history is a convenience; the current period above is what matters */ }
   const heading = document.createElement('h3');
   heading.style.marginTop = '1.5rem';
   heading.textContent = 'My expense claims';

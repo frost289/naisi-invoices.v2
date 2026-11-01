@@ -115,6 +115,7 @@
   <button type="button" class="nav-tab" data-view="customers" id="navCustomersBtn">Customers</button>
   <button type="button" class="nav-tab" data-view="expenses" id="navExpensesBtn">Expenses</button>
   <button type="button" class="nav-tab" data-view="approvals" id="navApprovalsBtn">Expense Approvals</button>
+  <button type="button" class="nav-tab" data-view="controlReports" id="navControlReportsBtn">Expense Reports</button>
   <button type="button" class="nav-tab" data-view="floatPeriods" id="navFloatPeriodsBtn">Float Periods</button>
   <button type="button" class="nav-tab" data-view="floatSettings" id="navFloatSettingsBtn">Float Settings</button>
   <button type="button" class="nav-tab" data-view="vehicles" id="navVehiclesBtn">Vehicles</button>
@@ -701,6 +702,24 @@
     <div id="approvalsBody"></div>
   </div>
   <div class="card" id="approvalsDetail" style="display:none;"></div>
+</div>
+
+<!-- ===================== EXPENSE CONTROL REPORTS (manager only — Stage 4) ===================== -->
+<div id="controlReportsView" class="list-section" style="display:none;">
+  <div class="card">
+    <h2><span class="dot"></span>Expense Reports</h2>
+    <div class="field"><label>Report</label><select id="crReport"></select></div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+      <div class="field"><label>From</label><input type="date" id="crFrom"></div>
+      <div class="field"><label>To</label><input type="date" id="crTo"></div>
+    </div>
+    <div class="field"><label>Person</label><select id="crPerson" disabled><option value="">Everyone</option></select></div>
+    <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+      <button type="button" class="generate-btn" id="crRunBtn" style="width:auto;">Run report</button>
+      <button type="button" class="list-action-btn" id="crExportBtn" disabled>Download Excel</button>
+    </div>
+  </div>
+  <div class="card"><div id="crOutput"><p style="color:var(--muted); font-size:0.85rem;">Choose a report and press Run.</p></div></div>
 </div>
 
 <!-- ===================== FLOAT PERIODS VIEW (manager only — M3 + M2 Issue Money) ===================== -->

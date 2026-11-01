@@ -86,6 +86,7 @@ import { fetchAllFloatSettings, fetchFloatSettings, setFloatSettings } from './f
 import { fetchLatestProductCosts, setProductCost } from './productCosts.js';
 import { loadFloatPeriodsView, loadMyFloatView } from './floatUi.js';
 import { loadApprovalsView } from './claimsUi.js';
+import { initControlReportsView } from './controlReportsUi.js';
 
 initOfflineBanner();
 
@@ -276,6 +277,7 @@ async function initApp(user, role) {
     myvisits: document.getElementById('myvisitsView'),
     // Phase 1 — manager screens
     approvals: document.getElementById('approvalsView'),
+    controlReports: document.getElementById('controlReportsView'),
     floatPeriods: document.getElementById('floatPeriodsView'),
     myfloat: document.getElementById('myFloatView'),
     floatSettings: document.getElementById('floatSettingsView'),
@@ -297,6 +299,7 @@ async function initApp(user, role) {
     myvisits: document.getElementById('navMyVisitsBtn'),
     // Phase 1 — nav buttons
     approvals: document.getElementById('navApprovalsBtn'),
+    controlReports: document.getElementById('navControlReportsBtn'),
     floatPeriods: document.getElementById('navFloatPeriodsBtn'),
     myfloat: document.getElementById('navMyFloatBtn'),
     floatSettings: document.getElementById('navFloatSettingsBtn'),
@@ -305,7 +308,7 @@ async function initApp(user, role) {
   };
 
   const managerOnlyNav = ['invoices', 'products', 'performance', 'summary', 'deliveries', 'schedule',
-    'approvals', 'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
+    'approvals', 'controlReports', 'floatPeriods', 'floatSettings', 'vehicles', 'productCosts'];
   const submitterOnlyNav = ['logvisit', 'myvisits', 'myfloat'];
 
   managerOnlyNav.forEach(k => { navBtns[k].style.display = isManager ? 'inline-flex' : 'none'; });
@@ -346,6 +349,7 @@ async function initApp(user, role) {
     floatPeriods: async () => { if (isManager) await loadFloatPeriodsView({ user, profiles: await fetchAllProfiles() }); },
     myfloat: async () => loadMyFloatView({ user, profiles: await fetchAllProfiles(), role: 'rep' }),
     approvals: async () => { if (isManager) await loadApprovalsView({ user, profiles: await fetchAllProfiles() }); },
+    controlReports: async () => { if (isManager) initControlReportsView({ profiles: await fetchAllProfiles() }); },
     floatSettings: resetAndLoadFloatSettings,
     vehicles: resetAndLoadVehicles,
     productCosts: resetAndLoadProductCosts,
@@ -5053,6 +5057,13 @@ async function initDeliveryApp(user) {
     resetDeliveryExpenseForm();
   });
 
+  // Phase 1 Stage 4: the vehicle assigned to this driver (exactly one active), attached to fuel entries automatically.
+  let myVehicleId = null;
+  fetchActiveVehicles().then(vs => {
+    const mine = vs.filter(v => v.assignedToUid === user.uid);
+    myVehicleId = mine.length === 1 ? mine[0].id : null;
+  }).catch(() => {});
+
   // ---- Phase 1 Stage 3: the driver's cash float and expense claims ----
   const deliveryFloatToggleBtn = document.getElementById('deliveryFloatToggleBtn');
   const deliveryFloatPanel = document.getElementById('deliveryFloatPanel');
@@ -5083,9 +5094,11 @@ async function initDeliveryApp(user) {
     deliveryExpenseSaveBtn.textContent = 'Saving…';
     try {
       await addExpense({
-        date: new Date().toISOString().slice(0, 10),
+        date: malawiDate(),   // Malawi calendar day (was the UTC day, which put 00:00-02:00 entries on the previous day)
         category: selectedExpenseCategory, amount, notes: '',
         uid: user.uid, email: user.email,
+        // Phase 1 Stage 4: fuel is tied to the driver's assigned vehicle (Vehicles tab) for the Fuel by Vehicle report.
+        vehicleId: selectedExpenseCategory === 'Fuel' ? myVehicleId : null,
       });
       showToast('Expense saved.', 'success');
       deliveryExpenseForm.style.display = 'none';
